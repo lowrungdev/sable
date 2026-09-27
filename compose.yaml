@@ -1,0 +1,131 @@
+# sable — a Nextcloud Talk bot.  Full reference: docs/configuration.md
+#
+# There are two places to put settings, and they stack:
+#
+#   1. a .env file next to this one — optional, loaded below, and the right home
+#      for secrets, since this file is meant to be committed;
+#   2. the environment: block below, which OVERRIDES anything from .env.
+#
+# Only SABLE_BOT_SECRET is required. Every other variable is listed, commented
+# out, showing its default — uncomment to change it.
+#
+# Quote every value. Compose coerces plain scalars to strings, but YAML itself
+# would read {} as an empty mapping and treat a leading ! as a type tag — which
+# is a parse error, and the default command prefix is exactly that.
+
+services:
+  sable:
+    build: .
+    image: sable:latest
+    container_name: sable
+    restart: unless-stopped
+
+    env_file:
+      - path: .env
+        required: false
+
+    environment:
+      # ===================== REQUIRED =====================================
+      # The shared secret, identical to the one given to
+      # `occ talk:bot:install`. 40–128 characters: openssl rand -hex 32
+      # Read from .env or the shell, so the value stays out of this file.
+      SABLE_BOT_SECRET: "${SABLE_BOT_SECRET:?required — put it in .env (see docs/deployment.md)}"
+
+      # ===================== Talk bot identity ============================
+      # Your Nextcloud base URL, no trailing slash. Optional for the webhook
+      # path — each signed event carries the server URL in a header — but
+      # required for /notify, and without it backend pinning cannot run.
+      # Strongly recommended.
+      # SABLE_NEXTCLOUD_URL: "https://cloud.example.org"
+
+      # Name mention detection matches on; keep it in step with the name you
+      # installed the bot under.
+      # SABLE_BOT_NAME: "sable"
+
+      # Reject webhooks whose backend header is not SABLE_NEXTCLOUD_URL.
+      # Ignored when no URL is set.
+      # SABLE_PIN_BACKEND: "true"
+
+      # ===================== Chat behaviour ===============================
+      # SABLE_COMMAND_PREFIX: "!"
+
+      # Conversations where every message goes to the model, no mention
+      # needed: comma-separated tokens, or * for all. Empty = mentions only.
+      # SABLE_AI_ROOMS: ""
+
+      # Post answers as threaded replies to the triggering message.
+      # SABLE_REPLY_AS_REPLY: "false"
+
+      # Emoji to stick on a message while the model thinks; empty disables it.
+      # SABLE_THINKING_REACTION: "👀"
+
+      # Reply "I have no !foo command" on an unknown command.
+      # SABLE_UNKNOWN_COMMAND_HINT: "true"
+
+      # Post failures into the conversation as well as logging them.
+      # SABLE_REPORT_ERRORS: "true"
+
+      # Replies longer than this are clipped; Talk's own ceiling is 32000.
+      # SABLE_MAX_MESSAGE_CHARS: "30000"
+
+      # ===================== Conversation memory ==========================
+      # In-process and lost on restart. A turn is a question plus its answer.
+      # SABLE_HISTORY_TURNS: "12"
+
+      # Seconds before a message ages out; 0 disables expiry.
+      # SABLE_HISTORY_TTL: "3600"
+
+      # ===================== The model ====================================
+      # Any OpenAI /chat/completions-compatible endpoint. Recipes for Ollama,
+      # vLLM, LiteLLM, OpenRouter and others: docs/configuration.md
+      # SABLE_LLM_BASE_URL: "https://api.openai.com/v1"
+
+      # Secret — keep the value in .env, not here.
+      # SABLE_LLM_API_KEY: "${SABLE_LLM_API_KEY:-}"
+
+      # THE ASSISTANT IS OFF UNTIL THIS IS SET. Commands work regardless.
+      # SABLE_LLM_MODEL: "gpt-4o-mini"
+
+      # SABLE_LLM_SYSTEM_PROMPT: "You are sable, a helpful assistant in a Nextcloud Talk chat room. Answer concisely. You may use Markdown."
+
+      # Both omitted from the request when unset, so the backend's own
+      # defaults apply. Some newer models reject an explicit temperature.
+      # SABLE_LLM_TEMPERATURE: "0.2"
+      # SABLE_LLM_MAX_TOKENS: "800"
+
+      # Seconds to wait for a completion. Raise it for slow local models.
+      # SABLE_LLM_TIMEOUT: "120"
+
+      # JSON object merged into the request body last, for provider-specific
+      # fields. Single-quote it so YAML does not read it as a mapping.
+      # SABLE_LLM_EXTRA_BODY: '{"top_k": 40}'
+
+      # ===================== Alerting endpoint ============================
+      # Bearer token for POST /notify. EMPTY DISABLES THE ROUTE (404).
+      # Unrelated to the bot secret — generate a separate value, in .env.
+      # SABLE_NOTIFY_TOKEN: "${SABLE_NOTIFY_TOKEN:-}"
+
+      # Aliases so callers never need conversation tokens.
+      # SABLE_NOTIFY_ROOMS: "alerts=a1b2c3d4,deploys=e5f6g7h8"
+
+      # ===================== Process ======================================
+      # Leave the bind address alone: it is the container's own interface,
+      # and the ports mapping below decides what is reachable from outside.
+      # SABLE_HOST: "0.0.0.0"
+
+      # Changing this means changing the ports mapping below to match; the
+      # image's healthcheck follows it on its own.
+      # SABLE_PORT: "8080"
+
+      # DEBUG also logs why a message was NOT acted on — the fastest way to
+      # debug prefix and mention matching.
+      # SABLE_LOG_LEVEL: "INFO"
+
+    ports:
+      # Published to localhost only: put a TLS-terminating reverse proxy in
+      # front of this. Nextcloud will not send webhooks to plain HTTP unless an
+      # admin has allowed local/insecure remotes. See docs/deployment.md.
+      #
+      # If the proxy also runs in Docker, delete this block, share a network and
+      # let it reach sable:8080 directly.
+      - "127.0.0.1:8080:8080"
