@@ -1,135 +1,134 @@
 # Purpose
 
-What sable is for, what it deliberately is not, and why it is built the way it is.
+What sable is for, what it deliberately leaves alone, and why it is built this way.
 
 ## The problem
 
-Nextcloud Talk is where a lot of teams already are. Getting anything *into* it programmatically
-— an alert, an answer, a small internal tool — normally means one of:
+Nextcloud Talk is where a lot of teams already are, but getting something into it
+programmatically is awkward. You can write a Nextcloud app in PHP, which means shipping and
+maintaining real server-side code against Nextcloud releases. You can run a bot user account
+that long-polls the chat API, which works but holds a connection open per conversation, ties up
+a PHP worker for each one, and appears in the room as a person rather than a bot. Or you can use
+Talk's webhook Bot API, which is the supported path but leaves you to implement the signature
+scheme, the ActivityStreams payloads and the reply endpoints yourself.
 
-- a **PHP Nextcloud app**, which is a real app to build, ship and keep compatible with server
-  releases;
-- a **bot user account** that long-polls the chat API, which works but is chatty, needs an app
-  password, appears as a person rather than a bot, and has no signature story;
-- a **webhook bot** on Talk's official Bot API, which is the supported path but leaves you to
-  implement the signature scheme, the ActivityStreams payloads and the reply endpoints.
-
-sable is the third option, done once, with the three jobs most teams actually want from a chat
-bot already in the box.
+sable is that third option, written once, with the jobs most teams actually want from a chat bot
+already in it.
 
 ## What it does
 
-### 1. Commands
+**Commands.** A prefix router over a registry, `!` by default. It ships with `!help`, `!ping`,
+`!whoami`, `!echo`, `!ai`, `!reset` and `!version`, and a new one is a decorated async function
+that returns Markdown. This is the seam most people will use; the rest of the bot exists so that
+writing a command is boring.
 
-A prefix router (`!` by default) over a registry. `!help`, `!ping`, `!whoami`, `!echo`, `!ai`,
-`!reset` and `!version` ship with it; a new command is a decorated async function that returns
-Markdown. This is the seam most people will use — the rest of the bot exists so that this part
-is boring to write.
+**An assistant.** Mention the bot and it answers through any endpoint that speaks OpenAI's
+`/chat/completions` shape, keeping a short rolling history per conversation. React to a message
+with ⁉️ and it answers that message instead, threaded underneath it.
 
-### 2. A model-agnostic assistant
-
-Mention the bot and it answers through an OpenAI `/chat/completions`-compatible endpoint, with
-a short rolling per-conversation history.
-
-"Model-agnostic" is a hard requirement, not a nice-to-have: the chat-completions shape is the
+Model-agnosticism here is a requirement rather than a nicety. The chat-completions shape is the
 one interface that OpenAI, Ollama, vLLM, llama.cpp, LiteLLM, OpenRouter, Groq and Together all
-speak. Talking that shape over plain HTTP — rather than importing a vendor SDK — means
-switching providers is a change to two environment variables, self-hosting a model needs no
-code change, and there is exactly one dependency (`httpx`) doing the work.
+speak, so talking it over plain HTTP instead of importing a vendor SDK means switching providers
+is two environment variables, self-hosting needs no code change, and one dependency does the
+work. Anything a particular provider wants that the common shape lacks goes in
+`SABLE_LLM_EXTRA_BODY` and is merged into the request body last.
 
-Anything a specific provider wants that the common shape lacks goes in `SABLE_LLM_EXTRA_BODY`
-as JSON and is merged into the request body last.
+**Alerting.** `POST /notify` with a bearer token puts a message in a conversation, optionally
+with a file attached. This is the outbound-only direction: CI, an alertmanager, a cron job, a
+deploy script. Aliases mean callers never need to know conversation tokens.
 
-### 3. Alerting
+## What it deliberately doesn't do
 
-`POST /notify` with a bearer token puts a message in a conversation. This is the "outbound
-only" direction: CI, Prometheus' Alertmanager, a cron job, a deploy script. Aliases
-(`alerts=a1b2c3d4`) mean callers never need to know conversation tokens.
+It does not poll. This is a webhook bot, so if you cannot expose an HTTPS endpoint to your
+Nextcloud server, it is the wrong tool. Nothing is installed into Nextcloud either, beyond the
+one row that `occ talk:bot:install` writes.
 
-## Non-goals
+Replies are not streamed. A token-by-token edit loop would hammer the API for little gain, so
+one answer is one message.
 
-Things it does not do, so you do not go looking:
+Memory is not durable. History is an in-process cache with a turn cap and a time limit, and a
+restart forgets it. That is the right default for a chat bot; if you need recall across
+restarts, `History` is one small class with three methods, and swapping it is a contained
+change.
 
-- **No polling and no bot user account.** It is a webhook bot; if you cannot expose an HTTPS
-  endpoint to your Nextcloud server, this is the wrong tool.
-- **No PHP / no Nextcloud app.** Nothing is installed into Nextcloud except one row from
-  `occ talk:bot:install`.
-- **No streaming replies.** Talk messages are posted whole; a token-by-token edit loop would
-  hammer the API for little gain. One answer, one message.
-- **No durable memory.** History is an in-process cache with a turn cap and a TTL. A restart
-  forgets. If you need recall across restarts, replace `History` — it is one small class with
-  three methods.
-- **No retrieval, tools or function calling.** The assistant sees the conversation and nothing
-  else. Hooking a tool loop in belongs in your own command, where you control the blast radius.
-- **No user or permission management.** Whether the bot is in a conversation is Talk's
-  decision, made by a moderator in the conversation settings.
-- **Not multi-tenant.** One bot, one secret, one Nextcloud. Run a second instance for a second
-  bot — they are small.
+The assistant has no retrieval, tools or function calling. It sees the conversation and nothing
+else. A tool loop belongs inside a command you write, where the blast radius is yours to decide.
 
-## Design decisions
+There is no user or permission management. Whether the bot is in a conversation is Talk's
+decision, made by a moderator. And it is not multi-tenant: one bot, one secret, one Nextcloud.
+Run a second instance if you need a second bot, since they are small.
 
-**Answer the webhook, then work.** Talk waits a short time for the webhook to return and treats
-a slow endpoint as a failure. A model call routinely takes longer than that. So `/webhook`
-verifies, parses, spawns a task and returns `200 {"status":"accepted"}` — the reply arrives
-later through the Bot API, which is exactly how a human answers a chat message too.
+One exception is worth naming, because it qualifies the first paragraph. File attachments do use
+a Nextcloud user account, since the bot API has no upload endpoint. That account is optional,
+used only on the `/notify` path and only when a file is attached; receiving stays entirely on
+the signed webhook.
 
-**The signature is the whole authentication story, in both directions.** Incoming events are
-HMAC-SHA256 over `X-Nextcloud-Talk-Random` + the *raw* body; outgoing calls are signed over the
-random plus one endpoint-specific value — the message text for `/message`, the emoji for
-reactions, the token for `ask-features`. Not the serialised JSON body. Getting this subtly
-wrong is the single most common way a Talk bot fails, so it lives in one 40-line module with
-tests that pin the construction against the documented one.
+## How it is built
 
-**Verify before parsing.** Nothing touches the payload until the signature checks out, so a
-malformed body from an unauthenticated caller cannot reach the parser.
+*Answer the webhook, then work.* Talk waits only a short time for the webhook to return and
+treats a slow endpoint as a failure, while a model call routinely takes longer than that. So
+`/webhook` verifies, parses, spawns a task and returns `200 {"status":"accepted"}`. The reply
+arrives later through the bot API, which is how a person answers a chat message too.
 
-**Pin the backend.** A signed event carries the server's own base URL in a header, and that is
-where replies go. `SABLE_PIN_BACKEND` (on by default) refuses events claiming to come from
-anywhere other than the configured Nextcloud, so a replayed webhook cannot aim the bot's
-replies at somebody else's server.
+*The signature is the whole authentication story, in both directions.* Incoming events are
+HMAC-SHA256 over the random header plus the raw body. Outgoing calls are signed over the random
+plus one endpoint-specific value: the message text when posting, the emoji when reacting, the
+token when asking about features — not the serialised JSON body. Getting this subtly wrong is
+the most common way a Talk bot fails, so it lives in one small module whose tests pin the
+construction against the documented one.
 
-**Refuse to loop.** Messages from actors Talk marks as applications or `bots/…` are ignored,
-and events are de-duplicated by `(conversation, type, message id)`, so a redelivered webhook
-produces one reply rather than two, and two bots in one room cannot start a conversation with
-each other.
+*Verify before parsing.* Nothing touches the payload until the signature checks out, so a
+malformed body from an unauthenticated caller never reaches the parser.
 
-**Configuration is environment variables only.** No config file format to learn, no parser to
-maintain; it drops straight into a container, a systemd unit or a `.env` file. `sable --check`
-prints what it resolved to and exits, so a bad config fails at deploy time rather than on the
-first message.
+*Pin the backend.* A signed event carries the server's own base URL in a header, and that is
+where replies go. With `SABLE_PIN_BACKEND` on, events claiming any other backend are refused, so
+a replayed webhook cannot aim the bot's replies — and its credentials — at somebody else's
+server.
 
-**Everything is an explicit seam.** `Bot` takes its HTTP client, LLM client, history and
-command registry as constructor arguments. That is why the test suite can cover both endpoints
-end to end with no network, no Nextcloud and no model — and why replacing any one of those
-pieces is a small change rather than a fork.
+*Refuse to loop.* Events from bots are ignored, and every event is de-duplicated on the
+conversation, type, message id, actor and reaction together. A redelivered webhook produces one
+reply rather than two, two bots in a room cannot start talking to each other, and two people
+reacting to the same message are still two distinct events.
+
+*Configuration is environment variables and nothing else.* No file format to learn, no parser to
+maintain, and it drops straight into a container, a systemd unit or a `.env` file. `sable
+--check` prints what it resolved to and exits, so a bad configuration fails at deploy time
+rather than on the first message.
+
+*Everything is an explicit seam.* `Bot` takes its HTTP client, model client, history and command
+registry as constructor arguments. That is why the tests cover both endpoints end to end with no
+network, no Nextcloud and no model, and why replacing any one of those pieces is a small change
+rather than a fork.
 
 ## Trust boundaries
 
 | Boundary | What protects it |
 | --- | --- |
-| Nextcloud → `/webhook` | HMAC-SHA256 over the raw body; a body rewritten after signing fails. Then the backend pin. |
-| sable → Nextcloud | The same shared secret, signed per endpoint. Anyone holding the secret can post as the bot. |
-| Anything → `/notify` | A separate bearer token, compared in constant time. Unset means the route answers 404. |
-| Chat text → the model | Room messages are sent verbatim to your configured backend. Whoever can talk to the bot can send text to that provider — worth knowing before pointing it at a hosted API. |
-| A command's own reach | Whatever you give it. Commands run with the bot's credentials; treat a command as code anyone in the conversation can trigger. |
+| Nextcloud to `/webhook` | HMAC-SHA256 over the raw body, so a body rewritten after signing fails. Then the backend pin. |
+| sable to the Talk bot API | The same shared secret, signed per endpoint. Anyone holding it can post as the bot. |
+| Anything to `/notify` | A separate bearer token, compared in constant time. Unset means the route answers 404. |
+| sable to Nextcloud Files | A user account's app password, used only to upload and share attachments. It cannot be scoped, so it reaches everything that user can. |
+| Chat text to the model | Messages are sent verbatim to your configured backend. Whoever can talk to the bot can send text to that provider. |
+| A command's own reach | Whatever you give it. Commands run with the bot's credentials and anyone in the conversation can trigger them. |
 
-The bot secret authenticates *both* directions, so it is the one value that matters: rotating
-it means `occ talk:bot:install` again with the new value.
+The bot secret authenticates both directions, so it is the value that matters most; rotating it
+means running `occ talk:bot:install` again. [security.md](security.md) covers all of this
+properly, including the risks that are accepted rather than solved.
 
 ## Where to extend it
 
-| You want to… | Touch |
+| You want to | Look at |
 | --- | --- |
-| Add a command | [`commands.py`](../src/sable/commands.py) — one decorator |
+| Add a command | [`commands.py`](../src/sable/commands.py), one decorator |
 | Change when the model answers | `Bot.handle` in [`bot.py`](../src/sable/bot.py) |
 | Keep history across restarts | `History` in [`history.py`](../src/sable/history.py) |
-| Support a non-OpenAI-shaped backend | `LLMClient` in [`llm.py`](../src/sable/llm.py) |
-| React to reactions or join/leave | The `Like` / `Undo` / `Join` / `Leave` branches of `Bot.handle` (already parsed for you) |
+| Support a backend that isn't OpenAI-shaped | `LLMClient` in [`llm.py`](../src/sable/llm.py) |
+| Act on reactions or on joining a conversation | The `Like`, `Undo`, `Join` and `Leave` branches of `Bot.handle`, already parsed |
 | Add an HTTP route | [`app.py`](../src/sable/app.py) |
 
 ## Further reading
 
-- [Nextcloud Talk bot documentation](https://nextcloud-talk.readthedocs.io/en/latest/bots/) —
-  the API this is built on
-- [configuration.md](configuration.md) — every setting
-- [deployment.md](deployment.md) — running it for real
+[configuration.md](configuration.md) documents every setting, [deployment.md](deployment.md)
+covers running it for real, and [future.md](future.md) records the known limitations and what it
+would take to lift them. The API underneath is the
+[Nextcloud Talk bot documentation](https://nextcloud-talk.readthedocs.io/en/latest/bots/).

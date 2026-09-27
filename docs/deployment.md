@@ -4,15 +4,15 @@ Getting sable running against a real Nextcloud, and keeping it running.
 
 ## Prerequisites
 
-- **Nextcloud with Talk installed**, and shell access to run `occ` as the web user.
-- **An HTTPS URL that your Nextcloud server can reach**, pointing at sable. This is a webhook
-  bot: Nextcloud makes the connection, so sable must be reachable *from the server*, though not
-  necessarily from the public internet. A private network or a VPN is fine.
-- **Python 3.11+ or Docker** on the host running sable.
+You need Nextcloud with Talk installed and shell access to run `occ` as the web user, an HTTPS
+URL that your Nextcloud server can reach pointing at sable, and either Docker or Python 3.11+ on
+whatever host runs it.
 
-Nextcloud refuses to call `http://` or private-network webhook URLs unless an admin has
-explicitly allowed local remotes (`allow_local_remote_servers` in `config.php`). Prefer real
-TLS, even internally.
+The URL is the part people get wrong. This is a webhook bot, so Nextcloud makes the connection
+and sable has to be reachable from the server — though not necessarily from the public internet,
+since a private network or a VPN is fine. Nextcloud also refuses to call plain `http://` or
+private-network URLs unless an admin has allowed local remotes with
+`allow_local_remote_servers` in `config.php`, so prefer real TLS even internally.
 
 ## 1. Generate the secret
 
@@ -20,9 +20,9 @@ TLS, even internally.
 openssl rand -hex 32
 ```
 
-64 hex characters, inside Talk's 40–128 range. The *same* value goes into sable's
-`SABLE_BOT_SECRET` and into `occ talk:bot:install` — it authenticates both directions, so treat
-it like a password.
+That gives 64 hex characters, inside Talk's range of 40 to 128. The same value goes into
+sable's `SABLE_BOT_SECRET` and into `occ talk:bot:install`, and it authenticates both
+directions, so treat it like a password.
 
 ## 2. Configure
 
@@ -31,8 +31,8 @@ cp .env.example .env
 $EDITOR .env
 ```
 
-At minimum `SABLE_BOT_SECRET` and `SABLE_NEXTCLOUD_URL`. Everything else is in
-[configuration.md](configuration.md). Then:
+At minimum set `SABLE_BOT_SECRET` and `SABLE_NEXTCLOUD_URL`; everything else is in
+[configuration.md](configuration.md). Then check what it resolved to before going further:
 
 ```bash
 sable --check
@@ -42,11 +42,11 @@ sable --check
 
 ### Docker Compose (recommended)
 
-[`compose.yaml`](../compose.yaml) lists **every** setting in its `environment:` block, with
-only `SABLE_BOT_SECRET` active and the rest commented out showing their defaults — so you can
-configure the bot entirely in that one file. It also loads `.env` if one exists (optional), and
-values in the `environment:` block override it. Secrets are wired as `${VAR}` lookups, so they
-stay in `.env` rather than in a file you commit; missing ones fail immediately:
+[`compose.yaml`](../compose.yaml) lists every setting in its `environment:` block, with only
+`SABLE_BOT_SECRET` active and the rest commented out beside their defaults, so the bot can be
+configured entirely in that one file. It also loads `.env` if one exists, and values in the
+`environment:` block override it. Secrets are wired as `${VAR}` lookups so they stay in `.env`
+rather than in a file you commit, and a missing one fails immediately:
 
 ```
 error while interpolating services.sable.environment.SABLE_BOT_SECRET:
@@ -60,11 +60,9 @@ docker compose up -d --build
 docker compose logs -f sable
 ```
 
-The image runs as a non-root user (uid 10001), holds no state, and has a `HEALTHCHECK` on
-`/healthz`, so `docker ps` shows `healthy` once it is up.
-
-If your proxy runs in Docker too, drop the `ports:` block, put both services on one network and
-let the proxy reach `sable:8080` directly.
+The image runs as a non-root user, holds no state, and has a healthcheck on `/healthz`, so
+`docker ps` shows it healthy once it is up. If your proxy runs in Docker too, drop the `ports:`
+block, put both services on one network and let the proxy reach `sable:8080` directly.
 
 ### systemd
 
@@ -122,10 +120,10 @@ journalctl -u sable -f
 
 ## 4. Put TLS in front of it
 
-sable speaks plain HTTP and does not terminate TLS. Any reverse proxy will do, with one hard
-requirement: **it must pass the request body through byte for byte.** The signature covers the
-raw bytes, so anything that reformats, re-encodes or truncates JSON will cause every webhook to
-fail verification with a 401.
+sable speaks plain HTTP and does not terminate TLS, so put any reverse proxy in front of it.
+There is one hard requirement: it must pass the request body through byte for byte. The
+signature covers the raw bytes, so anything that reformats, re-encodes or truncates JSON makes
+every webhook fail verification with a 401.
 
 ### Caddy
 
@@ -164,15 +162,15 @@ Confirm the path works before involving Nextcloud:
 
 ```bash
 curl -fsS https://sable.example.org/healthz
-# {"status":"ok","version":"0.1.0","bot":"sable","llm":"gpt-4o-mini","notify":true}
+# {"status":"ok","version":"0.4","bot":"sable","llm":"gpt-4o-mini","notify":true}
 ```
 
 ### If your Nextcloud uses an internal or self-signed certificate
 
-That is the *outbound* direction — sable verifying Nextcloud's certificate when it posts a reply.
-It fails by default with `CERTIFICATE_VERIFY_FAILED`, because **httpx verifies against its own
-bundled certifi store, not the system one**, so installing your CA in the container's trust store
-achieves nothing on its own.
+That is the outbound direction: sable verifying Nextcloud's certificate when it posts a reply.
+It fails by default with `CERTIFICATE_VERIFY_FAILED`, because httpx verifies against its own
+bundled certifi store rather than the system one, so installing your CA in the container's trust
+store achieves nothing on its own.
 
 The fix is two lines in [`compose.yaml`](../compose.yaml), already there:
 
@@ -188,17 +186,14 @@ since the host trusts it — and `SSL_CERT_FILE` is what redirects Python away f
 bundle. No application setting is involved; sable has no TLS options and no way to disable
 verification.
 
-Three things that will bite you if you vary this:
-
-- **Point it at the complete bundle, not just your CA.** `SSL_CERT_FILE` *replaces* the trust
-  store rather than adding to it. A file containing only your internal CA makes the internal
-  Nextcloud work and every public HTTPS call — your model backend included — fail.
-- **Do not use `SSL_CERT_DIR` with a plain folder of `.crt` files.** OpenSSL only looks up
-  certificates there by hashed filename, so an ordinary folder silently trusts nothing, and
-  because it also replaces the store, public TLS breaks too. `openssl rehash` fixes the lookup
-  but not the replacement.
-- **Mount the directory, not the single file.** `update-ca-certificates` on the host writes a new
-  file, and a single-file bind mount pins the old inode until the container restarts.
+Three things will bite you if you vary this. Point `SSL_CERT_FILE` at the complete bundle
+rather than just your CA, because it replaces the trust store rather than adding to it: a file
+holding only your internal CA makes Nextcloud verify while every public HTTPS call, your model
+backend included, fails. Do not reach for `SSL_CERT_DIR` with a plain folder of `.crt` files
+either, since OpenSSL only looks certificates up there by hashed filename, so an ordinary folder
+trusts nothing while still replacing the store. And mount the directory rather than the single
+file, because `update-ca-certificates` on the host writes a new file and a single-file bind
+mount pins the old inode until the container restarts.
 
 If your distribution keeps certificates elsewhere — RHEL and Fedora use `/etc/pki/tls/certs` —
 set `SABLE_HOST_CA_DIR` accordingly. Beware that Docker creates a missing bind-mount source as an
@@ -222,24 +217,20 @@ setup):
 sudo -u www-data php occ talk:bot:install "sable" "<the same secret>" "https://sable.example.org/webhook" "A helpful bot" --feature webhook --feature response --feature reaction
 ```
 
-- The URL must end in **`/webhook`**.
-- **Features** are a bitmask: `webhook` (1) delivers chat messages to sable, `response` (2) lets
-  it post messages and reactions back, `reaction` (8) adds notifications when someone adds or
-  removes a reaction. `event` (4) is for bots running inside Nextcloud as PHP and is mutually
-  exclusive with these. Omitting `--feature` entirely gives you `webhook` + `response` for an
-  HTTP URL — the two a webhook bot cannot work without — so the flags above differ from the
-  default only in adding `reaction`.
-  Check what a bot ended up with using `occ talk:bot:list`; at runtime,
-  [`TalkClient.features()`](../src/sable/talk.py) asks Nextcloud and returns the bitmask, so
-  `11` means webhook + response + reaction.
-- Reaction events are **parsed but not yet acted on**: `Like` and `Undo` arrive fully decoded in
-  [`events.py`](../src/sable/events.py) and `Bot.handle` logs them. Enabling the feature now
-  costs nothing and means no reinstall when a handler lands — see
-  [future.md](future.md#talk-features-not-yet-used).
-- `--no-setup` prevents moderators from enabling the bot themselves, if you want to control
-  that centrally.
-- The name is what people will see and type. Keep it in step with `SABLE_BOT_NAME`, which is
-  what mention detection matches on.
+The URL must end in `/webhook`, and the name is what people see and type, so keep it in step
+with `SABLE_BOT_NAME`, which is what mention detection matches on. Add `--no-setup` if you want
+to stop moderators enabling the bot themselves and control that centrally.
+
+Features are a bitmask. `webhook` (1) delivers chat messages to sable, `response` (2) lets it
+post messages and reactions back, and `reaction` (8) adds notifications when somebody adds or
+removes a reaction, which is what the ⁉️ feature needs. The remaining value, `event` (4), is for
+bots running inside Nextcloud as PHP and is mutually exclusive with these. Omitting `--feature`
+altogether gives you webhook and response for an HTTP URL — the two a webhook bot cannot work
+without — so the command above differs from the default only in adding reaction.
+
+`occ talk:bot:list` shows what a bot ended up with. At runtime
+[`TalkClient.features()`](../src/sable/talk.py) asks Nextcloud and returns the same bitmask, so
+11 means webhook, response and reaction together.
 
 Neighbouring commands:
 
@@ -254,9 +245,17 @@ duplicates of either.
 
 ## 6. Enable it in a conversation
 
-Talk only delivers events for conversations where the bot is switched on. A moderator does this
-in **Conversation settings → Bots**. Nothing reaches sable until then, which is the usual
+Talk only delivers events for conversations where the bot is switched on, which a moderator does
+under Conversation settings, Bots. From the command line it is
+`occ talk:bot:setup <bot-id> <token>`, taking the id from `occ talk:bot:list` and the token from
+the end of the conversation's URL. Nothing reaches sable until then, which is the usual
 explanation for a bot that looks dead.
+
+sable logs the moment it happens, which doubles as proof that the whole inbound path works:
+
+```
+added to conversation abcd1234 ('Team chat') - now receiving its messages
+```
 
 ## 7. Verify end to end
 
@@ -264,7 +263,7 @@ In the conversation:
 
 ```
 !ping      →  pong 🏓
-!version   →  sable 0.1.0 · model gpt-4o-mini
+!version   →  sable 0.4 · model gpt-4o-mini
 ```
 
 To test the webhook path without Nextcloud — this is exactly what Talk does, with the signature
@@ -285,9 +284,12 @@ curl -sS -i -X POST https://sable.example.org/webhook \
 # 200 {"status":"accepted"}  — and "pong 🏓" appears in the conversation
 ```
 
-A `200` proves TLS, the proxy, the signature and parsing; the message appearing in the room
-proves the reply direction and the secret's other half. Corrupt one character of `SIG` and it
-must come back `401`.
+A 200 proves TLS, the proxy, the signature and parsing. The message appearing in the room
+proves the reply direction and the other half of the secret. Corrupt one character of `SIG` and
+it must come back 401; if a bad signature ever gets a 200, stop and investigate, because that is
+the whole security model.
+
+Use `--data-binary` rather than `-d`, or curl reshapes the body and the HMAC will not match.
 
 And the alerting path:
 
@@ -359,14 +361,14 @@ sable 0.3 stopping
 sable 0.3 stopped
 ```
 
-**The startup probe** (`connected to Nextcloud …`) calls `status.php`, which needs no
-credentials. It proves DNS, TLS and that the thing on the other end is a Nextcloud — so a wrong
-URL or an untrusted certificate is reported at boot rather than on the first reply someone is
-waiting for. It is never fatal: Nextcloud may simply not be up yet. `SABLE_STARTUP_CHECK=false`
-skips it.
+The startup probe, the line reading `connected to Nextcloud`, calls `status.php`, which needs no
+credentials. It proves DNS, TLS and that the thing on the other end really is a Nextcloud, so a
+wrong URL or an untrusted certificate shows up at boot rather than on the first reply somebody
+is waiting for. It is never fatal, since Nextcloud may simply not be up yet, and
+`SABLE_STARTUP_CHECK=false` skips it.
 
-**Reachability is logged as transitions**, not per attempt, so an outage is two lines rather than
-one per retry:
+Reachability is logged as transitions rather than per attempt, so an outage is two lines rather
+than one per retry:
 
 ```
 ERROR  sable.state: lost connection to Nextcloud: ConnectError: All connection attempts failed
@@ -374,43 +376,44 @@ INFO   sable.state: Nextcloud is reachable again
 ```
 
 The same applies to the model backend. A transport failure counts as unreachable; an HTTP error
-response does not — the service answered, and that is logged with its status code and the first
-200 characters of the body.
+response does not, because the service answered, and that is logged with its status code and the
+first 200 characters of the body.
 
-**Message text stays out of `INFO`.** A use is logged as who, what and where, with sizes rather
-than content: `asked the model in abcd1234 (22 chars)`. `SABLE_LOG_LEVEL=DEBUG` adds the prompt,
-command arguments and the message a ⁉️ referred to, plus a line for every event sable decided
-*not* to act on and one per outbound HTTP call. Treat DEBUG as containing chat content.
+Message text stays out of INFO. A use is logged as who, what and where, with sizes rather than
+content, as in `asked the model in abcd1234 (22 chars)`. `SABLE_LOG_LEVEL=DEBUG` adds the
+prompt, command arguments and the message a reaction referred to, plus a line for every event
+sable decided not to act on and one per outbound HTTP call. Treat a DEBUG log as containing chat
+content.
 
-**Health:** `GET /healthz` returns the version, the bot name, the configured model and whether
-alerting is on. It does not call Nextcloud or the model, so it stays honest as a liveness probe.
+`GET /healthz` returns the version, the bot name, the configured model and whether alerting is
+on. It does not call Nextcloud or the model, which keeps it honest as a liveness probe.
 
-**Upgrades** are a restart; there is no state and no migration.
+Upgrading is a restart. There is no state and no migration.
 
 ```bash
 git pull && docker compose up -d --build     # or: uv sync --locked --no-dev && systemctl restart sable
 ```
 
 In-flight replies get up to 30 seconds to finish during shutdown, so a rolling restart does not
-lose an answer someone is waiting for.
+lose an answer somebody is waiting for.
 
-**Rotating the secret:**
+Rotating the bot secret means reinstalling, since Nextcloud rejects a duplicate URL:
 
 ```bash
 occ talk:bot:uninstall --id <id>
 occ talk:bot:install "sable" "<new secret>" "https://sable.example.org/webhook" "A helpful bot" --feature webhook --feature response --feature reaction
 ```
 
-…then update `SABLE_BOT_SECRET` and restart. Expect a brief window where webhooks are rejected;
-a bot is not a good place to need zero downtime.
+Then update `SABLE_BOT_SECRET` and restart. Expect a brief window where webhooks are rejected; a
+bot is not a good place to need zero downtime.
 
-**Run one process.** Conversation history and the redelivery de-duplication cache live in
-memory, so `--workers 2` would split both: replies would forget context depending on which
-worker answered. One process handles chat traffic without breaking a sweat (a few tens of MB
-resident, and all I/O is async). Scale by running separate bots, not workers.
+Run one process. Conversation history, the message cache and the redelivery cache all live in
+memory, so two workers would split them and replies would forget context depending on which
+worker answered. One process handles chat traffic without breaking a sweat, at a few tens of
+megabytes resident with all its I/O async. Scale by running separate bots rather than workers.
 
-**Backups:** none. Nothing is persisted. Keep `.env` in a secret store — it is the only thing
-that is hard to recreate.
+There is nothing to back up, because nothing is persisted. Keep `.env` in a secret store, since
+it is the only thing that is hard to recreate.
 
 ## Hardening
 
@@ -419,21 +422,21 @@ protects each trust boundary, how secrets are handled, and the
 [accepted risks](security.md#accepted-risks) worth reading before this is reachable from
 anywhere you do not control.
 
-- **Do not publish the port.** Bind to `127.0.0.1` (or a private network) and let the proxy be
-  the only client. Nextcloud is the only legitimate caller of `/webhook`.
-- **Keep the two secrets separate.** `SABLE_BOT_SECRET` is Nextcloud's; `SABLE_NOTIFY_TOKEN` is
-  your alerting callers'. A leaked notify token then costs you noise, not the bot.
-- **Leave `SABLE_PIN_BACKEND` on.** It stops a replayed webhook from redirecting the bot's
-  replies at another server.
-- **Use aliases in `SABLE_NOTIFY_ROOMS`** so alerting callers never learn conversation tokens.
-- **Restrict egress** if the model runs elsewhere: sable needs to reach only Nextcloud and the
-  LLM base URL.
-- **Remember what the assistant forwards.** Every message it answers is sent to your configured
-  LLM backend. For a hosted provider, that is chat content leaving your infrastructure — a
-  local backend or a self-hosted gateway avoids the question.
-- **Treat commands as public API.** Anyone in a conversation with the bot can trigger any
-  command, so a command that shells out or touches production needs its own authorisation check
-  (`ctx.event.actor.user_id` tells you who is asking).
+Do not publish the port. Bind to localhost or a private network and let the proxy be the only
+client, since Nextcloud is the only legitimate caller of `/webhook`. Leave `SABLE_PIN_BACKEND`
+on, which stops a replayed webhook redirecting the bot's replies at another server, and restrict
+egress to Nextcloud and the model backend if the model runs elsewhere.
+
+Keep the credentials separate and proportionate. `SABLE_BOT_SECRET` is Nextcloud's;
+`SABLE_NOTIFY_TOKEN` belongs to your alerting callers, so a leak there costs you noise rather
+than the bot; and the upload account, if you use one, should own nothing else and appear in
+`SABLE_IGNORE_USERS`. Aliases in `SABLE_NOTIFY_ROOMS` mean callers never learn conversation
+tokens.
+
+Two things are easy to forget. Every message the assistant answers is sent to your model
+backend, which for a hosted provider means chat content leaving your infrastructure. And anyone
+in a conversation can trigger any command, so one that shells out or touches production needs
+its own authorisation check — `ctx.event.actor.user_id` tells you who is asking.
 
 ## Troubleshooting
 

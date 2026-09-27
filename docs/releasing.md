@@ -7,13 +7,14 @@ Work on `dev`. Keep `main` as the history. Push to `release` to publish.
 ```bash
 # 1. work, and write the changelog entry as you go
 git switch dev
-$EDITOR docs/CHANGELOG.md          # add bullets under ## Unreleased
+$EDITOR docs/CHANGELOG.md          # add notes under ## Unreleased
 git commit -am "..." && git push origin dev
 
 # 2. when you are ready to release, name the version
-$EDITOR pyproject.toml             # version = "0.2"
-$EDITOR docs/CHANGELOG.md          # rename ## Unreleased to ## 0.2
-git commit -am "Release 0.2" && git push origin dev
+$EDITOR pyproject.toml             # version = "0.5"
+$EDITOR docs/CHANGELOG.md          # rename ## Unreleased to ## 0.5
+uv lock                            # the lock records the project version too
+git commit -am "Release 0.5" && git push origin dev
 
 # 3. integrate into the history
 git switch main && git merge --no-ff dev && git push origin main
@@ -22,10 +23,12 @@ git switch main && git merge --no-ff dev && git push origin main
 git switch release && git merge --ff-only main && git push origin release
 ```
 
-Step 4 is the release. Forgejo then runs the tests, pushes
-`sable:0.2` and `sable:latest` to the registry, and creates a **Forgejo Release**
-`v0.2` — tag included, notes taken from the changelog, wheel attached — which is what
-puts it in the repository sidebar.
+Step 4 is the release. Forgejo runs the tests, pushes `sable:0.5`, `sable:latest` and a tag
+named after the commit, and creates a Forgejo Release with the tag, the changelog notes and the
+wheel attached, which is what puts it in the repository sidebar.
+
+Do not skip the `uv lock`. The lock file records the project's own version, so `uv sync
+--locked` refuses a stale one and the release fails before it builds.
 
 ## The three branches
 
@@ -42,22 +45,23 @@ main     ────●──────────────●───�
                             \         \
 release  ────────────────────●─────────●──   push → publish
                              │         │
-                            v0.1     v0.2    ← Releases, in the sidebar
+                            v0.4     v0.5    ← Releases, in the sidebar
                              │         │
-registry            sable:0.1   sable:0.2, sable:latest
+registry            sable:0.4   sable:0.5, sable:latest
 ```
 
 ### Why `--no-ff` into `main` but `--ff-only` into `release`
 
-`main` should read as a list of integrations, so each merge from `dev` gets its own merge
-commit (`git log --first-parent main`). `release` should only ever be a point that `main`
-already passed through, so a fast-forward is the honest operation — if `--ff-only` refuses,
+`main` should read as a list of integrations, so each merge from `dev` gets its own merge commit
+and `git log --first-parent main` stays useful. `release` should only ever be a point `main`
+already passed through, so a fast-forward is the honest operation there. If `--ff-only` refuses,
 something has been committed straight to `release` and wants looking at.
 
 ## Versions
 
-**MAJOR.MINOR only** — `0.1`, `1.0`, `1.1`. No patch segment, no `-rc`. Bump the minor for
-anything shippable; bump the major when upgrading requires someone to do something.
+The scheme is MAJOR.MINOR and nothing else: `0.4`, `1.0`, `1.1`. No patch segment, no release
+candidates. Bump the minor for anything shippable, and the major when upgrading requires someone
+to do something.
 
 Set in **one place**, as an ordinary field:
 
@@ -88,10 +92,10 @@ current version becomes the release body:
 - Fix reaction cleanup when the model times out
 ```
 
-A missing or empty section fails the test suite *and* the release. That is deliberate: a
+A missing or empty section fails the test suite as well as the release. That is deliberate: a
 release with no notes is not worth publishing, and the test means you find out on `dev` rather
-than at publish time. Write bullets under `## Unreleased` as you work, then rename that heading
-to the version when you release.
+than at publish time. Write notes under `## Unreleased` as you work, then rename that heading to
+the version when you release.
 
 ## CI/CD on Forgejo
 
@@ -135,22 +139,22 @@ and leaves that Release untouched.
 
 | Situation | What happens |
 | --- | --- |
-| Version has no Release yet | Tests, image pushed, Release created with notes and the wheel |
-| Version already released, pushed to `release` | Ends green, publishes nothing |
-| Version already released, started from the button | Image rebuilt and re-pushed; Release left alone |
-| Version is behind the latest Release (`1.0` out, this says `0.9`) | Fails before publishing |
-| Version is not `MAJOR.MINOR`, or has no changelog section | Fails before publishing |
+| The version has no Release yet | Tests run, the image is pushed, and a Release is created with the notes and the wheel |
+| The version is already released and this was a push | Ends green, publishes nothing |
+| The version is already released and this was the button | The image is rebuilt and re-pushed; the Release is left alone |
+| The version is behind the latest Release | Fails before publishing |
+| The version is not MAJOR.MINOR, or has no changelog section | Fails before publishing |
 
 ### What gets published
 
 | Artifact | Where |
 | --- | --- |
-| `…/sable:0.2` | Packages — that release. What a server should pin to. |
-| `…/sable:latest` | Packages — the newest release. |
-| `…/sable:<commit>` | Packages — the full commit sha the image was built from, so any image maps back to its source. |
-| `…/sable@sha256:…` | Packages — the digest, printed in the run summary. Immutable, and the only way to pin one exact build. |
-| Release `v0.2` + git tag | **Releases**, in the repository sidebar |
-| `sable-0.2-py3-none-any.whl` | Attached to that Release, when the wheel builds |
+| `…/sable:0.5` | Packages: that release. What a server should pin to. |
+| `…/sable:latest` | Packages: the newest release. |
+| `…/sable:<commit>` | Packages: the full commit sha it was built from, so any image maps back to its source. |
+| `…/sable@sha256:…` | Packages: the digest, printed in the run summary. Immutable, and the only way to pin one exact build. |
+| Release `v0.5` and its git tag | Releases, in the repository sidebar |
+| `sable-0.5-py3-none-any.whl` | Attached to that Release, when the wheel builds |
 
 The wheel is archival only, so its step is `continue-on-error`: if it fails, the run warns, the
 release is still created, and it simply has no attachment. Nothing about the release depends on
@@ -178,52 +182,50 @@ and `IMAGE` in `release.yml` and `build.yml`.
 ## Using a release
 
 ```bash
-docker pull forgejo.subversive.link/subversive/sable:0.2
+docker pull forgejo.subversive.link/subversive/sable:0.5
 ```
 
 In `compose.yaml`, replacing `build: .` with
-`image: forgejo.subversive.link/subversive/sable:0.2` pins a host to that release. Pin the
-version rather than `latest` so a `docker compose pull` cannot move you unintentionally.
+`image: forgejo.subversive.link/subversive/sable:0.5` pins a host to that release. Pin the
+version rather than `latest`, so a `docker compose pull` cannot move you unintentionally.
 
 Confirm what is running:
 
 ```bash
-curl -fsS https://sable.example.org/healthz    # {"version":"0.2", ...}
+curl -fsS https://sable.example.org/healthz    # {"version":"0.5", ...}
 ```
 
 …or ask it in chat with `!version`. To get from an image back to its source, the workflow stamps
 the commit in:
 
 ```bash
-docker image inspect forgejo.subversive.link/subversive/sable:0.2 \
-  --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'
+docker image inspect forgejo.subversive.link/subversive/sable:0.5 --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'
 ```
 
 Or go the other way: every image is also tagged with the commit it was built from, so the tag
 list in Packages tells you the source directly.
 
 ```bash
-docker pull forgejo.subversive.link/subversive/sable:3076ab81b410d1716dadba50bbef780a70a76fef
-git show 3076ab81b410d1716dadba50bbef780a70a76fef
+docker pull forgejo.subversive.link/subversive/sable:0937a9479cccec9ea4375de1621eb5e124d2c009
+git show 0937a9479cccec9ea4375de1621eb5e124d2c009
 ```
 
-Or use the git tag the Release created: `git checkout v0.2`.
+Or use the git tag the Release created: `git checkout v0.5`.
 
 ## Variations you may want later
 
-**Patch releases.** The scheme has no third segment, so a fix to `1.1` after `1.2` is out means
-either `1.3` (roll forward, usually right) or branching from the `v1.1` tag and publishing
-`1.1.1` by hand.
+The version scheme has no third segment, so a fix to `1.1` after `1.2` is out means either
+rolling forward to `1.3`, which is usually right, or branching from the `v1.1` tag and
+publishing `1.1.1` by hand.
 
-**Publishing the wheel to a package registry.** Forgejo has a PyPI registry, so
-`twine upload --repository-url .../api/packages/subversive/pypi dist/*` would make
-`pip install sable` work against your instance. Left out because nothing consumes sable as a
-library — the wheel is attached to the Release for archival only.
+Forgejo has a PyPI registry, so uploading the wheel with twine would make `pip install sable`
+work against your instance. That is left out because nothing consumes sable as a library; the
+wheel is attached to each Release for archival only.
 
-**Draft releases.** `release.yml` sets `draft: false`. Flipping it means releases appear but stay
-unpublished until you press publish in the UI, which is useful if you want a human check on the
-notes.
+`release.yml` creates releases published rather than draft. Flipping that would make them appear
+but stay unpublished until somebody presses publish, which is worth doing if you want a human
+check on the notes before they go out.
 
-**Building `main` on every push.** The Manual build button already covers `main` when you want
-it. If you would rather it be automatic, add a `push: branches: [main]` trigger to `build.yml` —
-keep `latest` meaning *the latest release*, since that is the tag people deploy by accident.
+The Manual build button already covers `main` when you want an image from it. If you would
+rather that were automatic, add a `push` trigger for `main` to `build.yml` — but keep `latest`
+meaning the latest release, since that is the tag people deploy by accident.

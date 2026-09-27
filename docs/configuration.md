@@ -1,22 +1,21 @@
 # Configuration
 
-Every setting is a `SABLE_`-prefixed environment variable. There is no config file format.
-[`.env.example`](../.env.example) is a copy-ready version of this document's defaults.
+Every setting is an environment variable prefixed `SABLE_`. There is no configuration file
+format to learn. [`.env.example`](../.env.example) is a copy-ready version of the defaults below.
 
 ## How settings are loaded
 
-1. `sable` reads `./.env` if it exists (`--env-file PATH` to point elsewhere, a path that does
-   not exist is silently skipped).
-2. **Real environment variables always win** over anything in the `.env` file, which is what
-   makes `docker compose` overrides and one-off `SABLE_LOG_LEVEL=DEBUG sable` work.
-3. `--host` and `--port` on the command line override `SABLE_HOST` / `SABLE_PORT`.
+sable reads `./.env` if it is there, or whatever `--env-file` points at, and silently skips a
+path that does not exist. Real environment variables always win over the file, which is what
+makes Compose overrides and a one-off `SABLE_LOG_LEVEL=DEBUG sable` work. `--host` and `--port`
+on the command line override their variables in turn.
 
 Under Docker Compose, [`compose.yaml`](../compose.yaml) carries the same list in its
-`environment:` block — every variable, commented out with its default, and only
-`SABLE_BOT_SECRET` active. Those entries **override** the `.env` file, which is itself optional
-there; secrets are written as `${VAR}` lookups so their values stay out of the committed file.
+`environment:` block, every variable commented out with its default and only `SABLE_BOT_SECRET`
+active. Those entries override the `.env` file, which is optional there; secrets are written as
+`${VAR}` lookups so their values stay out of the committed file.
 
-Check the result before deploying — this validates everything and exits without starting a
+Check the result before deploying. This validates everything and exits without starting a
 server:
 
 ```bash
@@ -24,7 +23,7 @@ sable --check
 ```
 
 ```
-sable 0.1.0 config OK
+sable 0.4 config OK
   bot name:   sable
   nextcloud:  https://cloud.example.org
   prefix:     !
@@ -33,20 +32,22 @@ sable 0.1.0 config OK
   notify:     enabled aliases: alerts, deploys
 ```
 
-A bad value exits `2` with a message naming the variable. Configuration errors are fatal at
-startup by design: better a failed deploy than a bot that silently ignores half its settings.
+A bad value exits with status 2 and a message naming the variable. Configuration errors are
+fatal at startup by design: a failed deploy is better than a bot that silently ignores half its
+settings. The startup log then repeats the resolved configuration, in more detail than `--check`
+covers, so the running process tells you what it actually believes.
 
 ### Value formats
 
 | Kind | Accepted |
 | --- | --- |
-| Boolean | `1`, `true`, `yes`, `on` / `0`, `false`, `no`, `off` — case-insensitive. Anything else is an error. |
+| Boolean | `1`, `true`, `yes`, `on`, or `0`, `false`, `no`, `off`, case-insensitive. Anything else is an error. |
 | Number | Plain integer or decimal. Empty means "use the default". |
 | List | Comma-separated; whitespace around entries is trimmed. |
 | Map | `alias=value,other=value2`, or a JSON object: `{"alias": "value"}`. |
 | JSON | A JSON **object**, e.g. `{"top_k": 40}`. |
 
-Values are trimmed, and URLs have trailing slashes stripped, so a stray space or slash in a
+Values are trimmed and URLs have trailing slashes stripped, so a stray space or slash in a
 `.env` file will not break anything.
 
 ## Talk bot identity
@@ -69,7 +70,7 @@ Values are trimmed, and URLs have trailing slashes stripped, so a stray space or
 | `SABLE_ASK_REACTION` | `⁉️` | React to any message with this and the bot sends that message to the model, answering in a reply threaded under it. Empty disables the feature **and** the message cache behind it. Needs `--feature reaction` at install. |
 | `SABLE_MESSAGE_CACHE` | `200` | Recent messages remembered per conversation, so a reaction can name one. Expires with `SABLE_HISTORY_TTL`. |
 | `SABLE_UNKNOWN_COMMAND_HINT` | `true` | Reply "I have no `!foo` command" on an unknown command. Turn off in busy rooms where people use other bots with the same prefix. |
-| `SABLE_REPORT_ERRORS` | `true` | Post failures into the conversation (`⚠️ Sorry — …`) as well as logging them. Off means failures are logged only and the room stays quiet. |
+| `SABLE_REPORT_ERRORS` | `true` | Post failures into the conversation as well as logging them; the reply is prefixed with a warning sign. Off means failures are logged only and the room stays quiet. |
 | `SABLE_STARTUP_CHECK` | `true` | Call Nextcloud's `status.php` at startup and log what answered, so a wrong URL or an untrusted certificate shows up at boot. Never fatal. Needs `SABLE_NEXTCLOUD_URL`. |
 | `SABLE_IGNORE_USERS` | *(empty)* | Users to ignore completely. Comma-separated; each entry matches a bare user id (`alice`), a full actor id (`users/alice`), or a display name. See [below](#ignoring-people). |
 | `SABLE_MAX_MESSAGE_CHARS` | `30000` | Replies longer than this are clipped with a `_[truncated]_` marker. Talk hard-rejects anything over 32000 with HTTP 413, which is the real ceiling. |
@@ -102,12 +103,12 @@ The token is the last segment of the conversation's URL —
 `https://cloud.example.org/call/a1b2c3d4` → `a1b2c3d4`. Names match ignoring case and surrounding
 space, so `ai`, `AI` and `  AI  ` all match a conversation called "AI".
 
-**Prefer tokens where it matters.** A token never changes; a name can be changed by any moderator
-of the conversation, which would silently start or stop the bot answering everything in it. Names
-are also not unique — two conversations called "AI" would both match.
+Prefer tokens where it matters. A token never changes, while any moderator can rename a
+conversation, which would silently start or stop the bot answering everything in it. Names are
+not unique either, so two conversations called "AI" would both match.
 
 If a room is not behaving as you expect, `SABLE_LOG_LEVEL=DEBUG` prints both identifiers for
-every message it decided to ignore, so you can see exactly what to configure:
+every message it decided to ignore, so you can see what to configure:
 
 ```
 message in a1b2c3d4 ('AI') was not for me - no prefix, no mention, and not an AI room
@@ -119,11 +120,11 @@ React with `SABLE_ASK_REACTION` (⁉️ by default) and the bot answers the mess
 in a reply threaded under it. It works on anyone's message, the bot's own answers included, which
 makes it a quick way to ask a follow-up.
 
-The catch: **a reaction event carries the message id, not its text.** The bot API cannot read a
-message back — that needs a user account rather than bot credentials — so sable can only answer
-about messages it saw arrive, and keeps the last `SABLE_MESSAGE_CACHE` per conversation for that
-purpose. React to something older, or posted before the bot joined, and it says so instead of
-guessing. Nothing is cached at all when `SABLE_ASK_REACTION` is empty.
+The catch is that a reaction event carries the message id and not its text, and the bot API
+cannot read a message back — that needs a user account rather than bot credentials. So sable can
+only answer about messages it saw arrive, and keeps the last `SABLE_MESSAGE_CACHE` of them per
+conversation for the purpose. React to something older, or posted before the bot joined, and it
+says so rather than guessing. Nothing is cached at all when `SABLE_ASK_REACTION` is empty.
 
 ## File attachments
 
@@ -139,16 +140,18 @@ and **only** when a file is actually attached.
 | `SABLE_UPLOAD_PATH` | `/sable` | Folder inside that user's own Files where attachments are put before sharing. Created on first use. |
 | `SABLE_MAX_UPLOAD_BYTES` | `26214400` (25 MiB) | Largest attachment `/notify` accepts. Bigger ones get a `413`. |
 
-**Give it its own user account.** An app password cannot be scoped to "files only" — it can do
+Give it its own user account. An app password cannot be scoped to files only — it can do
 everything that user can, across Files, Contacts and Calendar. That is a much larger credential
 than the bot secret, which can only post messages, so it should belong to an account that owns
-nothing else. See [security.md](security.md#accepted-risks).
+nothing else. Add that account to `SABLE_IGNORE_USERS` as well, or the chat message its own file
+share produces comes back through the webhook and is treated as somebody talking to the bot.
+[security.md](security.md#accepted-risks) has the rest.
 
 ### Ignoring people
 
-`SABLE_IGNORE_USERS` drops everything from the listed actors — commands, mentions, reactions —
-and their messages are never cached for the ⁉️ feature either. Ignore means ignore: their words
-do not reach the model even if somebody else asks about them.
+`SABLE_IGNORE_USERS` drops everything from the listed actors: commands, mentions and reactions
+alike, and their messages are never cached for the reaction feature either. Ignore means ignore,
+so their words do not reach the model even when somebody else asks about them.
 
 ```ini
 SABLE_IGNORE_USERS=alice                    # bare user id
@@ -157,8 +160,8 @@ SABLE_IGNORE_USERS=Alice                    # display name, case-insensitive
 SABLE_IGNORE_USERS=noisy-integration,users/bob,guests/abc123
 ```
 
-Prefer ids. A display name can be changed by the person themselves, which would quietly stop
-them being ignored — the opposite of what you configured.
+Prefer ids here too. A display name can be changed by the person themselves, which would quietly
+stop them being ignored, the opposite of what you configured.
 
 ## Conversation memory
 
@@ -235,11 +238,11 @@ configured the standard way, with the variable OpenSSL and httpx already underst
 | --- | --- |
 | `SSL_CERT_FILE` | Path to a CA bundle **inside the container**. `compose.yaml` mounts the host's `/etc/ssl/certs` read-only and sets this to `/etc/ssl/certs/ca-certificates.crt`. |
 
-It **replaces** the trust store rather than adding to it, so the file must be the complete bundle
-— public roots *and* your internal CA. Pointing it at a file holding only your CA makes the
-internal Nextcloud verify and every public HTTPS call fail. `SSL_CERT_DIR` is a trap here: OpenSSL
-only finds certificates in such a directory by hashed filename, so a plain folder of `.crt` files
-trusts nothing while still replacing the store. See
+It replaces the trust store rather than adding to it, so the file must be the complete bundle:
+public roots as well as your internal CA. Pointing it at a file holding only your CA makes the
+internal Nextcloud verify while every public HTTPS call fails. `SSL_CERT_DIR` is a trap here,
+because OpenSSL only finds certificates in such a directory by hashed filename, so a plain folder
+of `.crt` files trusts nothing while still replacing the store. See
 [deployment.md](deployment.md#if-your-nextcloud-uses-an-internal-or-self-signed-certificate).
 
 ## Worked examples
