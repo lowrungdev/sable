@@ -1,6 +1,14 @@
 """sable - a Nextcloud Talk bot."""
 
-#: Single source of truth for the version. MAJOR.MINOR only - see
-#: docs/releasing.md. pyproject.toml reads this file, and scripts/release.sh
-#: rewrites this line, so nothing else should hardcode a version.
-__version__ = "0.1"
+from importlib.metadata import PackageNotFoundError, version as _distribution_version
+
+__all__ = ["__version__"]
+
+try:
+    #: Read from the installed package metadata, which the build backend fills
+    #: in from `version` in pyproject.toml - the one place the version is set.
+    #: Note that an editable install caches this at install time: after bumping
+    #: pyproject.toml, `pip install -e .` again to see the new number locally.
+    __version__ = _distribution_version("sable")
+except PackageNotFoundError:  # a source tree that was never installed
+    __version__ = "0+unknown"

@@ -1,11 +1,17 @@
 name: Release
 
-# Publishing is driven by the tag, which is the release (see docs/releasing.md).
-# `bash scripts/release.sh 1.1` pushes v1.1, and that push lands here.
+# Publishing is driven by the version in pyproject.toml: bump it on main, and
+# this builds and pushes the image. See docs/releasing.md.
+#
+# pyproject.toml also changes for other reasons (a new dependency, a pytest
+# setting), so the first step compares the version against the previous commit
+# and stops quietly when it has not moved - no rebuilt, overwritten image.
 on:
   push:
-    tags:
-      - 'v*'
+    branches:
+      - main
+    paths:
+      - 'pyproject.toml'
 
 jobs:
   build-and-push:
@@ -20,26 +26,53 @@ jobs:
 
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          # Two commits, so the previous pyproject.toml can be read.
+          fetch-depth: 2
 
-      - name: Check the tag matches the packaged version
+      - name: Did the version change?
         id: version
         run: |
           set -eu
-          TAG="${{ github.ref_name }}"
-          VERSION="${TAG#v}"
-          PACKAGED="$(sed -nE 's/^__version__ = "(.*)"$/\1/p' src/sable/__init__.py)"
-          if [ "$VERSION" != "$PACKAGED" ]; then
-            echo "tag $TAG says $VERSION but src/sable/__init__.py says $PACKAGED." >&2
-            echo "Use scripts/release.sh, which keeps the two in step." >&2
+          read_version() { sed -nE 's/^version = "([0-9]+\.[0-9]+)"$/\1/p' | head -1; }
+
+          VERSION="$(read_version < pyproject.toml)"
+          if [ -z "$VERSION" ]; then
+            echo "No MAJOR.MINOR version found in pyproject.toml." >&2
+            echo "Expected a line like: version = \"1.1\"" >&2
             exit 1
           fi
-          echo "Releasing sable $VERSION"
+
+          PREVIOUS=""
+          if git rev-parse --quiet --verify HEAD~1 >/dev/null 2>&1; then
+            PREVIOUS="$(git show HEAD~1:pyproject.toml | read_version)"
+          fi
+
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
+          if [ "$VERSION" = "$PREVIOUS" ]; then
+            echo "pyproject.toml changed but the version is still $VERSION."
+            echo "Nothing to publish."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ -n "$PREVIOUS" ] \
+             && [ "$(printf '%s\n%s\n' "$PREVIOUS" "$VERSION" | sort -V | head -1)" != "$PREVIOUS" ]; then
+            echo "Version went backwards: $PREVIOUS -> $VERSION." >&2
+            echo "Refusing to publish an older version over a newer one." >&2
+            exit 1
+          fi
+
+          echo "Publishing sable $VERSION (was ${PREVIOUS:-none})."
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
       - name: Run the test suite
+        if: steps.version.outputs.changed == 'true'
         run: docker build --target test --progress plain .
 
       - name: Log in to Forgejo Registry
+        if: steps.version.outputs.changed == 'true'
         uses: docker/login-action@v3
         with:
           registry: forgejo.subversive.link
@@ -47,6 +80,7 @@ jobs:
           password: ${{ secrets.RUNDECK_KEY_VALUE }}
 
       - name: Build and push
+        if: steps.version.outputs.changed == 'true'
         uses: docker/build-push-action@v5
         with:
           context: .

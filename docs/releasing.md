@@ -9,40 +9,37 @@ git push origin dev
 
 git switch main && git merge --no-ff dev    # integrate when it is green
 git push origin main
-
-bash scripts/release.sh 1.1                 # cut the release
 ```
 
-That last command bumps the version, commits, tags `v1.1`, moves `release` to it, merges
-`main` back into `dev`, and pushes all of it — after running the tests and refusing if anything
-looks wrong. `--dry-run` shows every step without touching a thing.
+To release, bump one line and push it to `main`:
 
-Pushing the tag is what publishes: Forgejo Actions builds the image and pushes
-`sable:1.1`, `sable:latest` and `sable:build-<n>` to the registry. See
-[CI/CD on Forgejo](#cicd-on-forgejo).
+```toml
+# pyproject.toml
+version = "0.2"
+```
 
-## The three branches, and the tags
+Forgejo notices that the version changed and publishes
+`forgejo.subversive.link/subversive/sable:0.2`, plus `:latest` and
+`:build-<n>`. Nothing else to run — see [CI/CD on Forgejo](#cicd-on-forgejo).
 
-| Ref | Role |
+## The three branches
+
+| Branch | Role |
 | --- | --- |
 | `dev` | Where work happens. Commit here directly, or merge feature branches into it. Expected to be ahead of `main` most of the time. |
-| `main` | The main commit history. `dev` is merged in when it is ready to be integrated; this is the branch a release is cut from. |
-| `release` | Always points at the **current** release — the same commit as the newest tag. "What is live" in one ref. |
-| `v1.1`, `v1.2`, … | Annotated tags. **These are the point-in-time releases.** |
-
-The distinction that matters: a branch is a moving pointer, so `release` can only ever mean
-*the latest* release. Tags are immutable, so they are what let you say "the state of the code on
-the day 1.1 went out" a year later. You need both — the branch for convenience, the tags for
-history.
+| `main` | The main commit history. `dev` is merged in when it is ready to be integrated. **A version change landing here is what publishes a release.** |
+| `release` | Optional pointer at what is currently released. Nothing moves it automatically; see [below](#the-release-branch). |
 
 ```
 dev      ──●──●──●───────────────●──●──────────
             \                   /        \
 main     ────●─────────────────●──────────●────
                                │          │
-                            v1.1       v1.2      ← annotated tags
+                            0.2        0.3      ← version bumps, each one a build
                                │          │
-release  ──────────────────────●──────────●────  ← always the newest release
+registry     sable:0.2 ────────●          │
+             sable:0.3 ───────────────────●     ← immutable, one per release
+             sable:latest ────────────────●
 ```
 
 ### Why `--no-ff` when merging `dev` into `main`
@@ -50,8 +47,10 @@ release  ──────────────────────●�
 A fast-forward merge makes `main` and `dev` the same line of history, and "the main commit
 history" then has no marker for where an integration happened. `--no-ff` creates a merge commit,
 so `git log --first-parent main` reads as a list of integrations rather than every individual
-development commit. The release script does not care either way; this is just what makes `main`
-worth having as a separate branch.
+development commit.
+
+A merge commit is also perfectly fine as the trigger: the workflow compares against the merge's
+first parent, which is the previous tip of `main`.
 
 ## Versions
 
@@ -59,51 +58,36 @@ worth having as a separate branch.
 metadata. Bump the minor for anything shippable; bump the major when you break how the thing is
 configured or deployed and someone upgrading has to do something about it.
 
-The version lives in **exactly one place**:
+It is set in **one place**, as an ordinary field:
 
-```python
-# src/sable/__init__.py
-__version__ = "0.1"
+```toml
+# pyproject.toml
+[project]
+name = "sable"
+version = "0.1"
 ```
 
-`pyproject.toml` declares it `dynamic` and reads that line, so the package metadata, the
-`!version` command and `GET /healthz` all report the same number and cannot drift. Two tests
-enforce this: one that the version matches `MAJOR.MINOR`, one that `pyproject.toml` has not
-grown a hardcoded copy.
+Nothing else holds a copy. `sable.__version__` reads the installed package metadata, which the
+build backend generates from that field, so the number reported by the `!version` command and by
+`GET /healthz` cannot disagree with it. Three tests enforce the scheme: the field is
+`MAJOR.MINOR`, the package reports a real version, and no `dynamic`/`[tool.hatch.version]`
+indirection has crept back in.
 
-Nothing else needs editing to release — no changelog file to remember, no second version
-string, no Docker tag baked into a file.
+One local wrinkle: an editable install caches the metadata at install time, so after bumping the
+version run `pip install -e '.[dev]'` again if you want `!version` to be accurate on your own
+machine. Built images are always correct, since every build installs fresh.
 
 ## Cutting a release
 
-```bash
-bash scripts/release.sh 1.1              # the real thing, with a confirmation prompt
-bash scripts/release.sh 1.1 --dry-run    # print every step, change nothing
-bash scripts/release.sh 1.1 --yes        # skip the prompt (CI)
-bash scripts/release.sh 1.1 --no-tests   # skip the test gate, if you verified another way
-```
+1. Bump `version` in `pyproject.toml` on `dev` and commit it — `Release 0.2` is a fine message.
+2. Merge `dev` into `main` and push.
+3. Watch the **Release** workflow in Forgejo's Actions tab.
 
-On Windows use Git Bash (`bash scripts/release.sh 1.1`), which ships with Git.
+That is the whole procedure. There is no release script, no tagging step and no second file to
+keep in step.
 
-It stops before doing anything if:
-
-- the version is not `MAJOR.MINOR`, is unchanged, or is older than the current one;
-- you are not on `main`;
-- the working tree is dirty;
-- `main` has diverged from `origin/main` (push or pull first);
-- the tag already exists locally or on the remote;
-- `release` has commits `main` does not;
-- the tests fail.
-
-Nothing is pushed until every local step has succeeded, so a failure part-way leaves you with a
-local commit and tag you can inspect, fix or delete:
-
-```bash
-git tag -d v1.1 && git reset --hard HEAD~1     # undo a local, unpushed release
-```
-
-Overrides, if your names differ: `RELEASE_REMOTE`, `RELEASE_TRUNK`, `RELEASE_DEV`,
-`RELEASE_BRANCH`.
+Bumping the version directly on `main` works too, if you would rather not round-trip through
+`dev`.
 
 ## CI/CD on Forgejo
 
@@ -113,27 +97,38 @@ workflows use the `docker-cli` runner and need nothing but Docker.
 | Workflow | Runs on | Does |
 | --- | --- | --- |
 | [`test.yml`](../.forgejo/workflows/test.yml) | Pushes to `dev`, `main`, `release`; PRs into `dev` or `main` | `docker build --target test .` |
-| [`release.yml`](../.forgejo/workflows/release.yml) | Pushes of a `v*` tag | Checks the tag against the packaged version, runs the suite, then builds and pushes the image |
+| [`release.yml`](../.forgejo/workflows/release.yml) | Pushes to `main` that touch `pyproject.toml` | Publishes, **if the version actually changed** |
 
-The test suite lives in the **Dockerfile's `test` stage**, so CI does not need a Python
-toolchain, a matrix or a cached virtualenv — one `docker build` either passes or fails, and the
-same command reproduces CI exactly on your laptop:
+The test suite lives in the **Dockerfile's `test` stage**, so CI needs no Python toolchain, no
+matrix and no cached virtualenv — one `docker build` either passes or fails, and the same command
+reproduces CI exactly on your laptop:
 
 ```bash
 docker build --target test .
 ```
 
-`release.yml` publishes three tags for one release:
+### How the release trigger decides
+
+`pyproject.toml` changes for all sorts of reasons — a new dependency, a pytest setting — and none
+of those should republish an image. So the first step reads the version from the current commit
+and from its first parent, and:
+
+| Situation | What happens |
+| --- | --- |
+| Version changed (`0.1` → `0.2`) | Tests run, image is built and pushed |
+| `pyproject.toml` changed, version did not | Job ends green, having done nothing |
+| Version went backwards (`1.0` → `0.9`) | Fails, before anything is published |
+| Version is not `MAJOR.MINOR` (`1.0.1`) | Fails, before anything is published |
+
+So a release is never published twice, and an unrelated edit never overwrites a published image.
+
+### What gets published
 
 | Image tag | Means |
 | --- | --- |
-| `forgejo.subversive.link/subversive/sable:1.1` | That release, immutably. What a server should pin to. |
+| `…/sable:0.2` | That release, immutably. What a server should pin to. |
 | `…/sable:latest` | The newest release. |
 | `…/sable:build-<n>` | The CI run that produced it, for tracing a build back to its logs. |
-
-Before the image is built, the workflow refuses a tag whose number disagrees with
-`src/sable/__init__.py` — so a hand-made `git tag v9.9` fails loudly instead of publishing a
-mislabelled image. `scripts/release.sh` cannot produce that mismatch.
 
 ### What it needs configured
 
@@ -152,54 +147,65 @@ If you publish under a different name or user, the three places to change are th
 
 ## Using a release
 
-```bash
-git fetch --tags
-git checkout v1.1              # exactly what went out
-```
-
-Or just take the image CI already built:
+Take the image CI built:
 
 ```bash
-docker pull forgejo.subversive.link/subversive/sable:1.1
+docker pull forgejo.subversive.link/subversive/sable:0.2
 ```
 
-In `compose.yaml`, swapping `build: .` for
-`image: forgejo.subversive.link/subversive/sable:1.1` pins a host to that release and skips
-building on the server entirely.
-
-On a deployed host, pinning to a tag rather than tracking `main` means a `git pull` cannot
-surprise you mid-week. `release` is the alternative if you would rather always be on the newest
-release: `git fetch && git reset --hard origin/release`.
+In `compose.yaml`, replacing `build: .` with
+`image: forgejo.subversive.link/subversive/sable:0.2` pins a host to that release and skips
+building on the server entirely. Pinning to a version rather than `latest` means a `docker
+compose pull` cannot move you to a new release unintentionally.
 
 Confirm what is actually running:
 
 ```bash
-curl -fsS https://sable.example.org/healthz    # {"version":"1.1", ...}
+curl -fsS https://sable.example.org/healthz    # {"version":"0.2", ...}
 ```
 
 …or ask it in chat with `!version`.
 
+To find the source a release was built from, the workflow stamps the commit into the image:
+
+```bash
+docker image inspect forgejo.subversive.link/subversive/sable:0.2 \
+  --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'
+```
+
+### The `release` branch
+
+Nothing moves it automatically, because that would mean giving the CI runner permission to push
+to the repository. Move it by hand when you want a git ref that says "this is what is released":
+
+```bash
+git branch -f release main && git push origin release
+```
+
+Or ignore it — the registry already holds an immutable image per release, and `test.yml` will
+keep running on it either way.
+
 ## Variations you may want later
 
-**Patching an old release.** With a single `release` branch you cannot ship a fix for 1.1 while
-1.2 is out — the branch has already moved on. When that day comes, branch from the tag:
+**Git tags for releases.** There are none right now: a release is identified by its commit on
+`main` and by its image tag. Without a git tag, finding the source of a release means searching:
 
 ```bash
-git switch -c release/1.1 v1.1
-# fix, then tag v1.1.1 on that branch (the one place a third segment makes sense)
+git log --oneline -S 'version = "0.2"' -- pyproject.toml
 ```
 
-**A changelog.** `git log --first-parent main` between two tags is the honest version of one:
+If that gets old, `release.yml` can create the tag (and a Forgejo Release) itself after a
+successful build. That needs a push-capable token as a secret, and on some forges a tag pushed by
+a workflow does not trigger other workflows — worth checking before relying on it.
 
-```bash
-git log --first-parent --oneline v1.1..v1.2
-```
+**Patch releases.** The scheme has no third segment, so a fix to `1.1` after `1.2` is out means
+either `1.3` (roll forward, usually right) or branching from the release commit and tagging
+`1.1.1` by hand.
 
-If you want a written `CHANGELOG.md`, write it on `dev` as you go and let the release commit
-pick it up; do not try to generate it at release time from commit subjects.
+**A changelog.** `git log --first-parent main` between two release commits is the honest version
+of one. If you want a written `CHANGELOG.md`, write it on `dev` as you go and let the release
+commit carry it.
 
-**Building `main` too.** If you want a staging image from every integration, add a second job to
-`test.yml` (or a third workflow) that pushes `…/sable:main` on pushes to `main`. Keep `latest`
-meaning *the latest release* — that is the tag people deploy by accident.
-
-**Signed tags.** `git config tag.gpgSign true`, and the script's `git tag -a` will sign.
+**Building `main` on every push.** If you want a staging image from every integration, add a job
+that pushes `…/sable:main`. Keep `latest` meaning *the latest release* — that is the tag people
+deploy by accident.
