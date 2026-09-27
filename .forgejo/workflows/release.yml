@@ -1,0 +1,63 @@
+name: Release
+
+# Publishing is driven by the tag, which is the release (see docs/releasing.md).
+# `bash scripts/release.sh 1.1` pushes v1.1, and that push lands here.
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-push:
+    runs-on: docker-cli
+    steps:
+      - name: Trust the Subversive CAs
+        run: |
+          apt-get update && apt-get install -y ca-certificates
+          echo "${{ secrets.SUBVERSIVE_INTERMEDIATE }}" > /usr/local/share/ca-certificates/subversive-inter-ca.crt
+          echo "${{ secrets.SUBVERSIVE_ROOT }}" > /usr/local/share/ca-certificates/subversive-root-ca.crt
+          update-ca-certificates
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check the tag matches the packaged version
+        id: version
+        run: |
+          set -eu
+          TAG="${{ github.ref_name }}"
+          VERSION="${TAG#v}"
+          PACKAGED="$(sed -nE 's/^__version__ = "(.*)"$/\1/p' src/sable/__init__.py)"
+          if [ "$VERSION" != "$PACKAGED" ]; then
+            echo "tag $TAG says $VERSION but src/sable/__init__.py says $PACKAGED." >&2
+            echo "Use scripts/release.sh, which keeps the two in step." >&2
+            exit 1
+          fi
+          echo "Releasing sable $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Run the test suite
+        run: docker build --target test --progress plain .
+
+      - name: Log in to Forgejo Registry
+        uses: docker/login-action@v3
+        with:
+          registry: forgejo.subversive.link
+          username: rundeck_automation
+          password: ${{ secrets.RUNDECK_KEY_VALUE }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          target: runtime
+          push: true
+          tags: |
+            forgejo.subversive.link/subversive/sable:${{ steps.version.outputs.version }}
+            forgejo.subversive.link/subversive/sable:latest
+            forgejo.subversive.link/subversive/sable:build-${{ github.run_number }}
+          labels: |
+            org.opencontainers.image.source=https://forgejo.subversive.link/subversive/sable
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}

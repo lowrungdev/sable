@@ -2,9 +2,11 @@
 .gitignore
 .env
 .venv
-tests
 __pycache__
 *.pyc
 .pytest_cache
 compose.yaml
 Dockerfile
+scripts
+# NOTE: tests/ is deliberately NOT ignored - the Dockerfile's `test` stage
+# copies it, and that stage is how CI runs the suite.

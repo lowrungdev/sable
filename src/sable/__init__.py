@@ -1,3 +1,6 @@
 """sable - a Nextcloud Talk bot."""
 
-__version__ = "0.1.0"
+#: Single source of truth for the version. MAJOR.MINOR only - see
+#: docs/releasing.md. pyproject.toml reads this file, and scripts/release.sh
+#: rewrites this line, so nothing else should hardcode a version.
+__version__ = "0.1"

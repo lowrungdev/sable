@@ -22,6 +22,7 @@ Talk is signed the way the Bot API expects.
 | [purpose.md](purpose.md) | What this is for, what it deliberately does not do, why it is built this way, and the trust boundaries |
 | [configuration.md](configuration.md) | Every environment variable, with value formats, provider recipes and worked examples |
 | [deployment.md](deployment.md) | Getting it running for real: Docker, systemd, TLS, `occ talk:bot:install`, verification, operations, troubleshooting |
+| [releasing.md](releasing.md) | The `dev` / `main` / `release` branch model, the version scheme, `scripts/release.sh`, and the Forgejo Actions pipeline |
 | [LICENSE](LICENSE) | MIT |
 
 ## How it fits together

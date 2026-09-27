@@ -1,0 +1,32 @@
+name: Tests
+
+# Every push to a long-lived branch, and every pull request into one. The suite
+# runs inside the Dockerfile's `test` stage, so CI needs nothing but Docker and
+# a test failure fails the build.
+on:
+  push:
+    branches:
+      - dev
+      - main
+      - release
+  pull_request:
+    branches:
+      - dev
+      - main
+
+jobs:
+  test:
+    runs-on: docker-cli
+    steps:
+      - name: Trust the Subversive CAs
+        run: |
+          apt-get update && apt-get install -y ca-certificates
+          echo "${{ secrets.SUBVERSIVE_INTERMEDIATE }}" > /usr/local/share/ca-certificates/subversive-inter-ca.crt
+          echo "${{ secrets.SUBVERSIVE_ROOT }}" > /usr/local/share/ca-certificates/subversive-root-ca.crt
+          update-ca-certificates
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run the test suite
+        run: docker build --target test --progress plain .

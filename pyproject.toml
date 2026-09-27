@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sable"
-version = "0.1.0"
+dynamic = ["version"]
 description = "A Nextcloud Talk bot: command handling, an OpenAI-compatible LLM assistant, and an inbound alerting webhook."
 readme = "docs/README.md"
 license = "MIT"
@@ -33,3 +33,6 @@ packages = ["src/sable"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 filterwarnings = ["error::DeprecationWarning:sable.*"]
+
+[tool.hatch.version]
+path = "src/sable/__init__.py"
