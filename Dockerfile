@@ -1,17 +1,39 @@
-FROM python:3.12-slim
+# Multi-stage: `docker build .` produces the runtime image; CI gates on
+# `docker build --target test .`, which fails the build if pytest fails.
+#
+# With BuildKit (the default since Docker 23, and what buildx uses in CI) the
+# test stage is skipped unless it is the target. The classic builder would run
+# it either way, which is slower but not wrong.
+
+FROM python:3.12-slim AS base
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1 \
-    SABLE_HOST=0.0.0.0 \
-    SABLE_PORT=8080
+    PIP_NO_CACHE_DIR=1
 
 WORKDIR /app
 
-# Dependencies first, so edits to the source do not bust the layer cache.
+# Everything the build backend needs for metadata, including the version, which
+# it reads from src/sable/__init__.py.
 COPY pyproject.toml ./
 COPY docs/README.md docs/LICENSE ./docs/
 COPY src ./src
+
+# --------------------------------------------------------------------------- #
+# Tests. Never part of the runtime image.
+FROM base AS test
+
+COPY tests ./tests
+RUN pip install --no-cache-dir '.[dev]' \
+    && python -m pytest -q
+
+# --------------------------------------------------------------------------- #
+# The image that ships.
+FROM base AS runtime
+
+ENV SABLE_HOST=0.0.0.0 \
+    SABLE_PORT=8080
+
 RUN pip install --no-cache-dir .
 
 RUN useradd --create-home --uid 10001 sable
