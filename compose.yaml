@@ -158,8 +158,9 @@ services:
 
       # ===================== Webhooks from other services =================
       # Services that cannot speak /notify's shape post to /hook/<name>.
-      # Hook name to conversation, alias or raw token.
-      # SABLE_HOOKS: "komodo=alerts,grafana=ops"
+      # Hook name to conversation: a token from the conversation's URL, or a
+      # SABLE_NOTIFY_ROOMS alias. Not the room's name.
+      # SABLE_HOOKS: "komodo=a1b2c3d4,grafana=e5f6g7h8"
 
       # One token per hook, in its own variable. Keep the values in .env.
       # SABLE_HOOK_TOKEN_KOMODO: "${SABLE_HOOK_TOKEN_KOMODO:-}"

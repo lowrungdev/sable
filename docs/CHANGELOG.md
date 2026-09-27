@@ -38,6 +38,14 @@ Format: `## <version>`, optionally followed by a date. Anything until the next
   mentions and reactions, and their messages are never cached for ⁉️ either, so
   their words do not reach the model even when somebody else asks about them.
   Entries match a bare user id, a full actor id, or a display name.
+- Conversations are checked when sable starts. `SABLE_HOOKS` and
+  `SABLE_NOTIFY_ROOMS` entries must name a conversation *token* — the lowercase
+  string at the end of the conversation's URL — or, for a hook, an alias from
+  `SABLE_NOTIFY_ROOMS`. A room's name where a token belongs now fails at boot
+  with a message saying where to find the token, instead of reaching Talk and
+  coming back as an opaque `998 Invalid query` the first time an alert fires.
+  Hooks also resolve aliases now, which the documentation had claimed and the
+  code had not done.
 
 ## 0.4
 

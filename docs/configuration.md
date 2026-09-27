@@ -134,13 +134,13 @@ renders it into a message.
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `SABLE_HOOKS` | *(empty)* | Hook name to conversation, as `komodo=alerts,grafana=ops`. The conversation can be a `SABLE_NOTIFY_ROOMS` alias or a raw token. Empty means every `/hook/...` answers 404. |
+| `SABLE_HOOKS` | *(empty)* | Hook name to conversation, as `komodo=a1b2c3d4,grafana=e5f6g7h8`. The conversation is a token or a `SABLE_NOTIFY_ROOMS` alias, checked at startup. Empty means every `/hook/...` answers 404. |
 | `SABLE_HOOK_TOKEN_<NAME>` | *(required per hook)* | That hook's own token, one variable each so a secret store can inject them separately. |
 | `SABLE_HOOK_TEMPLATE_<NAME>` | *(empty)* | Optional format string. Without one the payload is rendered generically. |
 | `SABLE_MAX_HOOK_BYTES` | `262144` (256 KiB) | Largest payload accepted. Alerts are small; this is a cap on abuse. |
 
-A hook with no token, or a token with no hook, is a startup error rather than something you
-discover when an alert goes missing.
+A hook with no token, a token with no hook, or a conversation that is neither an alias nor a
+token is a startup error rather than something you discover when an alert goes missing.
 
 ### What a payload turns into
 
@@ -289,6 +289,11 @@ truncated, raise `SABLE_LLM_MAX_TOKENS` or lower the reasoning effort via
 Setting `SABLE_NOTIFY_TOKEN` without `SABLE_NEXTCLOUD_URL` is a startup error: an outbound-only
 message has no incoming webhook to learn the server address from.
 
+A conversation is named by its *token*, not by its name. The token is the lowercase string at
+the end of the conversation's URL — in `https://cloud.example.org/call/a1b2c3d4` it is
+`a1b2c3d4`. Talk's own routes only match lowercase, so a room name put where a token belongs
+cannot work, and both `SABLE_NOTIFY_ROOMS` and `SABLE_HOOKS` are checked for it at startup.
+
 ## Process
 
 | Variable | Default | Notes |
@@ -381,6 +386,9 @@ SABLE_LOG_LEVEL=INFO
 | `… must be a boolean` / `… must be an integer` / `… must be a number` | A typo in the value; see [value formats](#value-formats). |
 | `… is not valid JSON` / `must be a JSON object` | `SABLE_LLM_EXTRA_BODY` needs an object: `{"top_k": 40}`. Quote it in a shell. |
 | `… entries must look like alias=token` | `SABLE_NOTIFY_ROOMS` wants `name=token` pairs or a JSON object. |
+| `… is neither a conversation token nor a SABLE_NOTIFY_ROOMS alias` | A `SABLE_HOOKS` entry names a room instead of its token. Take the token from the conversation's URL. |
+| `… is not a conversation token` | The same, for a `SABLE_NOTIFY_ROOMS` entry. |
+| `every hook needs its own token` | Add `SABLE_HOOK_TOKEN_<NAME>` for each hook in `SABLE_HOOKS`. |
 
 Runtime problems — 401s, 403s, silence — are in
 [deployment.md](deployment.md#troubleshooting).

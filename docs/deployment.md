@@ -333,9 +333,13 @@ Komodo, Alertmanager, Grafana and most other tools will not send sable's `/notif
 often cannot set an `Authorization` header. Give each one a hook instead:
 
 ```ini
-SABLE_HOOKS=komodo=alerts
+SABLE_HOOKS=komodo=a1b2c3d4
 SABLE_HOOK_TOKEN_KOMODO=<a token just for this hook>
 ```
+
+`a1b2c3d4` is the conversation's token, the lowercase string at the end of its URL, not the
+name shown in the sidebar. An alias from `SABLE_NOTIFY_ROOMS` works here too. Either way it is
+checked when sable starts, so a name put here fails at boot rather than when an alert fires.
 
 In Komodo, create an Alerter with a Custom endpoint pointing at:
 

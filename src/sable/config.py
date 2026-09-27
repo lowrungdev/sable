@@ -10,7 +10,20 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
+
+#: A Talk conversation token, as it appears at the end of the conversation's
+#: URL. Talk's own routes only match lowercase, so anything else can never
+#: reach a conversation - and in practice means someone pasted the room's
+#: *name* where its token belongs.
+TOKEN_RE = re.compile(r"^[a-z0-9]{4,64}$")
+
+#: Said whenever a token turns out not to be one.
+TOKEN_HINT = (
+    "a conversation token is the lowercase string at the end of the "
+    "conversation's URL (.../call/abcd1234), not the name of the room"
+)
 
 
 class ConfigError(ValueError):
@@ -205,8 +218,13 @@ class Config:
         return bool(self.notify_token)
 
     def hook_room(self, name: str) -> str:
-        """The conversation a hook posts into, or '' if there is no such hook."""
-        return self.hooks.get(name.strip().lower(), "")
+        """The conversation a hook posts into, or '' if there is no such hook.
+
+        The configured value may be a ``SABLE_NOTIFY_ROOMS`` alias rather than a
+        token, resolved here so both endpoints name conversations the same way.
+        """
+        room = self.hooks.get(name.strip().lower(), "")
+        return self.notify_rooms.get(room, room)
 
     def hook_token(self, name: str) -> str:
         return self.hook_tokens.get(name.strip().lower(), "")
@@ -338,6 +356,18 @@ class Config:
                 + ", SABLE_HOOK_TOKEN_".join(name.upper() for name in unused)
                 + " has no matching entry in SABLE_HOOKS"
             )
+        for hook, room in sorted(config.hooks.items()):
+            if not TOKEN_RE.match(config.hook_room(hook)):
+                raise ConfigError(
+                    f"SABLE_HOOKS entry {hook}={room!r} is neither a conversation "
+                    f"token nor a SABLE_NOTIFY_ROOMS alias: {TOKEN_HINT}."
+                )
+        for alias, room in sorted(config.notify_rooms.items()):
+            if not TOKEN_RE.match(room):
+                raise ConfigError(
+                    f"SABLE_NOTIFY_ROOMS entry {alias}={room!r} is not a "
+                    f"conversation token: {TOKEN_HINT}."
+                )
         if config.hooks and not config.nextcloud_url:
             raise ConfigError(
                 "SABLE_NEXTCLOUD_URL is required when SABLE_HOOKS is set: a webhook "
