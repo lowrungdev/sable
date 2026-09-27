@@ -168,6 +168,7 @@ jobs:
 
       - name: Build and push the image
         if: steps.gate.outputs.publish == 'true'
+        id: image
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -176,7 +177,7 @@ jobs:
           tags: |
             forgejo.subversive.link/subversive/sable:${{ steps.meta.outputs.version }}
             forgejo.subversive.link/subversive/sable:latest
-            forgejo.subversive.link/subversive/sable:build-${{ github.run_number }}
+            forgejo.subversive.link/subversive/sable:${{ github.sha }}
           labels: |
             org.opencontainers.image.source=https://forgejo.subversive.link/subversive/sable
             org.opencontainers.image.version=${{ steps.meta.outputs.version }}
@@ -256,7 +257,11 @@ jobs:
         run: |
           V="${{ steps.meta.outputs.version }}"
           echo "Published sable $V"
-          echo "  image:    $IMAGE:$V (also :latest, :build-${{ github.run_number }})"
+          echo "  image:    $IMAGE:$V (also :latest)"
+          echo "  commit:   $IMAGE:${{ github.sha }}"
+          # The digest addresses this exact image for ever, tag or no tag.
+          echo "  digest:   ${{ steps.image.outputs.digest }}"
+          echo "  pin with: $IMAGE@${{ steps.image.outputs.digest }}"
           if [ "${{ steps.gate.outputs.create_release }}" = "true" ]; then
             echo "  release:  ${{ github.server_url }}/${{ github.repository }}/releases/tag/v$V"
           else

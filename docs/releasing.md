@@ -101,7 +101,7 @@ runner.
 | Workflow | Runs on | Does |
 | --- | --- | --- |
 | [`test.yml`](../.forgejo/workflows/test.yml) | Pushes to `dev`, `main`, `release`; PRs into `dev` or `main` | Runs pytest |
-| [`build.yml`](../.forgejo/workflows/build.yml) | **Button only** (`workflow_dispatch`) | Tests, then pushes `sable:<branch>` and `sable:<branch>-<sha>` |
+| [`build.yml`](../.forgejo/workflows/build.yml) | **Button only** (`workflow_dispatch`) | Tests, then pushes `sable:dev` and `sable:<commit>` |
 | [`release.yml`](../.forgejo/workflows/release.yml) | Pushes to `release`, **plus a button** | Tests, pushes the versioned image, creates the Forgejo Release |
 
 Every workflow that builds an image runs the suite first, from the lock file:
@@ -121,9 +121,10 @@ sable from `uv.lock` and runs it, and `docker build .` builds exactly the image 
 ### The buttons
 
 **Actions → Manual build → Run workflow**, then pick a branch. That is how you get an image out
-of `dev`, which never builds on its own. It pushes tags named after the branch — `sable:dev`,
-`sable:dev-4344645` — and never `:latest`, never a version, and no Release. Nothing you press
-there can be mistaken for a release.
+of `dev`, which never builds on its own. Everything built this way is pushed as `sable:dev` —
+never `:latest`, never a version number, and no Release — so nothing you press there can be
+mistaken for a release. `:dev` moves with each run; the summary prints the digest if you need to
+pin a particular one.
 
 **Actions → Release → Run workflow** rebuilds and re-pushes the image for whatever is on
 `release` right now. It refuses to run on any other branch. Use it when a run failed halfway,
@@ -144,9 +145,10 @@ and leaves that Release untouched.
 
 | Artifact | Where |
 | --- | --- |
-| `…/sable:0.2` | Packages — that release, immutably. What a server should pin to. |
+| `…/sable:0.2` | Packages — that release. What a server should pin to. |
 | `…/sable:latest` | Packages — the newest release. |
-| `…/sable:build-<n>` | Packages — the CI run that made it, for tracing back to logs. |
+| `…/sable:<commit>` | Packages — the full commit sha the image was built from, so any image maps back to its source. |
+| `…/sable@sha256:…` | Packages — the digest, printed in the run summary. Immutable, and the only way to pin one exact build. |
 | Release `v0.2` + git tag | **Releases**, in the repository sidebar |
 | `sable-0.2-py3-none-any.whl` | Attached to that Release, when the wheel builds |
 
@@ -195,6 +197,14 @@ the commit in:
 ```bash
 docker image inspect forgejo.subversive.link/subversive/sable:0.2 \
   --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'
+```
+
+Or go the other way: every image is also tagged with the commit it was built from, so the tag
+list in Packages tells you the source directly.
+
+```bash
+docker pull forgejo.subversive.link/subversive/sable:3076ab81b410d1716dadba50bbef780a70a76fef
+git show 3076ab81b410d1716dadba50bbef780a70a76fef
 ```
 
 Or use the git tag the Release created: `git checkout v0.2`.

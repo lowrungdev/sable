@@ -1,0 +1,12 @@
+# Keep CI-only and tooling files out of the source archives Forgejo generates
+# for each release (the "Source code" zip and tar.gz). `git archive` honours
+# these; clones and checkouts are unaffected.
+#
+# Deliberately not excluded: docs/ (pyproject.toml points at docs/README.md and
+# docs/LICENSE, so an archive without them cannot be installed) and uv.lock
+# (needed to install the pinned dependencies).
+
+tests           export-ignore
+.forgejo        export-ignore
+.gitignore      export-ignore
+.dockerignore   export-ignore

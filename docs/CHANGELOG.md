@@ -12,7 +12,17 @@ Format: `## <version>`, optionally followed by a date. Anything until the next
 
 ## Unreleased
 
-_Nothing yet._
+- Every published image is now tagged with the full commit sha it was built
+  from, so any image in Packages maps back to its source without inspecting
+  labels. Release builds push `:<version>`, `:latest` and `:<commit>`; manual
+  builds push `:dev` and `:<commit>`.
+- The `:build-<n>` tag is gone. It named a CI run rather than anything about the
+  code, and the commit tag and image digest both say more. Both workflows now
+  print the digest and a ready-to-use `@sha256:…` pin line.
+- The source archives attached to a release no longer carry CI-only files:
+  `tests/`, `.forgejo/`, `.gitignore` and `.dockerignore` are `export-ignore`d,
+  taking the zip from 44 entries to 28. `docs/` and `uv.lock` stay, since an
+  archive without them cannot be installed.
 
 ## 0.2
 
