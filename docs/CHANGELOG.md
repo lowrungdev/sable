@@ -10,7 +10,7 @@ is not worth publishing.
 Format: `## <version>`, optionally followed by a date. Anything until the next
 `##` heading is the body.
 
-## Unreleased
+## 0.5
 
 - **`/notify` can attach a file** — same URL, same single call. It accepts the
   original JSON, JSON with a base64 `file`, or `multipart/form-data` with an
