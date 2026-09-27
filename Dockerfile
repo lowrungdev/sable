@@ -34,7 +34,8 @@ RUN pip install --no-cache-dir '.[dev]' \
 # `docker create` + `docker cp`; nothing else needs this stage.
 FROM base AS wheel
 
-RUN pip install --no-cache-dir build \n    && python -m build --wheel --outdir /dist
+RUN pip install --no-cache-dir build \
+    && python -m build --wheel --outdir /dist
 
 # --------------------------------------------------------------------------- #
 # The image that ships.

@@ -141,7 +141,11 @@ and leaves that Release untouched.
 | `…/sable:latest` | Packages — the newest release. |
 | `…/sable:build-<n>` | Packages — the CI run that made it, for tracing back to logs. |
 | Release `v0.2` + git tag | **Releases**, in the repository sidebar |
-| `sable-0.2-py3-none-any.whl` | Attached to that Release |
+| `sable-0.2-py3-none-any.whl` | Attached to that Release, when the wheel builds |
+
+The wheel is archival only, so its step is `continue-on-error`: if it fails, the run warns, the
+release is still created, and it simply has no attachment. Nothing about the release depends on
+it.
 
 ### What it needs configured
 

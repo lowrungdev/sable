@@ -176,6 +176,10 @@ jobs:
 
       - name: Build the wheel
         if: steps.gate.outputs.create_release == 'true'
+        # The wheel is an archival extra. Losing it must not cost you the
+        # release itself, so a failure here is a warning and the next step
+        # carries on without an attachment.
+        continue-on-error: true
         run: |
           set -eu
           docker build --target wheel -t sable-wheel:${{ github.run_number }} .
@@ -228,6 +232,11 @@ jobs:
         if: steps.gate.outputs.create_release == 'true'
         run: |
           set -eu
+          if ! ls dist/*.whl >/dev/null 2>&1; then
+            echo "No wheel was built, so there is nothing to attach."
+            echo "The release itself is published; see the warning above."
+            exit 0
+          fi
           WHEEL="$(ls dist/*.whl | head -1)"
           code="$(curl -sS -o /tmp/asset.json -w '%{http_code}' -X POST \
             -H "Authorization: token ${FORGEJO_TOKEN:-$RUNNER_TOKEN}" \
