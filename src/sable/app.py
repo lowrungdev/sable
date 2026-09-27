@@ -35,6 +35,7 @@ from .bot import Bot
 from .config import Config
 from .events import EventError, parse_event
 from .files import FilesError
+from .hooks import render, render_with_template
 from .signing import HEADER_BACKEND, HEADER_RANDOM, HEADER_SIGNATURE, verify
 from .talk import TalkError
 
@@ -118,6 +119,13 @@ def create_app(config: Config | None = None, bot: Bot | None = None) -> FastAPI:
             f"up to {megabytes(config.max_upload_bytes)}"
             if config.uploads_enabled
             else "disabled (set SABLE_NEXTCLOUD_USER and SABLE_NEXTCLOUD_PASSWORD)",
+        )
+        log.info(
+            "  hooks:          %s",
+            ", ".join(
+                f"/hook/{name} -> {room}" for name, room in sorted(config.hooks.items())
+            )
+            or "(none)",
         )
         log.info(
             "  ignoring:       %s",
@@ -271,6 +279,92 @@ def create_app(config: Config | None = None, bot: Bot | None = None) -> FastAPI:
             message_id or "?",
         )
         return {"ok": True, "room": room, "messageId": message_id}
+
+    @app.post("/hook/{name}", status_code=status.HTTP_201_CREATED, tags=["alerting"])
+    async def hook(name: str, request: Request) -> dict[str, object]:
+        """Receive a webhook from another service and post it to a conversation.
+
+        For services that cannot speak `/notify`'s shape - Komodo, Alertmanager,
+        Grafana and most of the rest. Each hook has its own conversation and its
+        own token, and the payload is rendered generically unless the hook has a
+        format string.
+        """
+        room = config.hook_room(name)
+        if not room:
+            # Same answer whether the hook is unknown or the feature is unused,
+            # so probing cannot enumerate which hooks exist.
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"no hook named {name!r}")
+
+        # Komodo and friends cannot set headers, so the token may come from the
+        # query string. That is a real exposure and is documented as one.
+        supplied = request.query_params.get("token", "")
+        header = request.headers.get("authorization", "")
+        if not supplied and header:
+            scheme, _, value = header.partition(" ")
+            supplied = value.strip() if scheme.lower() == "bearer" else ""
+        if not hmac.compare_digest(supplied, config.hook_token(name)):
+            raise HTTPException(
+                status.HTTP_401_UNAUTHORIZED,
+                "this hook needs its own token, as a bearer header or ?token=",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        body = await request.body()
+        if len(body) > config.max_hook_bytes:
+            raise HTTPException(
+                status.HTTP_413_CONTENT_TOO_LARGE,
+                f"the payload is larger than SABLE_MAX_HOOK_BYTES "
+                f"({config.max_hook_bytes} bytes)",
+            )
+
+        try:
+            payload = json.loads(body) if body.strip() else {}
+        except json.JSONDecodeError:
+            # Not everything sends JSON. Text is better than a rejection.
+            payload = body.decode("utf-8", "replace")
+
+        template = config.hook_templates.get(name.strip().lower(), "")
+        if template:
+            message, missing = render_with_template(template, payload)
+            if missing:
+                log.warning(
+                    "hook %r: its format string asks for %s, which the payload "
+                    "does not have",
+                    name,
+                    ", ".join(sorted(set(missing))),
+                )
+        else:
+            message = render(payload)
+
+        if not message.strip():
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, "the payload rendered as nothing"
+            )
+
+        talk_bot = current_bot(request)
+        try:
+            message_id = await talk_bot.send(room, message)
+        except TalkError as exc:
+            log.warning("posting hook %r to %s failed: %s", name, room, exc)
+            code = (
+                status.HTTP_400_BAD_REQUEST
+                if exc.status in {400, 404}
+                else status.HTTP_502_BAD_GATEWAY
+            )
+            raise HTTPException(code, f"Talk rejected the message: {exc}") from exc
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status.HTTP_502_BAD_GATEWAY, f"could not reach Nextcloud: {exc}"
+            ) from exc
+
+        log.info(
+            "hook %r posted %d chars to %s as message %s",
+            name,
+            len(message),
+            room,
+            message_id or "?",
+        )
+        return {"ok": True, "hook": name, "room": room, "messageId": message_id}
 
     @app.get("/", include_in_schema=False)
     async def root() -> Response:

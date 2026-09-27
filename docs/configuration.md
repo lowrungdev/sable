@@ -126,6 +126,74 @@ only answer about messages it saw arrive, and keeps the last `SABLE_MESSAGE_CACH
 conversation for the purpose. React to something older, or posted before the bot joined, and it
 says so rather than guessing. Nothing is cached at all when `SABLE_ASK_REACTION` is empty.
 
+## Webhooks from other services
+
+`/notify` expects sable's own shape, which most services cannot send, and many of them cannot
+set an `Authorization` header either. `/hook/{name}` takes whatever JSON they do send and
+renders it into a message.
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `SABLE_HOOKS` | *(empty)* | Hook name to conversation, as `komodo=alerts,grafana=ops`. The conversation can be a `SABLE_NOTIFY_ROOMS` alias or a raw token. Empty means every `/hook/...` answers 404. |
+| `SABLE_HOOK_TOKEN_<NAME>` | *(required per hook)* | That hook's own token, one variable each so a secret store can inject them separately. |
+| `SABLE_HOOK_TEMPLATE_<NAME>` | *(empty)* | Optional format string. Without one the payload is rendered generically. |
+| `SABLE_MAX_HOOK_BYTES` | `262144` (256 KiB) | Largest payload accepted. Alerts are small; this is a cap on abuse. |
+
+A hook with no token, or a token with no hook, is a startup error rather than something you
+discover when an alert goes missing.
+
+### What a payload turns into
+
+The renderer flattens the payload to dotted paths, so nesting stops mattering, then looks for a
+severity among `level`, `severity`, `status`, `state`, `priority` and `urgency`; a title among
+`title`, `subject`, `summary`, `alertname`, `event`, `name` and `type`; and a body among
+`message`, `text`, `description`, `details`, `body`, `reason` and `error`. Whatever is left is
+shown as key and value pairs.
+
+Identifiers and timestamps are dropped, because a chat message already has its own time and the
+ids mean nothing in a room. Repeated name and value pairs are shown once — Alertmanager sends
+`alertname` and `severity` three times over. URLs are kept, since a link back to the dashboard
+that fired is usually the most useful part. Long payloads are capped, with a count of what was
+left out.
+
+A Komodo alert arrives as:
+
+```
+**CRITICAL** sable
+resolved: false · target.type: Stack · data.type: StackStateChange · server_name: prod-1 · from: Running · to: Unhealthy
+```
+
+Anything that is not JSON is posted as text rather than rejected, on the grounds that an alert
+that arrives slightly wrong beats one that does not arrive.
+
+### Format strings
+
+Set `SABLE_HOOK_TEMPLATE_<NAME>` to take control of the wording. `{dotted.path}` is substituted
+from the same flattened payload:
+
+```ini
+SABLE_HOOK_TEMPLATE_KOMODO=**{level}** {data.type}: {data.data.name} on {data.data.server_name} went {data.data.from} to {data.data.to}
+```
+
+```
+**CRITICAL** StackStateChange: sable on prod-1 went Running to Unhealthy
+```
+
+Paths reach into lists as well, so `{alerts.0.labels.instance}` works, and naming a whole object
+gives you its JSON. Substitution is all it does: there are no expressions, no conditionals and
+nothing that can run. A path the payload does not have renders as `?` and logs a warning, so a
+template that drifts out of date still delivers the alert.
+
+Doubled braces are literal, so `{{like this}}` renders as `{like this}`.
+
+### The token in the URL
+
+Services that cannot set headers can pass `?token=...` instead, which is the only way Komodo can
+authenticate. That puts a credential in a URL, where proxies and access logs will record it,
+which is why each hook has its own token: one exposed in a log costs you that hook rather than
+everything `/notify` can reach. It is listed among the
+[accepted risks](security.md#accepted-risks).
+
 ## File attachments
 
 `/notify` can carry a file, but not with the bot secret: the Talk bot API has no upload

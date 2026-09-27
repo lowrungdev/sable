@@ -81,6 +81,19 @@ def _mapping(name: str) -> dict[str, str]:
     return out
 
 
+def _prefixed(prefix: str) -> dict[str, str]:
+    """Collect ``PREFIX_NAME=value`` into ``{"name": "value"}``.
+
+    One variable per entry rather than one variable holding all of them, so a
+    secret store can inject each token separately.
+    """
+    found: dict[str, str] = {}
+    for key, value in os.environ.items():
+        if key.startswith(prefix) and len(key) > len(prefix) and value.strip():
+            found[key[len(prefix) :].strip().lower()] = value.strip()
+    return found
+
+
 def _json_object(name: str) -> dict[str, object]:
     raw = _str(name)
     if not raw:
@@ -159,6 +172,18 @@ class Config:
     notify_token: str = ""
     notify_rooms: dict[str, str] = field(default_factory=dict)
 
+    # --- generic webhook receivers ----------------------------------------
+    #: Hook name to conversation, for services that cannot speak sable's own
+    #: /notify shape. Each needs its own token in SABLE_HOOK_TOKEN_<NAME>.
+    hooks: dict[str, str] = field(default_factory=dict)
+    hook_tokens: dict[str, str] = field(default_factory=dict)
+    #: Optional per-hook format string; without one the payload is rendered
+    #: generically. `{dotted.path}` is substituted from the payload.
+    hook_templates: dict[str, str] = field(default_factory=dict)
+    #: Largest webhook body accepted on /hook. Alerts are small; this is a cap
+    #: on abuse rather than a size anyone should reach.
+    max_hook_bytes: int = 256 * 1024
+
     # --- file attachments -------------------------------------------------
     #: A Nextcloud *user* account, used only to upload and share files. The bot
     #: API cannot attach anything to a message, so this is the second, larger
@@ -178,6 +203,13 @@ class Config:
     @property
     def notify_enabled(self) -> bool:
         return bool(self.notify_token)
+
+    def hook_room(self, name: str) -> str:
+        """The conversation a hook posts into, or '' if there is no such hook."""
+        return self.hooks.get(name.strip().lower(), "")
+
+    def hook_token(self, name: str) -> str:
+        return self.hook_tokens.get(name.strip().lower(), "")
 
     @property
     def uploads_enabled(self) -> bool:
@@ -270,6 +302,12 @@ class Config:
             ignore_users=_csv("SABLE_IGNORE_USERS"),
             notify_token=_str("SABLE_NOTIFY_TOKEN"),
             notify_rooms=_mapping("SABLE_NOTIFY_ROOMS"),
+            hooks={
+                name.lower(): room for name, room in _mapping("SABLE_HOOKS").items()
+            },
+            hook_tokens=_prefixed("SABLE_HOOK_TOKEN_"),
+            hook_templates=_prefixed("SABLE_HOOK_TEMPLATE_"),
+            max_hook_bytes=_int("SABLE_MAX_HOOK_BYTES", 256 * 1024),
             nextcloud_user=_str("SABLE_NEXTCLOUD_USER"),
             nextcloud_password=_str("SABLE_NEXTCLOUD_PASSWORD"),
             upload_path="/" + _str("SABLE_UPLOAD_PATH", "/sable").strip("/"),
@@ -279,6 +317,34 @@ class Config:
             log_level=_str("SABLE_LOG_LEVEL", "INFO").upper(),
         )
 
+        missing = sorted(set(config.hooks) - set(config.hook_tokens))
+        if missing:
+            raise ConfigError(
+                "every hook needs its own token: "
+                + ", ".join(f"SABLE_HOOK_TOKEN_{name.upper()}" for name in missing)
+                + " not set"
+            )
+        stray = sorted(set(config.hook_templates) - set(config.hooks))
+        if stray:
+            raise ConfigError(
+                "SABLE_HOOK_TEMPLATE_"
+                + ", SABLE_HOOK_TEMPLATE_".join(name.upper() for name in stray)
+                + " has no matching entry in SABLE_HOOKS"
+            )
+        unused = sorted(set(config.hook_tokens) - set(config.hooks))
+        if unused:
+            raise ConfigError(
+                "SABLE_HOOK_TOKEN_"
+                + ", SABLE_HOOK_TOKEN_".join(name.upper() for name in unused)
+                + " has no matching entry in SABLE_HOOKS"
+            )
+        if config.hooks and not config.nextcloud_url:
+            raise ConfigError(
+                "SABLE_NEXTCLOUD_URL is required when SABLE_HOOKS is set: a webhook "
+                "from another service carries no Nextcloud address to reply to."
+            )
+        if config.max_hook_bytes <= 0:
+            raise ConfigError("SABLE_MAX_HOOK_BYTES must be greater than zero")
         if bool(config.nextcloud_user) != bool(config.nextcloud_password):
             raise ConfigError(
                 "SABLE_NEXTCLOUD_USER and SABLE_NEXTCLOUD_PASSWORD go together: "

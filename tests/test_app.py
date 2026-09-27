@@ -20,6 +20,11 @@ from sable.talk import API_BASE
 MESSAGE_URL = f"{BACKEND}{API_BASE}/bot/{ROOM}/message"
 
 
+def sent(route) -> list[dict]:
+    """The JSON bodies posted to Talk, in order."""
+    return [json.loads(call.request.content) for call in route.calls]
+
+
 def message_route():
     return respx.post(MESSAGE_URL).mock(
         return_value=httpx.Response(201, json={"ocs": {"data": {"id": 1}}})
@@ -552,3 +557,127 @@ async def test_startup_says_when_nobody_is_ignored(caplog) -> None:
         async for _client in client_for(make_config()):
             pass
     assert "ignoring:       (nobody)" in caplog.text
+
+
+# --------------------------------------------------------------------------- #
+# /hook/{name}: webhooks from services that cannot speak /notify
+# --------------------------------------------------------------------------- #
+
+HOOKS = dict(
+    hooks={"komodo": ROOM},
+    hook_tokens={"komodo": "hook-token"},
+)
+
+KOMODO_PAYLOAD = {
+    "level": "CRITICAL",
+    "resolved": False,
+    "data": {
+        "type": "StackStateChange",
+        "data": {"name": "sable", "server_name": "prod-1", "from": "Running", "to": "Unhealthy"},
+    },
+}
+
+
+@respx.mock
+async def test_a_hook_posts_a_rendered_message() -> None:
+    route = message_route()
+    async for client in client_for(make_config(**HOOKS)):
+        response = await client.post(
+            "/hook/komodo",
+            json=KOMODO_PAYLOAD,
+            headers={"Authorization": "Bearer hook-token"},
+        )
+    assert response.status_code == 201
+    assert response.json() == {"ok": True, "hook": "komodo", "room": ROOM, "messageId": 1}
+    body = sent(route)[0]["message"]
+    assert body.startswith("**CRITICAL**")
+    assert "prod-1" in body and "Unhealthy" in body
+
+
+@respx.mock
+async def test_a_hook_accepts_its_token_in_the_query_string() -> None:
+    # Komodo and friends cannot set headers.
+    route = message_route()
+    async for client in client_for(make_config(**HOOKS)):
+        response = await client.post("/hook/komodo?token=hook-token", json=KOMODO_PAYLOAD)
+    assert response.status_code == 201
+    assert route.called
+
+
+@respx.mock
+async def test_a_hook_template_replaces_the_generic_rendering() -> None:
+    route = message_route()
+    config = make_config(
+        hook_templates={"komodo": "{level}: {data.data.name} is {data.data.to}"}, **HOOKS
+    )
+    async for client in client_for(config):
+        await client.post("/hook/komodo?token=hook-token", json=KOMODO_PAYLOAD)
+    assert sent(route)[0]["message"] == "CRITICAL: sable is Unhealthy"
+
+
+@respx.mock
+async def test_a_template_asking_for_a_missing_path_still_posts(caplog) -> None:
+    route = message_route()
+    config = make_config(hook_templates={"komodo": "{level} {not.there}"}, **HOOKS)
+    async for client in client_for(config):
+        with caplog.at_level(logging.WARNING):
+            await client.post("/hook/komodo?token=hook-token", json=KOMODO_PAYLOAD)
+    assert sent(route)[0]["message"] == "CRITICAL ?"
+    assert "not.there" in caplog.text
+
+
+async def test_a_hook_needs_its_own_token() -> None:
+    async for client in client_for(make_config(**HOOKS)):
+        for url, headers in (
+            ("/hook/komodo", {}),
+            ("/hook/komodo?token=wrong", {}),
+            ("/hook/komodo", {"Authorization": "Bearer wrong"}),
+            ("/hook/komodo", {"Authorization": "hook-token"}),
+        ):
+            response = await client.post(url, json=KOMODO_PAYLOAD, headers=headers)
+            assert response.status_code == 401
+
+
+async def test_the_notify_token_does_not_open_a_hook() -> None:
+    config = make_config(notify_token="alert-token", **HOOKS)
+    async for client in client_for(config):
+        response = await client.post(
+            "/hook/komodo?token=alert-token", json=KOMODO_PAYLOAD
+        )
+    assert response.status_code == 401
+
+
+async def test_an_unknown_hook_is_404() -> None:
+    async for client in client_for(make_config(**HOOKS)):
+        response = await client.post("/hook/grafana?token=hook-token", json=KOMODO_PAYLOAD)
+    assert response.status_code == 404
+
+
+@respx.mock
+async def test_a_hook_accepts_a_payload_that_is_not_json() -> None:
+    # Text beats a rejection: the alert still reaches the room.
+    route = message_route()
+    async for client in client_for(make_config(**HOOKS)):
+        response = await client.post(
+            "/hook/komodo?token=hook-token",
+            content=b"disk is full",
+            headers={"Content-Type": "text/plain"},
+        )
+    assert response.status_code == 201
+    assert sent(route)[0]["message"] == "disk is full"
+
+
+async def test_an_oversized_payload_is_refused() -> None:
+    async for client in client_for(make_config(max_hook_bytes=64, **HOOKS)):
+        response = await client.post(
+            "/hook/komodo?token=hook-token", json={"padding": "x" * 500}
+        )
+    assert response.status_code == 413
+    assert "SABLE_MAX_HOOK_BYTES" in response.json()["detail"]
+
+
+async def test_startup_lists_the_hooks(caplog) -> None:
+    with caplog.at_level(logging.INFO):
+        async for _client in client_for(make_config(**HOOKS)):
+            pass
+    assert f"hooks:          /hook/komodo -> {ROOM}" in caplog.text

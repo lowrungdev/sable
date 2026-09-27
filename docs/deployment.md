@@ -327,6 +327,35 @@ Responses: `201` with the stored filename, path and size; `413` over `SABLE_MAX_
 If the upload succeeds but the share fails, the uploaded file is deleted again rather than left
 orphaned in the bot user's Files.
 
+### Receiving alerts from other services
+
+Komodo, Alertmanager, Grafana and most other tools will not send sable's `/notify` shape, and
+often cannot set an `Authorization` header. Give each one a hook instead:
+
+```ini
+SABLE_HOOKS=komodo=alerts
+SABLE_HOOK_TOKEN_KOMODO=<a token just for this hook>
+```
+
+In Komodo, create an Alerter with a Custom endpoint pointing at:
+
+```
+https://sable.example.org/hook/komodo?token=<the same token>
+```
+
+Komodo cannot set headers, so the token goes in the URL. Anything that can set one is better
+off sending `Authorization: Bearer <token>`, which both are accepted.
+
+That is the whole setup — the payload is rendered without further configuration. To control the
+wording, add a format string:
+
+```ini
+SABLE_HOOK_TEMPLATE_KOMODO=**{level}** {data.type}: {data.data.name} on {data.data.server_name} went {data.data.from} to {data.data.to}
+```
+
+See [webhooks from other services](configuration.md#webhooks-from-other-services) for how the
+rendering works and what the paths are.
+
 ## Operations
 
 ### What the log tells you

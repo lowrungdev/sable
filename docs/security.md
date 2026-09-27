@@ -174,7 +174,13 @@ These are known and deliberate. Decide for yourself whether they are acceptable.
     from callers are sanitised and made unique, so one alert cannot overwrite another or climb
     out of the folder.
 
-12. CI holds credentials: the registry password and a runner token with write access to the
+12. Hook tokens can travel in a URL. Services like Komodo cannot set headers, so `/hook/{name}`
+    accepts `?token=`, and proxies and access logs will record it. Each hook has its own token
+    to contain that: one exposed in a log costs you that hook rather than everything `/notify`
+    can reach. Whoever holds a hook URL can write arbitrary text into that conversation, since
+    the payload becomes the message.
+
+13. CI holds credentials: the registry password and a runner token with write access to the
     repository, used to create releases. Anyone who can change a workflow on a branch CI runs
     can reach both.
 
