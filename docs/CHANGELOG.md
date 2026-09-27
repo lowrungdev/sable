@@ -12,6 +12,10 @@ Format: `## <version>`, optionally followed by a date. Anything until the next
 
 ## Unreleased
 
+_Nothing yet._
+
+## 0.4
+
 - `SABLE_AI_ROOMS` now accepts a conversation's **display name** as well as its
   token, matching case- and space-insensitively. It previously matched tokens
   only, so putting the name in the list silently did nothing. Tokens are still
