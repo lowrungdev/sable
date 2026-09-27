@@ -150,7 +150,16 @@ These are known and deliberate. Decide for yourself whether they are acceptable.
     the log**: prompts, command arguments and the text of any message a ⁉️ referred to. Treat a
     DEBUG-level log as containing conversation content, with whatever that implies for where it
     is shipped and how long it is kept.
-11. **CI holds credentials**: the registry password (`RUNDECK_KEY_VALUE`) and a runner token with
+11. **File attachments need a second, much larger credential.** With
+    `SABLE_NEXTCLOUD_USER` set, sable holds an app password for a Nextcloud user. That
+    password cannot be scoped: it can read and write that user's Files, Contacts and Calendar.
+    The bot secret can only post messages, so this is by far the biggest expansion of what a
+    compromise of sable would reach. Give it a dedicated account that owns nothing else, and
+    leave both variables empty if you do not need attachments — /notify then stays text-only.
+    Uploads land in `SABLE_UPLOAD_PATH` inside that user's own Files and are capped at
+    `SABLE_MAX_UPLOAD_BYTES`; filenames from callers are sanitised and made unique, so one
+    alert cannot overwrite another or climb out of the folder.
+12. **CI holds credentials**: the registry password (`RUNDECK_KEY_VALUE`) and a runner token with
     write access to the repository, used to create releases. Anyone who can change a workflow on
     a branch that CI runs can reach both.
 

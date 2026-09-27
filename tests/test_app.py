@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
+from urllib.parse import parse_qs
 from typing import AsyncIterator
 
 import httpx
@@ -322,3 +324,187 @@ async def test_a_relayed_alert_is_logged(caplog) -> None:
                 headers={"Authorization": "Bearer alert-token"},
             )
     assert f"relayed an alert to {ROOM} (alias alerts) as message 1" in caplog.text
+
+
+# --------------------------------------------------------------------------- #
+# /notify with an attachment: one URL, JSON base64 or multipart
+# --------------------------------------------------------------------------- #
+
+USER = "sable-bot"
+DAV = f"{BACKEND}/remote.php/dav/files/{USER}"
+UPLOADS = dict(
+    notify_token="alert-token",
+    notify_rooms={"alerts": ROOM},
+    nextcloud_user=USER,
+    nextcloud_password="app-password",
+)
+
+
+def share_fields(route) -> dict[str, str]:
+    """The share request is form encoded; read it back as fields."""
+    return {k: v[0] for k, v in parse_qs(route.calls.last.request.content.decode()).items()}
+
+
+def upload_routes(share_status: int = 200):
+    respx.request("MKCOL", f"{DAV}/sable").mock(return_value=httpx.Response(405))
+    put = respx.put(url__startswith=f"{DAV}/sable/").mock(return_value=httpx.Response(201))
+    share = respx.post(f"{BACKEND}/ocs/v2.php/apps/files_sharing/api/v1/shares").mock(
+        return_value=httpx.Response(
+            share_status, json={"ocs": {"meta": {"status": "ok"}, "data": {"id": 99}}}
+        )
+    )
+    respx.delete(url__startswith=f"{DAV}/sable/").mock(return_value=httpx.Response(204))
+    return put, share
+
+
+@respx.mock
+async def test_notify_accepts_a_base64_file_in_json() -> None:
+    put, share = upload_routes()
+    async for client in client_for(make_config(**UPLOADS)):
+        response = await client.post(
+            "/notify",
+            json={
+                "room": "alerts",
+                "message": "nightly build",
+                "file": {"name": "report.pdf", "content": base64.b64encode(b"PDF!").decode()},
+            },
+            headers={"Authorization": "Bearer alert-token"},
+        )
+    assert response.status_code == 201
+    body = response.json()
+    assert body["ok"] is True and body["room"] == ROOM and body["shareId"] == 99
+    assert body["file"]["name"].endswith("-report.pdf")
+    assert body["file"]["size"] == 4
+    assert put.calls.last.request.content == b"PDF!"
+    # The share body is form encoded, and the caption rides in talkMetaData so
+    # the file and its text arrive as one chat message rather than two.
+    fields = share_fields(share)
+    assert fields["shareType"] == "10"
+    assert fields["shareWith"] == ROOM
+    assert json.loads(fields["talkMetaData"]) == {
+        "messageType": "comment",
+        "caption": "nightly build",
+    }
+
+
+@respx.mock
+async def test_notify_accepts_a_multipart_upload() -> None:
+    put, share = upload_routes()
+    async for client in client_for(make_config(**UPLOADS)):
+        response = await client.post(
+            "/notify",
+            data={"room": "alerts", "message": "chart", "silent": "true"},
+            files={"file": ("chart.png", b"\x89PNG data", "image/png")},
+            headers={"Authorization": "Bearer alert-token"},
+        )
+    assert response.status_code == 201
+    assert response.json()["file"]["name"].endswith("-chart.png")
+    assert put.calls.last.request.content == b"\x89PNG data"
+    meta = json.loads(share_fields(share)["talkMetaData"])
+    assert meta["caption"] == "chart"
+    assert meta["silent"] is True
+
+
+@respx.mock
+async def test_a_file_with_no_caption_is_fine() -> None:
+    upload_routes()
+    async for client in client_for(make_config(**UPLOADS)):
+        response = await client.post(
+            "/notify",
+            data={"room": "alerts"},
+            files={"file": ("a.txt", b"x", "text/plain")},
+            headers={"Authorization": "Bearer alert-token"},
+        )
+    assert response.status_code == 201
+
+
+async def test_neither_message_nor_file_is_rejected() -> None:
+    async for client in client_for(make_config(**UPLOADS)):
+        response = await client.post(
+            "/notify",
+            json={"room": "alerts"},
+            headers={"Authorization": "Bearer alert-token"},
+        )
+    assert response.status_code == 422
+    assert "message, a file, or both" in response.json()["detail"]
+
+
+async def test_an_attachment_without_the_user_account_is_503() -> None:
+    # notify is on, but no SABLE_NEXTCLOUD_USER: text still works, files cannot.
+    async for client in client_for(
+        make_config(notify_token="alert-token", notify_rooms={"alerts": ROOM})
+    ):
+        response = await client.post(
+            "/notify",
+            json={
+                "room": "alerts",
+                "file": {"name": "a.txt", "content": base64.b64encode(b"x").decode()},
+            },
+            headers={"Authorization": "Bearer alert-token"},
+        )
+    assert response.status_code == 503
+    assert "SABLE_NEXTCLOUD_USER" in response.json()["detail"]
+
+
+async def test_content_that_is_not_base64_is_rejected() -> None:
+    async for client in client_for(make_config(**UPLOADS)):
+        response = await client.post(
+            "/notify",
+            json={"room": "alerts", "file": {"name": "a.txt", "content": "not base64!!"}},
+            headers={"Authorization": "Bearer alert-token"},
+        )
+    assert response.status_code == 422
+    assert "base64" in response.json()["detail"]
+
+
+async def test_an_oversized_base64_attachment_is_refused() -> None:
+    config = make_config(max_upload_bytes=16, **UPLOADS)
+    async for client in client_for(config):
+        response = await client.post(
+            "/notify",
+            json={
+                "room": "alerts",
+                "file": {"name": "big.bin", "content": base64.b64encode(b"x" * 64).decode()},
+            },
+            headers={"Authorization": "Bearer alert-token"},
+        )
+    assert response.status_code == 413
+    assert "SABLE_MAX_UPLOAD_BYTES" in response.json()["detail"]
+
+
+async def test_an_oversized_multipart_attachment_is_refused() -> None:
+    async for client in client_for(make_config(max_upload_bytes=16, **UPLOADS)):
+        response = await client.post(
+            "/notify",
+            data={"room": "alerts"},
+            files={"file": ("big.bin", b"x" * 64, "application/octet-stream")},
+            headers={"Authorization": "Bearer alert-token"},
+        )
+    assert response.status_code == 413
+
+
+@respx.mock
+async def test_a_rejected_share_surfaces_as_400() -> None:
+    upload_routes(share_status=404)
+    async for client in client_for(make_config(**UPLOADS)):
+        response = await client.post(
+            "/notify",
+            data={"room": "alerts"},
+            files={"file": ("a.txt", b"x", "text/plain")},
+            headers={"Authorization": "Bearer alert-token"},
+        )
+    assert response.status_code == 400
+
+
+async def test_the_text_only_contract_is_unchanged() -> None:
+    # The original JSON shape must behave exactly as before.
+    with respx.mock:
+        message_route()
+        async for client in client_for(make_config(**UPLOADS)):
+            response = await client.post(
+                "/notify",
+                json={"room": "alerts", "message": "hi"},
+                headers={"Authorization": "Bearer alert-token"},
+            )
+    assert response.status_code == 201
+    assert response.json() == {"ok": True, "room": ROOM, "messageId": 1}

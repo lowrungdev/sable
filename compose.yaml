@@ -112,6 +112,10 @@ services:
       # Replies longer than this are clipped; Talk's own ceiling is 32000.
       # SABLE_MAX_MESSAGE_CHARS: "30000"
 
+      # Users to ignore completely - nothing they say or react to is acted on.
+      # Matches a bare user id, a full actor id (users/alice) or a display name.
+      # SABLE_IGNORE_USERS: "spammy-integration,users/alice"
+
       # ===================== Conversation memory ==========================
       # In-process and lost on restart. A turn is a question plus its answer.
       # SABLE_HISTORY_TURNS: "12"
@@ -151,6 +155,20 @@ services:
 
       # Aliases so callers never need conversation tokens.
       # SABLE_NOTIFY_ROOMS: "alerts=a1b2c3d4,deploys=e5f6g7h8"
+
+      # ===================== File attachments =============================
+      # The bot API cannot attach files, so /notify uploads them as an ordinary
+      # Nextcloud user instead. Both empty = /notify stays text-only. This
+      # account can read and write its own Files, so give it its own user and
+      # keep the password in .env.
+      # SABLE_NEXTCLOUD_USER: "sable-bot"
+      # SABLE_NEXTCLOUD_PASSWORD: "${SABLE_NEXTCLOUD_PASSWORD:-}"
+
+      # Folder in that user's Files where attachments land before sharing.
+      # SABLE_UPLOAD_PATH: "/sable"
+
+      # Largest attachment /notify accepts, in bytes. Default 25 MiB.
+      # SABLE_MAX_UPLOAD_BYTES: "26214400"
 
       # ===================== Process ======================================
       # Leave the bind address alone: it is the container's own interface,

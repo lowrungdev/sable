@@ -102,6 +102,16 @@ curl -fsS https://sable.example.org/notify \
 `201` with the new message id, `400` for a room Talk rejected, `401` for a bad token, `502` if
 Nextcloud is unreachable, `404` if `SABLE_NOTIFY_TOKEN` is unset.
 
+**With a file**, the same single call takes multipart or base64, and the message becomes its
+caption:
+
+```bash
+curl -fsS https://sable.example.org/notify -H "Authorization: Bearer $SABLE_NOTIFY_TOKEN" -F room=alerts -F message="nightly build" -F file=@report.pdf
+```
+
+Attachments need a Nextcloud user account as well as the bot secret, because the Talk bot API
+cannot upload files — see [configuration.md](configuration.md#file-attachments).
+
 ## Adding a command
 
 ```python

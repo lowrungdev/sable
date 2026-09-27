@@ -150,9 +150,25 @@ class Config:
     # --- LLM ---------------------------------------------------------------
     llm: LLMConfig = field(default_factory=LLMConfig)
 
+    # --- people to ignore --------------------------------------------------
+    #: Events from these users are dropped entirely. Entries match the bare user
+    #: id, the full actor id, or the display name.
+    ignore_users: list[str] = field(default_factory=list)
+
     # --- inbound alerting endpoint ----------------------------------------
     notify_token: str = ""
     notify_rooms: dict[str, str] = field(default_factory=dict)
+
+    # --- file attachments -------------------------------------------------
+    #: A Nextcloud *user* account, used only to upload and share files. The bot
+    #: API cannot attach anything to a message, so this is the second, larger
+    #: credential that buys attachments. Leave empty and /notify stays text-only.
+    nextcloud_user: str = ""
+    nextcloud_password: str = ""
+    #: Folder inside that user's own Files where attachments are put.
+    upload_path: str = "/sable"
+    #: Largest attachment /notify will accept, in bytes.
+    max_upload_bytes: int = 25 * 1024 * 1024
 
     # --- process -----------------------------------------------------------
     host: str = "0.0.0.0"
@@ -162,6 +178,31 @@ class Config:
     @property
     def notify_enabled(self) -> bool:
         return bool(self.notify_token)
+
+    @property
+    def uploads_enabled(self) -> bool:
+        """Can /notify accept a file? Needs the user account as well as the URL."""
+        return bool(self.nextcloud_user and self.nextcloud_password and self.nextcloud_url)
+
+    def is_ignored(self, actor_id: str, name: str = "") -> bool:
+        """Should everything from this actor be dropped?
+
+        An entry matches the bare user id (``alice``), the full actor id
+        (``users/alice``, which is what the log prints), or the display name,
+        ignoring case.
+
+        Prefer ids: a display name can be changed by the person themselves, and
+        for an ignore list that means they quietly stop being ignored.
+        """
+        if not self.ignore_users:
+            return False
+        bare = actor_id.split("/", 1)[1] if "/" in actor_id else actor_id
+        candidates = {
+            value.casefold()
+            for value in (actor_id, bare, name.strip())
+            if value
+        }
+        return any(entry.strip().casefold() in candidates for entry in self.ignore_users)
 
     def ai_room_allowed(self, token: str, name: str = "") -> bool:
         """Should a plain (non-command, non-mention) message go to the LLM?
@@ -226,13 +267,31 @@ class Config:
             history_turns=_int("SABLE_HISTORY_TURNS", 12),
             history_ttl=_int("SABLE_HISTORY_TTL", 3600),
             llm=llm,
+            ignore_users=_csv("SABLE_IGNORE_USERS"),
             notify_token=_str("SABLE_NOTIFY_TOKEN"),
             notify_rooms=_mapping("SABLE_NOTIFY_ROOMS"),
+            nextcloud_user=_str("SABLE_NEXTCLOUD_USER"),
+            nextcloud_password=_str("SABLE_NEXTCLOUD_PASSWORD"),
+            upload_path="/" + _str("SABLE_UPLOAD_PATH", "/sable").strip("/"),
+            max_upload_bytes=_int("SABLE_MAX_UPLOAD_BYTES", 25 * 1024 * 1024),
             host=_str("SABLE_HOST", "0.0.0.0"),
             port=_int("SABLE_PORT", 8080),
             log_level=_str("SABLE_LOG_LEVEL", "INFO").upper(),
         )
 
+        if bool(config.nextcloud_user) != bool(config.nextcloud_password):
+            raise ConfigError(
+                "SABLE_NEXTCLOUD_USER and SABLE_NEXTCLOUD_PASSWORD go together: "
+                "set both to enable file attachments, or neither to keep /notify "
+                "text-only."
+            )
+        if config.nextcloud_user and not config.nextcloud_url:
+            raise ConfigError(
+                "SABLE_NEXTCLOUD_URL is required for file attachments: there is no "
+                "incoming request to learn the server address from when uploading."
+            )
+        if config.max_upload_bytes <= 0:
+            raise ConfigError("SABLE_MAX_UPLOAD_BYTES must be greater than zero")
         if config.notify_enabled and not config.nextcloud_url:
             raise ConfigError(
                 "SABLE_NEXTCLOUD_URL is required when SABLE_NOTIFY_TOKEN is set: "

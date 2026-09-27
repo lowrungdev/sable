@@ -12,7 +12,29 @@ Format: `## <version>`, optionally followed by a date. Anything until the next
 
 ## Unreleased
 
-_Nothing yet._
+- **`/notify` can attach a file** — same URL, same single call. It accepts the
+  original JSON, JSON with a base64 `file`, or `multipart/form-data` with an
+  uploaded `file`; Content-Type decides. The `message` becomes the file's
+  caption, so the file and its text arrive as one chat message rather than two.
+  Text-only calls behave exactly as before.
+  This is a hybrid, not a change of model: the Talk bot API has no upload
+  endpoint and does not accept bot signatures on the ones that could, so
+  attachments use a separate Nextcloud **user** account — `SABLE_NEXTCLOUD_USER`
+  and `SABLE_NEXTCLOUD_PASSWORD` — to PUT the file over WebDAV and share it into
+  the conversation. Receiving stays on the signed webhook, so there is no
+  polling, no per-conversation connections and no cursor to persist.
+  With no user configured, attachments answer `503` naming the two variables and
+  everything else keeps working. Uploads are capped by `SABLE_MAX_UPLOAD_BYTES`
+  (25 MiB), land in `SABLE_UPLOAD_PATH` (`/sable`), have their filenames
+  sanitised and made unique, and are deleted again if the share fails rather
+  than left orphaned.
+  That account's app password cannot be scoped — it reaches that user's Files,
+  Contacts and Calendar — so it is optional, used only on this path, and
+  recorded in `docs/security.md` as the largest credential sable can hold.
+- **`SABLE_IGNORE_USERS`** drops everything from the listed people: commands,
+  mentions and reactions, and their messages are never cached for ⁉️ either, so
+  their words do not reach the model even when somebody else asks about them.
+  Entries match a bare user id, a full actor id, or a display name.
 
 ## 0.4
 

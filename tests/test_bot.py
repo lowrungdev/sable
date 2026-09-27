@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import logging
 
+import pytest
+
 import httpx
 import respx
 from conftest import BACKEND, ROOM, FakeLLM, event, make_config
@@ -724,3 +726,104 @@ async def test_the_ignored_message_log_names_the_room_both_ways(bot: Bot, caplog
     assert "abcd1234" in caplog.text
     assert "Team chat" in caplog.text
     assert "not an AI room" in caplog.text
+
+
+# --------------------------------------------------------------------------- #
+# SABLE_IGNORE_USERS
+# --------------------------------------------------------------------------- #
+
+
+@respx.mock
+@pytest.mark.parametrize("entry", ["alice", "users/alice", "Alice", "  ALICE  "])
+async def test_an_ignored_user_gets_no_reply(llm: FakeLLM, entry: str) -> None:
+    route = message_route()
+    bot = Bot(make_config(ignore_users=[entry]), llm=llm)  # type: ignore[arg-type]
+    try:
+        await bot.handle(event("!ping", actor_id="users/alice", actor_name="Alice"))
+        await bot.handle(event("@sable hello", message_id=2, actor_id="users/alice"))
+    finally:
+        await bot.aclose()
+    assert not route.called
+    assert not llm.calls
+
+
+@respx.mock
+async def test_ignoring_one_person_leaves_everyone_else_alone(llm: FakeLLM) -> None:
+    route = message_route()
+    bot = Bot(make_config(ignore_users=["alice"]), llm=llm)  # type: ignore[arg-type]
+    try:
+        await bot.handle(event("!ping", actor_id="users/alice", actor_name="Alice"))
+        await bot.handle(
+            event("!ping", message_id=2, actor_id="users/bob", actor_name="Bob")
+        )
+    finally:
+        await bot.aclose()
+    assert len(route.calls) == 1
+
+
+@respx.mock
+async def test_an_ignored_users_messages_are_not_cached_for_the_ask_reaction(
+    llm: FakeLLM,
+) -> None:
+    from conftest import reaction_event
+
+    route = message_route()
+    bot = Bot(make_config(ignore_users=["alice"]), llm=llm)  # type: ignore[arg-type]
+    try:
+        # Ignore means ignore: their words never reach the model, not even when
+        # somebody else asks about them.
+        await bot.handle(
+            event("something private", message_id=100, actor_id="users/alice")
+        )
+        await bot.handle(
+            reaction_event("⁉️", message_id=100, actor_id="users/bob", actor_name="Bob")
+        )
+    finally:
+        await bot.aclose()
+    assert not llm.calls
+    assert "do not have that message" in sent(route)[0]["message"]
+
+
+@respx.mock
+async def test_a_reaction_from_an_ignored_user_does_nothing(llm: FakeLLM) -> None:
+    from conftest import reaction_event
+
+    route = message_route()
+    bot = Bot(make_config(ignore_users=["alice"]), llm=llm)  # type: ignore[arg-type]
+    try:
+        await bot.handle(event("a question", message_id=100, actor_id="users/bob"))
+        await bot.handle(reaction_event("⁉️", message_id=100, actor_id="users/alice"))
+    finally:
+        await bot.aclose()
+    assert not route.called
+    assert not llm.calls
+
+
+@respx.mock
+async def test_ignoring_a_guest(llm: FakeLLM) -> None:
+    route = message_route()
+    bot = Bot(make_config(ignore_users=["guests/abc123"]), llm=llm)  # type: ignore[arg-type]
+    try:
+        await bot.handle(event("!ping", actor_id="guests/abc123", actor_name="Guest"))
+    finally:
+        await bot.aclose()
+    assert not route.called
+
+
+@respx.mock
+async def test_the_ignore_list_is_logged_at_debug(llm: FakeLLM, caplog) -> None:
+    message_route()
+    bot = Bot(make_config(ignore_users=["alice"]), llm=llm)  # type: ignore[arg-type]
+    try:
+        with caplog.at_level(logging.DEBUG):
+            await bot.handle(event("!ping", actor_id="users/alice", actor_name="Alice"))
+    finally:
+        await bot.aclose()
+    assert "SABLE_IGNORE_USERS" in caplog.text
+
+
+@respx.mock
+async def test_an_empty_ignore_list_ignores_nobody(bot: Bot) -> None:
+    route = message_route()
+    await bot.handle(event("!ping", actor_id="users/alice"))
+    assert route.called

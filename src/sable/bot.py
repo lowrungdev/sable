@@ -11,6 +11,7 @@ import httpx
 from .commands import CommandError, Context, Registry, parse_argv, registry, split_command
 from .config import Config
 from .events import TalkEvent
+from .files import FilesClient
 from .history import History, MessageCache
 from .llm import LLMClient, LLMError
 from .state import ConnectionState
@@ -153,6 +154,27 @@ class Bot:
         )
         return True
 
+    def files(self) -> FilesClient:
+        """A client for the user account that uploads and shares attachments.
+
+        Separate from :meth:`talk` on purpose: this one carries a credential
+        that can read and write that user's files, so it is built only when an
+        attachment is actually being sent.
+        """
+        if not self.config.uploads_enabled:
+            raise ValueError(
+                "file attachments are not configured (set SABLE_NEXTCLOUD_USER "
+                "and SABLE_NEXTCLOUD_PASSWORD)"
+            )
+        return FilesClient(
+            self.config.nextcloud_url,
+            self.config.nextcloud_user,
+            self.config.nextcloud_password,
+            upload_path=self.config.upload_path,
+            client=self._http,
+            state=self.nextcloud,
+        )
+
     def seen(self, event: TalkEvent) -> bool:
         """Record an event and report whether we already handled it.
 
@@ -191,6 +213,16 @@ class Bot:
 
     async def handle(self, event: TalkEvent) -> None:
         """Entry point for a verified webhook event."""
+        if self.config.is_ignored(event.actor.id, event.actor.name):
+            # Before the message cache too: their words never reach the model,
+            # not even by somebody else reacting to them.
+            log.debug(
+                "ignoring %s from %s - listed in SABLE_IGNORE_USERS",
+                event.type,
+                self._who(event),
+            )
+            return
+
         # Remember messages before anything else, the bot's own included, so a
         # reaction can name one later. Remembering is not acting on it, and a
         # reaction to one of our own answers is a reasonable follow-up.

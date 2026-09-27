@@ -13,21 +13,28 @@ Routes
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hmac
 import json
 import logging
 import re
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Annotated, AsyncIterator
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
+# Starlette's own class: request.form() yields these, and FastAPI's UploadFile is a
+# subclass, so checking against the base accepts both.
+from starlette.datastructures import UploadFile
 
 from . import __version__
 from .bot import Bot
 from .config import Config
 from .events import EventError, parse_event
+from .files import FilesError
 from .signing import HEADER_BACKEND, HEADER_RANDOM, HEADER_SIGNATURE, verify
 from .talk import TalkError
 
@@ -40,13 +47,25 @@ TOKEN_RE = re.compile(r"^[A-Za-z0-9]{4,64}$")
 DRAIN_TIMEOUT = 30.0
 
 
+class NotifyFile(BaseModel):
+    """A file attached to an alert, base64 encoded in a JSON request."""
+
+    name: str = Field(min_length=1, max_length=255, description="Filename to show in Talk")
+    content: str = Field(min_length=1, description="The file's bytes, base64 encoded")
+
+
 class NotifyRequest(BaseModel):
-    """An alert to relay into a conversation."""
+    """An alert to relay into a conversation.
+
+    ``message`` is optional when a file is attached, in which case it becomes the
+    file's caption rather than a second chat message.
+    """
 
     room: str = Field(min_length=1, description="Conversation token, or an alias from SABLE_NOTIFY_ROOMS")
-    message: str = Field(min_length=1, description="Markdown message body")
+    message: str = Field(default="", description="Markdown message body, or a caption for a file")
     silent: bool = Field(default=False, description="Post without triggering notifications")
     reply_to: int = Field(default=0, ge=0, alias="replyTo", description="Message id to reply to")
+    file: NotifyFile | None = Field(default=None, description="An attachment, base64 encoded")
 
     model_config = {"populate_by_name": True}
 
@@ -188,12 +207,23 @@ def create_app(config: Config | None = None, bot: Bot | None = None) -> FastAPI:
     @app.post("/notify", status_code=status.HTTP_201_CREATED, tags=["alerting"])
     async def notify(
         request: Request,
-        payload: NotifyRequest,
         authorization: Annotated[str, Header()] = "",
     ) -> dict[str, object]:
+        """Relay a message, optionally with a file, into a conversation.
+
+        One URL, one call, three accepted shapes: JSON as before, JSON with a
+        base64 ``file``, or multipart/form-data with an uploaded ``file``.
+        """
         if not config.notify_enabled:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "alerting endpoint is disabled")
         _check_bearer(authorization, config.notify_token)
+
+        payload, attachment = await _parse_notify(request, config.max_upload_bytes)
+        if not payload.message and attachment is None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "send a message, a file, or both",
+            )
 
         room = config.notify_rooms.get(payload.room, payload.room)
         if not TOKEN_RE.match(room):
@@ -201,6 +231,9 @@ def create_app(config: Config | None = None, bot: Bot | None = None) -> FastAPI:
                 status.HTTP_400_BAD_REQUEST,
                 f"{payload.room!r} is not a known alias or a valid conversation token",
             )
+
+        if attachment is not None:
+            return await _relay_file(request, payload, room, attachment)
 
         try:
             message_id = await current_bot(request).send(
@@ -235,6 +268,98 @@ def create_app(config: Config | None = None, bot: Bot | None = None) -> FastAPI:
     return app
 
 
+def _form_bool(value: object) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _form_int(value: object) -> int:
+    try:
+        return int(str(value or "0"))
+    except ValueError as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, f"not a number: {value!r}"
+        ) from exc
+
+
+@dataclass(frozen=True)
+class Attachment:
+    """A file to attach, however it arrived on the wire."""
+
+    name: str
+    data: bytes
+
+
+async def _read_upload(upload: UploadFile, limit: int) -> bytes:
+    """Read an uploaded file, refusing anything over the limit.
+
+    Read in chunks and stop at the cap rather than trusting a declared length:
+    /notify is reachable by whoever holds the token, and the whole body would
+    otherwise land in memory.
+    """
+    data = bytearray()
+    while chunk := await upload.read(64 * 1024):
+        data.extend(chunk)
+        if len(data) > limit:
+            raise HTTPException(
+                status.HTTP_413_CONTENT_TOO_LARGE,
+                f"the attachment is larger than SABLE_MAX_UPLOAD_BYTES ({limit} bytes)",
+            )
+    return bytes(data)
+
+
+async def _parse_notify(
+    request: Request, limit: int
+) -> tuple[NotifyRequest, Attachment | None]:
+    """One endpoint, three shapes: JSON, JSON with a base64 file, or multipart.
+
+    Content-Type decides. Everything ends up as a NotifyRequest plus an optional
+    Attachment, so the handler below does not care which shape it arrived in.
+    """
+    content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+
+    if content_type == "multipart/form-data":
+        form = await request.form()
+        upload = form.get("file")
+        if upload is not None and not isinstance(upload, UploadFile):
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, "'file' must be an uploaded file"
+            )
+        payload = NotifyRequest(
+            room=str(form.get("room") or ""),
+            message=str(form.get("message") or ""),
+            silent=_form_bool(form.get("silent")),
+            reply_to=_form_int(form.get("replyTo") or form.get("reply_to") or 0),
+        )
+        if upload is None:
+            return payload, None
+        return payload, Attachment(
+            upload.filename or "attachment", await _read_upload(upload, limit)
+        )
+
+    try:
+        body = await request.json()
+    except ValueError as exc:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, f"invalid JSON: {exc}"
+        ) from exc
+    payload = NotifyRequest.model_validate(body)
+    if payload.file is None:
+        return payload, None
+    try:
+        content = base64.b64decode(payload.file.content, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"file.content is not valid base64: {exc}",
+        ) from exc
+    if len(content) > limit:
+        raise HTTPException(
+            status.HTTP_413_CONTENT_TOO_LARGE,
+            f"the attachment is larger than SABLE_MAX_UPLOAD_BYTES ({limit} bytes)",
+        )
+    return payload, Attachment(payload.file.name, content)
+
+
 def _check_bearer(header: str, expected: str) -> None:
     scheme, _, token = header.partition(" ")
     if scheme.lower() != "bearer" or not hmac.compare_digest(token.strip(), expected):
@@ -243,6 +368,53 @@ def _check_bearer(header: str, expected: str) -> None:
             "a valid bearer token is required",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+
+async def _relay_file(
+    request: Request, payload: NotifyRequest, room: str, attachment: Attachment
+) -> dict[str, object]:
+    """Upload the attachment and share it into the conversation."""
+    talk_bot = request.app.state.bot
+    config = talk_bot.config
+    if not config.uploads_enabled:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "file attachments are not configured: set SABLE_NEXTCLOUD_USER and "
+            "SABLE_NEXTCLOUD_PASSWORD to enable them",
+        )
+
+    files = talk_bot.files()
+    try:
+        shared = await files.send_file(
+            room,
+            attachment.name,
+            attachment.data,
+            caption=payload.message,
+            silent=payload.silent,
+            reply_to=payload.reply_to,
+        )
+    except FilesError as exc:
+        log.warning("attaching %s to %s failed: %s", attachment.name, room, exc)
+        code = (
+            status.HTTP_400_BAD_REQUEST
+            if exc.status in {400, 403, 404}
+            else status.HTTP_502_BAD_GATEWAY
+        )
+        raise HTTPException(code, str(exc)) from exc
+
+    log.info(
+        "attached %s (%d bytes) to %s%s",
+        shared.name,
+        shared.size,
+        room,
+        f" with a caption of {len(payload.message)} chars" if payload.message else "",
+    )
+    return {
+        "ok": True,
+        "room": room,
+        "file": {"name": shared.name, "path": shared.path, "size": shared.size},
+        "shareId": shared.share_id,
+    }
 
 
 def _log_task_failure(task: asyncio.Task[None]) -> None:

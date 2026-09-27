@@ -298,6 +298,33 @@ curl -fsS -X POST https://sable.example.org/notify \
   -d '{"room": "alerts", "message": "deploy **v1.2.3** finished"}'
 ```
 
+### Attaching a file to an alert
+
+`/notify` takes a file in the same single call, in whichever shape suits the caller — multipart
+for `curl`, base64 for a JSON client:
+
+```bash
+curl -fsS -X POST https://sable.example.org/notify -H "Authorization: Bearer $SABLE_NOTIFY_TOKEN" -F room=alerts -F message="nightly build" -F file=@report.pdf
+```
+
+```bash
+curl -fsS -X POST https://sable.example.org/notify -H "Authorization: Bearer $SABLE_NOTIFY_TOKEN" -H 'Content-Type: application/json' -d "{\"room\":\"alerts\",\"message\":\"nightly build\",\"file\":{\"name\":\"report.pdf\",\"content\":\"$(base64 -w0 report.pdf)\"}}"
+```
+
+The `message` becomes the file's **caption**, so the file and its text arrive as one chat
+message rather than two. Without a file, the endpoint behaves exactly as before.
+
+This needs `SABLE_NEXTCLOUD_USER` and `SABLE_NEXTCLOUD_PASSWORD`, because the bot API cannot
+attach files — see [configuration.md](configuration.md#file-attachments). Create a dedicated
+Nextcloud user, generate an app password for it under **Settings → Security**, and add that user
+to the conversations it should post files into. Without those set, a file gets a `503` and
+naming the two variables; text-only calls keep working.
+
+Responses: `201` with the stored filename, path and size; `413` over `SABLE_MAX_UPLOAD_BYTES`;
+`422` for a bad base64 body or neither message nor file; `400` if Nextcloud rejected the share.
+If the upload succeeds but the share fails, the uploaded file is deleted again rather than left
+orphaned in the bot user's Files.
+
 ## Operations
 
 ### What the log tells you

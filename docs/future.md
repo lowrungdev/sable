@@ -67,9 +67,10 @@ conversation would go in the same place.
 "I do not have that message". Making that reliable means persistence — see the note on durable
 history above, and the discussion of why a chat *log* is a different and much larger commitment.
 
-**File attachments.** The bot API can post messages and reactions, and nothing else. Uploading a
-file would need a bot *user* account and WebDAV, which is a different integration model. Worth
-knowing before promising someone a generated report as an attachment.
+**File attachments** are done, in a hybrid shape: the webhook bot still receives, and a separate
+Nextcloud user account uploads over WebDAV and shares into the conversation, on the `/notify`
+path only. What is *not* done is the other direction — sable cannot read a file somebody posts,
+which would need that same account to fetch it. Nothing has asked for it yet.
 
 ## Assistant features
 

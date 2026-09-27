@@ -71,6 +71,7 @@ Values are trimmed, and URLs have trailing slashes stripped, so a stray space or
 | `SABLE_UNKNOWN_COMMAND_HINT` | `true` | Reply "I have no `!foo` command" on an unknown command. Turn off in busy rooms where people use other bots with the same prefix. |
 | `SABLE_REPORT_ERRORS` | `true` | Post failures into the conversation (`⚠️ Sorry — …`) as well as logging them. Off means failures are logged only and the room stays quiet. |
 | `SABLE_STARTUP_CHECK` | `true` | Call Nextcloud's `status.php` at startup and log what answered, so a wrong URL or an untrusted certificate shows up at boot. Never fatal. Needs `SABLE_NEXTCLOUD_URL`. |
+| `SABLE_IGNORE_USERS` | *(empty)* | Users to ignore completely. Comma-separated; each entry matches a bare user id (`alice`), a full actor id (`users/alice`), or a display name. See [below](#ignoring-people). |
 | `SABLE_MAX_MESSAGE_CHARS` | `30000` | Replies longer than this are clipped with a `_[truncated]_` marker. Talk hard-rejects anything over 32000 with HTTP 413, which is the real ceiling. |
 
 ### When does the assistant answer?
@@ -123,6 +124,41 @@ message back — that needs a user account rather than bot credentials — so sa
 about messages it saw arrive, and keeps the last `SABLE_MESSAGE_CACHE` per conversation for that
 purpose. React to something older, or posted before the bot joined, and it says so instead of
 guessing. Nothing is cached at all when `SABLE_ASK_REACTION` is empty.
+
+## File attachments
+
+`/notify` can carry a file, but not with the bot secret: the Talk bot API has no upload
+endpoint, and bot signatures are not accepted by the ones that do. Attachments therefore need a
+second credential — an ordinary Nextcloud user — which sable uses **only** on the `/notify` path
+and **only** when a file is actually attached.
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `SABLE_NEXTCLOUD_USER` | *(empty)* | A Nextcloud user for the bot. Both this and the password must be set, or neither. |
+| `SABLE_NEXTCLOUD_PASSWORD` | *(empty)* | An **app password** for that user, from Settings → Security. |
+| `SABLE_UPLOAD_PATH` | `/sable` | Folder inside that user's own Files where attachments are put before sharing. Created on first use. |
+| `SABLE_MAX_UPLOAD_BYTES` | `26214400` (25 MiB) | Largest attachment `/notify` accepts. Bigger ones get a `413`. |
+
+**Give it its own user account.** An app password cannot be scoped to "files only" — it can do
+everything that user can, across Files, Contacts and Calendar. That is a much larger credential
+than the bot secret, which can only post messages, so it should belong to an account that owns
+nothing else. See [security.md](security.md#accepted-risks).
+
+### Ignoring people
+
+`SABLE_IGNORE_USERS` drops everything from the listed actors — commands, mentions, reactions —
+and their messages are never cached for the ⁉️ feature either. Ignore means ignore: their words
+do not reach the model even if somebody else asks about them.
+
+```ini
+SABLE_IGNORE_USERS=alice                    # bare user id
+SABLE_IGNORE_USERS=users/alice              # the full actor id, as the log prints it
+SABLE_IGNORE_USERS=Alice                    # display name, case-insensitive
+SABLE_IGNORE_USERS=noisy-integration,users/bob,guests/abc123
+```
+
+Prefer ids. A display name can be changed by the person themselves, which would quietly stop
+them being ignored — the opposite of what you configured.
 
 ## Conversation memory
 
