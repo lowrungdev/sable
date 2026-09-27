@@ -1,86 +1,164 @@
 name: Release
 
-# Publishing is driven by the version in pyproject.toml: bump it on main, and
-# this builds and pushes the image. See docs/releasing.md.
+# Pushing to `release` publishes. Nothing else does.
 #
-# pyproject.toml also changes for other reasons (a new dependency, a pytest
-# setting), so the first step compares the version against the previous commit
-# and stops quietly when it has not moved - no rebuilt, overwritten image.
+#   dev      where work happens - builds only when you press the button
+#   main     the full history
+#   release  what is published: a container image and a Forgejo Release
+#
+# The version in pyproject.toml is the release number, and the matching section
+# of docs/CHANGELOG.md is its notes. A version that is already released is never
+# published again - bump the version to publish a new one.
+#
+# The button on this workflow rebuilds and re-pushes the image for whatever is
+# on `release` right now, which is the escape hatch for a failed or interrupted
+# run. It will not create a second Release for a version that already has one.
 on:
   push:
     branches:
-      - main
-    paths:
-      - 'pyproject.toml'
+      - release
+  workflow_dispatch:
 
 jobs:
-  build-and-push:
+  publish:
     runs-on: docker-cli
+    env:
+      # The runner's own token. FORGEJO_TOKEN is the current name; GITHUB_TOKEN
+      # is the compatibility alias. Whichever exists is used.
+      FORGEJO_TOKEN: ${{ secrets.FORGEJO_TOKEN }}
+      RUNNER_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      API: ${{ github.server_url }}/api/v1/repos/${{ github.repository }}
+      IMAGE: forgejo.subversive.link/subversive/sable
     steps:
-      - name: Trust the Subversive CAs
+      - name: Install the Subversive CAs and this job's tools
         run: |
-          apt-get update && apt-get install -y ca-certificates
+          apt-get update && apt-get install -y ca-certificates curl jq
           echo "${{ secrets.SUBVERSIVE_INTERMEDIATE }}" > /usr/local/share/ca-certificates/subversive-inter-ca.crt
           echo "${{ secrets.SUBVERSIVE_ROOT }}" > /usr/local/share/ca-certificates/subversive-root-ca.crt
           update-ca-certificates
 
+      - name: Refuse a manual run from any other branch
+        if: github.event_name == 'workflow_dispatch' && github.ref_name != 'release'
+        run: |
+          echo "This workflow publishes, so it only runs on the release branch." >&2
+          echo "You picked '${{ github.ref_name }}'. For a throwaway image from" >&2
+          echo "another branch, use the 'Manual build' workflow instead." >&2
+          exit 1
+
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          # Two commits, so the previous pyproject.toml can be read.
-          fetch-depth: 2
 
-      - name: Did the version change?
-        id: version
+      - name: Read the version and its changelog entry
+        id: meta
         run: |
           set -eu
-          read_version() { sed -nE 's/^version = "([0-9]+\.[0-9]+)"$/\1/p' | head -1; }
 
-          VERSION="$(read_version < pyproject.toml)"
+          VERSION="$(sed -nE 's/^version = "([0-9]+\.[0-9]+)"$/\1/p' pyproject.toml | head -1)"
           if [ -z "$VERSION" ]; then
             echo "No MAJOR.MINOR version found in pyproject.toml." >&2
             echo "Expected a line like: version = \"1.1\"" >&2
             exit 1
           fi
 
-          PREVIOUS=""
-          if git rev-parse --quiet --verify HEAD~1 >/dev/null 2>&1; then
-            PREVIOUS="$(git show HEAD~1:pyproject.toml | read_version)"
-          fi
+          # The section under `## <version>`, up to the next `##` heading.
+          VERSION_RE="$(printf '%s' "$VERSION" | sed 's/\./\\./g')"
+          awk -v re="^## +${VERSION_RE}([[:space:]]|\$)" '
+            $0 ~ re { inside = 1; next }
+            /^## / { inside = 0 }
+            inside { print }
+          ' docs/CHANGELOG.md > /tmp/notes.md
 
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          # Drop blank lines at both ends.
+          sed -i -e '/./,$!d' /tmp/notes.md
+          NOTES="$(cat /tmp/notes.md)"
+          printf '%s\n' "$NOTES" > /tmp/notes.md
 
-          if [ "$VERSION" = "$PREVIOUS" ]; then
-            echo "pyproject.toml changed but the version is still $VERSION."
-            echo "Nothing to publish."
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if [ -n "$PREVIOUS" ] \
-             && [ "$(printf '%s\n%s\n' "$PREVIOUS" "$VERSION" | sort -V | head -1)" != "$PREVIOUS" ]; then
-            echo "Version went backwards: $PREVIOUS -> $VERSION." >&2
-            echo "Refusing to publish an older version over a newer one." >&2
+          if ! grep -q '[^[:space:]]' /tmp/notes.md; then
+            echo "docs/CHANGELOG.md has nothing under '## $VERSION'." >&2
+            echo "Write the release notes there first - they become the release body." >&2
             exit 1
           fi
 
-          echo "Publishing sable $VERSION (was ${PREVIOUS:-none})."
-          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "Releasing sable $VERSION with these notes:"
+          echo "---"
+          cat /tmp/notes.md
+          echo "---"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Has this version been released already?
+        id: gate
+        run: |
+          set -eu
+          VERSION="${{ steps.meta.outputs.version }}"
+
+          TOKEN="${FORGEJO_TOKEN:-$RUNNER_TOKEN}"
+          if [ -z "$TOKEN" ]; then
+            echo "No runner token available as FORGEJO_TOKEN or GITHUB_TOKEN." >&2
+            echo "Enable Actions token access for this repository, or add a" >&2
+            echo "personal access token as the FORGEJO_TOKEN secret." >&2
+            exit 1
+          fi
+
+          code="$(curl -sS -o /tmp/existing.json -w '%{http_code}' \
+            -H "Authorization: token $TOKEN" \
+            "$API/releases/tags/v$VERSION")"
+
+          case "$code" in
+            200) EXISTS=true ;;
+            404) EXISTS=false ;;
+            *)
+              echo "Asking about release v$VERSION failed with HTTP $code:" >&2
+              cat /tmp/existing.json >&2
+              echo >&2
+              echo "A 401/403 here means the runner token cannot read this repo." >&2
+              exit 1
+              ;;
+          esac
+
+          # Refuse to publish an older version over a newer one.
+          if [ "$EXISTS" = false ]; then
+            LATEST="$(curl -sS -H "Authorization: token $TOKEN" "$API/releases?limit=1" \
+              | jq -r 'if type == "array" and length > 0 then .[0].tag_name else "" end')"
+            LATEST="${LATEST#v}"
+            if [ -n "$LATEST" ] \
+               && [ "$(printf '%s\n%s\n' "$LATEST" "$VERSION" | sort -V | head -1)" != "$LATEST" ]; then
+              echo "Version went backwards: $LATEST is already released, this is $VERSION." >&2
+              exit 1
+            fi
+          fi
+
+          if [ "$EXISTS" = true ] && [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+            echo "sable $VERSION is already released and nothing was published."
+            echo "Bump the version in pyproject.toml to release a new one."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "create_release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$EXISTS" = true ]; then
+            echo "Release v$VERSION exists; rebuilding and re-pushing the image only."
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "create_release=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Publishing sable $VERSION: image and Forgejo Release."
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "create_release=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Run the test suite
-        if: steps.version.outputs.changed == 'true'
+        if: steps.gate.outputs.publish == 'true'
         run: docker build --target test --progress plain .
 
       - name: Log in to Forgejo Registry
-        if: steps.version.outputs.changed == 'true'
+        if: steps.gate.outputs.publish == 'true'
         uses: docker/login-action@v3
         with:
           registry: forgejo.subversive.link
           username: rundeck_automation
           password: ${{ secrets.RUNDECK_KEY_VALUE }}
 
-      - name: Build and push
-        if: steps.version.outputs.changed == 'true'
+      - name: Build and push the image
+        if: steps.gate.outputs.publish == 'true'
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -88,10 +166,88 @@ jobs:
           target: runtime
           push: true
           tags: |
-            forgejo.subversive.link/subversive/sable:${{ steps.version.outputs.version }}
+            forgejo.subversive.link/subversive/sable:${{ steps.meta.outputs.version }}
             forgejo.subversive.link/subversive/sable:latest
             forgejo.subversive.link/subversive/sable:build-${{ github.run_number }}
           labels: |
             org.opencontainers.image.source=https://forgejo.subversive.link/subversive/sable
-            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
             org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Build the wheel
+        if: steps.gate.outputs.create_release == 'true'
+        run: |
+          set -eu
+          docker build --target wheel -t sable-wheel:${{ github.run_number }} .
+          # `docker cp` instead of a bind mount: the daemon may not share this
+          # filesystem, so a -v mount could silently hand over an empty directory.
+          cid="$(docker create sable-wheel:${{ github.run_number }})"
+          docker cp "$cid:/dist" ./dist
+          docker rm -v "$cid" >/dev/null
+          docker image rm sable-wheel:${{ github.run_number }} >/dev/null || true
+          ls -l dist
+
+      - name: Create the Forgejo Release
+        if: steps.gate.outputs.create_release == 'true'
+        id: release
+        run: |
+          set -eu
+          VERSION="${{ steps.meta.outputs.version }}"
+          TOKEN="${FORGEJO_TOKEN:-$RUNNER_TOKEN}"
+
+          # Creating a release also creates the tag at target_commitish.
+          jq -n \
+            --arg tag "v$VERSION" \
+            --arg target "${{ github.sha }}" \
+            --arg name "sable $VERSION" \
+            --rawfile body /tmp/notes.md \
+            '{tag_name: $tag, target_commitish: $target, name: $name,
+              body: $body, draft: false, prerelease: false}' > /tmp/release.json
+
+          code="$(curl -sS -o /tmp/created.json -w '%{http_code}' -X POST \
+            -H "Authorization: token $TOKEN" \
+            -H 'Content-Type: application/json' \
+            -d @/tmp/release.json \
+            "$API/releases")"
+
+          if [ "$code" != "201" ]; then
+            echo "Creating release v$VERSION failed with HTTP $code:" >&2
+            cat /tmp/created.json >&2
+            echo >&2
+            echo "A 403 here means the runner token cannot write to this repo:" >&2
+            echo "check the repository's Actions settings, or supply a personal" >&2
+            echo "access token as the FORGEJO_TOKEN secret." >&2
+            exit 1
+          fi
+
+          ID="$(jq -r '.id' /tmp/created.json)"
+          echo "Created release v$VERSION (id $ID) and tag v$VERSION."
+          echo "id=$ID" >> "$GITHUB_OUTPUT"
+
+      - name: Attach the wheel to the release
+        if: steps.gate.outputs.create_release == 'true'
+        run: |
+          set -eu
+          WHEEL="$(ls dist/*.whl | head -1)"
+          code="$(curl -sS -o /tmp/asset.json -w '%{http_code}' -X POST \
+            -H "Authorization: token ${FORGEJO_TOKEN:-$RUNNER_TOKEN}" \
+            -F "attachment=@$WHEEL" \
+            "$API/releases/${{ steps.release.outputs.id }}/assets?name=$(basename "$WHEEL")")"
+          if [ "$code" != "201" ]; then
+            echo "Attaching $WHEEL failed with HTTP $code:" >&2
+            cat /tmp/asset.json >&2
+            exit 1
+          fi
+          echo "Attached $(basename "$WHEEL")."
+
+      - name: Summary
+        if: steps.gate.outputs.publish == 'true'
+        run: |
+          V="${{ steps.meta.outputs.version }}"
+          echo "Published sable $V"
+          echo "  image:    $IMAGE:$V (also :latest, :build-${{ github.run_number }})"
+          if [ "${{ steps.gate.outputs.create_release }}" = "true" ]; then
+            echo "  release:  ${{ github.server_url }}/${{ github.repository }}/releases/tag/v$V"
+          else
+            echo "  release:  v$V already existed; left untouched"
+          fi

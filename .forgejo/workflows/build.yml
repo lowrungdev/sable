@@ -1,0 +1,70 @@
+name: Manual build
+
+# A button, nothing more. `dev` never builds by itself: come here, press
+# "Run workflow", pick the branch.
+#
+# It pushes an image tagged after that branch - never `:latest`, never a version
+# number, and it creates no Forgejo Release. Publishing is the release branch's
+# job (see release.yml).
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: docker-cli
+    env:
+      IMAGE: forgejo.subversive.link/subversive/sable
+    steps:
+      - name: Trust the Subversive CAs
+        run: |
+          apt-get update && apt-get install -y ca-certificates
+          echo "${{ secrets.SUBVERSIVE_INTERMEDIATE }}" > /usr/local/share/ca-certificates/subversive-inter-ca.crt
+          echo "${{ secrets.SUBVERSIVE_ROOT }}" > /usr/local/share/ca-certificates/subversive-root-ca.crt
+          update-ca-certificates
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Work out the image tags
+        id: tags
+        run: |
+          set -eu
+          # Branch names can hold characters a Docker tag cannot.
+          SLUG="$(printf '%s' "${{ github.ref_name }}" \
+            | tr '[:upper:]' '[:lower:]' \
+            | sed -e 's/[^a-z0-9._-]/-/g' -e 's/^[-._]*//' -e 's/[-._]*$//')"
+          [ -n "$SLUG" ] || SLUG=build
+          SHORT="$(printf '%s' "${{ github.sha }}" | cut -c1-7)"
+          echo "Building ${{ github.ref_name }} as $IMAGE:$SLUG and :$SLUG-$SHORT"
+          echo "slug=$SLUG" >> "$GITHUB_OUTPUT"
+          echo "short=$SHORT" >> "$GITHUB_OUTPUT"
+
+      - name: Run the test suite
+        run: docker build --target test --progress plain .
+
+      - name: Log in to Forgejo Registry
+        uses: docker/login-action@v3
+        with:
+          registry: forgejo.subversive.link
+          username: rundeck_automation
+          password: ${{ secrets.RUNDECK_KEY_VALUE }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          target: runtime
+          push: true
+          tags: |
+            forgejo.subversive.link/subversive/sable:${{ steps.tags.outputs.slug }}
+            forgejo.subversive.link/subversive/sable:${{ steps.tags.outputs.slug }}-${{ steps.tags.outputs.short }}
+          labels: |
+            org.opencontainers.image.source=https://forgejo.subversive.link/subversive/sable
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Summary
+        run: |
+          echo "Pushed $IMAGE:${{ steps.tags.outputs.slug }}"
+          echo "       $IMAGE:${{ steps.tags.outputs.slug }}-${{ steps.tags.outputs.short }}"
+          echo "This is not a release: no version tag, no :latest, no Forgejo Release."

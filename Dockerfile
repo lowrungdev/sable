@@ -24,8 +24,17 @@ COPY src ./src
 FROM base AS test
 
 COPY tests ./tests
+# The changelog test reads it, and the release notes come from it.
+COPY docs/CHANGELOG.md ./docs/
 RUN pip install --no-cache-dir '.[dev]' \
     && python -m pytest -q
+
+# --------------------------------------------------------------------------- #
+# The wheel, for attaching to a Forgejo Release. CI extracts it with
+# `docker create` + `docker cp`; nothing else needs this stage.
+FROM base AS wheel
+
+RUN pip install --no-cache-dir build \n    && python -m build --wheel --outdir /dist
 
 # --------------------------------------------------------------------------- #
 # The image that ships.

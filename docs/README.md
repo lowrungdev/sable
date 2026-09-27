@@ -22,7 +22,8 @@ Talk is signed the way the Bot API expects.
 | [purpose.md](purpose.md) | What this is for, what it deliberately does not do, why it is built this way, and the trust boundaries |
 | [configuration.md](configuration.md) | Every environment variable, with value formats, provider recipes and worked examples |
 | [deployment.md](deployment.md) | Getting it running for real: Docker, systemd, TLS, `occ talk:bot:install`, verification, operations, troubleshooting |
-| [releasing.md](releasing.md) | The `dev` / `main` / `release` branch model, the `MAJOR.MINOR` version scheme, and the Forgejo Actions pipeline that publishes on a version bump |
+| [releasing.md](releasing.md) | The `dev` / `main` / `release` branch model, the `MAJOR.MINOR` version scheme, and the Forgejo Actions pipeline that publishes when `release` moves |
+| [CHANGELOG.md](CHANGELOG.md) | What changed per release. The current version's section becomes the Forgejo release body, so it is required |
 | [LICENSE](LICENSE) | MIT |
 
 ## How it fits together
