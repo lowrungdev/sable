@@ -334,3 +334,186 @@ async def test_an_unreachable_nextcloud_does_not_crash_the_error_path(llm: FakeL
         await bot.handle(event("@sable hello"))
     finally:
         await bot.aclose()
+
+
+@respx.mock
+async def test_two_people_reacting_to_one_message_are_both_seen(bot: Bot) -> None:
+    # The event id is the message reacted *to*, so these share it. Keying on the
+    # id alone would drop the second as a redelivery.
+    from conftest import reaction_event
+
+    alice = reaction_event("👍", message_id=100, actor_id="users/alice")
+    bob = reaction_event("😄", message_id=100, actor_id="users/bob")
+    assert bot.seen(alice) is False
+    assert bot.seen(bob) is False
+
+
+@respx.mock
+async def test_one_person_reacting_twice_with_different_emoji(bot: Bot) -> None:
+    from conftest import reaction_event
+
+    first = reaction_event("👍", message_id=100)
+    second = reaction_event("🎉", message_id=100)
+    assert bot.seen(first) is False
+    assert bot.seen(second) is False
+
+
+@respx.mock
+async def test_the_same_reaction_redelivered_is_still_deduplicated(bot: Bot) -> None:
+    from conftest import reaction_event
+
+    event_ = reaction_event("👍", message_id=100)
+    assert bot.seen(event_) is False
+    assert bot.seen(reaction_event("👍", message_id=100)) is True
+
+
+@respx.mock
+async def test_adding_and_removing_a_reaction_are_distinct_events(bot: Bot) -> None:
+    from conftest import reaction_event
+
+    added = reaction_event("👍", message_id=100)
+    removed = reaction_event("👍", message_id=100, undo=True)
+    assert bot.seen(added) is False
+    assert bot.seen(removed) is False
+
+
+@respx.mock
+async def test_reactions_draw_no_reply_and_no_model_call(bot: Bot, llm: FakeLLM) -> None:
+    from conftest import reaction_event
+
+    route = message_route()
+    await bot.handle(reaction_event("👍"))
+    await bot.handle(reaction_event("👍", undo=True))
+    assert not route.called
+    assert not llm.calls
+
+
+# --------------------------------------------------------------------------- #
+# React with the ask emoji to send a message to the model
+# --------------------------------------------------------------------------- #
+
+ASK = "⁉️"
+
+
+@respx.mock
+async def test_reacting_with_the_ask_emoji_answers_that_message(
+    bot: Bot, llm: FakeLLM
+) -> None:
+    from conftest import reaction_event
+
+    route = message_route()
+    # The bot only knows the text because it saw the message go past.
+    await bot.handle(event("what is the capital of Peru?", message_id=100, actor_name="Bob"))
+    await bot.handle(reaction_event(ASK, message_id=100, actor_name="Alice"))
+
+    assert sent(route)[0]["message"] == "mock answer"
+    # Threaded to the message asked about, not floating free.
+    assert sent(route)[0]["replyTo"] == 100
+    prompt = llm.last_prompt
+    assert "what is the capital of Peru?" in prompt
+    assert "Bob" in prompt and "Alice" in prompt
+
+
+@respx.mock
+async def test_the_ask_emoji_matches_without_its_variation_selector(
+    bot: Bot, llm: FakeLLM
+) -> None:
+    from conftest import reaction_event
+
+    message_route()
+    await bot.handle(event("explain this", message_id=100))
+    await bot.handle(reaction_event("⁉", message_id=100))  # no U+FE0F
+    assert llm.calls
+
+
+@respx.mock
+async def test_another_emoji_does_nothing(bot: Bot, llm: FakeLLM) -> None:
+    from conftest import reaction_event
+
+    route = message_route()
+    await bot.handle(event("hello", message_id=100))
+    await bot.handle(reaction_event("👍", message_id=100))
+    assert not route.called
+    assert not llm.calls
+
+
+@respx.mock
+async def test_removing_the_ask_emoji_does_nothing(bot: Bot, llm: FakeLLM) -> None:
+    from conftest import reaction_event
+
+    route = message_route()
+    await bot.handle(event("hello", message_id=100))
+    await bot.handle(reaction_event(ASK, message_id=100, undo=True))
+    assert not route.called
+    assert not llm.calls
+
+
+@respx.mock
+async def test_asking_about_a_message_it_never_saw_says_so(bot: Bot, llm: FakeLLM) -> None:
+    from conftest import reaction_event
+
+    route = message_route()
+    await bot.handle(reaction_event(ASK, message_id=999))
+    assert not llm.calls
+    body = sent(route)[0]["message"]
+    assert "do not have that message" in body
+    assert sent(route)[0]["replyTo"] == 999
+
+
+@respx.mock
+async def test_the_ask_emoji_works_on_the_bots_own_answer(bot: Bot, llm: FakeLLM) -> None:
+    from conftest import reaction_event
+
+    message_route()
+    # A bot message is cached but never acted on, so a follow-up question works.
+    await bot.handle(
+        event("42 is the answer", message_id=100, actor_id="bots/bot-abc", actor_type="Application")
+    )
+    await bot.handle(reaction_event(ASK, message_id=100))
+    assert llm.calls
+    assert "42 is the answer" in llm.last_prompt
+
+
+@respx.mock
+async def test_nothing_is_cached_when_the_feature_is_off(llm: FakeLLM) -> None:
+    from conftest import reaction_event
+
+    route = message_route()
+    bot = Bot(make_config(ask_reaction=""), llm=llm)  # type: ignore[arg-type]
+    try:
+        await bot.handle(event("hello", message_id=100))
+        assert bot.messages.get(ROOM, 100) is None
+        await bot.handle(reaction_event(ASK, message_id=100))
+    finally:
+        await bot.aclose()
+    assert not route.called
+    assert not llm.calls
+
+
+@respx.mock
+async def test_the_ask_emoji_is_ignored_with_no_model_configured(llm: FakeLLM) -> None:
+    from conftest import reaction_event
+
+    route = message_route()
+    bot = Bot(make_config(llm=LLMConfig()), llm=llm)  # type: ignore[arg-type]
+    try:
+        await bot.handle(event("hello", message_id=100))
+        await bot.handle(reaction_event(ASK, message_id=100))
+    finally:
+        await bot.aclose()
+    assert not route.called
+    assert not llm.calls
+
+
+@respx.mock
+async def test_a_model_failure_on_an_ask_is_reported(llm: FakeLLM) -> None:
+    from conftest import reaction_event
+
+    route = message_route()
+    bot = Bot(make_config(), llm=FakeLLM(error=LLMError("boom")))  # type: ignore[arg-type]
+    try:
+        await bot.handle(event("hello", message_id=100))
+        await bot.handle(reaction_event(ASK, message_id=100))
+    finally:
+        await bot.aclose()
+    assert sent(route)[0]["message"].startswith("⚠️")

@@ -66,6 +66,8 @@ Values are trimmed, and URLs have trailing slashes stripped, so a stray space or
 | `SABLE_AI_ROOMS` | *(empty)* | Conversations where **every** message goes to the model, no mention needed. Comma-separated conversation tokens, or `*` for all of them. Empty means mentions and `!ai` only. |
 | `SABLE_REPLY_AS_REPLY` | `false` | Post answers as threaded replies to the triggering message instead of plain messages. |
 | `SABLE_THINKING_REACTION` | *(empty)* | A single emoji stuck on the triggering message while the model works, then removed — e.g. `👀`. Empty disables it, which saves two API calls per answer. Failures here are ignored; a reaction is never load-bearing. |
+| `SABLE_ASK_REACTION` | `⁉️` | React to any message with this and the bot sends that message to the model, answering in a reply threaded under it. Empty disables the feature **and** the message cache behind it. Needs `--feature reaction` at install. |
+| `SABLE_MESSAGE_CACHE` | `200` | Recent messages remembered per conversation, so a reaction can name one. Expires with `SABLE_HISTORY_TTL`. |
 | `SABLE_UNKNOWN_COMMAND_HINT` | `true` | Reply "I have no `!foo` command" on an unknown command. Turn off in busy rooms where people use other bots with the same prefix. |
 | `SABLE_REPORT_ERRORS` | `true` | Post failures into the conversation (`⚠️ Sorry — …`) as well as logging them. Off means failures are logged only and the room stays quiet. |
 | `SABLE_MAX_MESSAGE_CHARS` | `30000` | Replies longer than this are clipped with a `_[truncated]_` marker. Talk hard-rejects anything over 32000 with HTTP 413, which is the real ceiling. |
@@ -81,6 +83,19 @@ Values are trimmed, and URLs have trailing slashes stripped, so a stray space or
 | `sabletooth tigers` | No — mention matching respects word boundaries |
 | `just chatting` | Only in a conversation listed in `SABLE_AI_ROOMS` |
 | Anything from another bot | Never |
+| A ⁉️ reaction on any message | Assistant, answering that message |
+
+### Asking about a message by reacting to it
+
+React with `SABLE_ASK_REACTION` (⁉️ by default) and the bot answers the message you reacted to,
+in a reply threaded under it. It works on anyone's message, the bot's own answers included, which
+makes it a quick way to ask a follow-up.
+
+The catch: **a reaction event carries the message id, not its text.** The bot API cannot read a
+message back — that needs a user account rather than bot credentials — so sable can only answer
+about messages it saw arrive, and keeps the last `SABLE_MESSAGE_CACHE` per conversation for that
+purpose. React to something older, or posted before the bot joined, and it says so instead of
+guessing. Nothing is cached at all when `SABLE_ASK_REACTION` is empty.
 
 ## Conversation memory
 

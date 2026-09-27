@@ -88,6 +88,15 @@ services:
       # Emoji to stick on a message while the model thinks; empty disables it.
       # SABLE_THINKING_REACTION: "👀"
 
+      # React to any message with this and the bot answers that message, in a
+      # reply threaded under it. Empty disables the feature and its message
+      # cache. Needs --feature reaction on the bot install.
+      # SABLE_ASK_REACTION: "⁉️"
+
+      # Messages remembered per conversation so a reaction can name one; a
+      # reaction event carries the id, never the text. Expires with the history.
+      # SABLE_MESSAGE_CACHE: "200"
+
       # Reply "I have no !foo command" on an unknown command.
       # SABLE_UNKNOWN_COMMAND_HINT: "true"
 

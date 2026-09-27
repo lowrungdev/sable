@@ -11,7 +11,7 @@ import httpx
 from .commands import CommandError, Context, Registry, parse_argv, registry, split_command
 from .config import Config
 from .events import TalkEvent
-from .history import History
+from .history import History, MessageCache
 from .llm import LLMClient, LLMError
 from .talk import TalkClient, TalkError
 
@@ -20,6 +20,18 @@ log = logging.getLogger(__name__)
 #: How many recently handled events to remember, so a redelivered webhook does
 #: not produce a second reply.
 SEEN_CACHE = 512
+
+#: (conversation, event type, message id, actor, reaction) - see Bot.seen.
+SeenKey = tuple[str, str, int, str, str]
+
+
+def emoji_key(emoji: str) -> str:
+    """Normalise an emoji for comparison.
+
+    Clients differ over the variation selector, so the same reaction can arrive
+    as U+2049 or U+2049 U+FE0F. Compare without it.
+    """
+    return emoji.strip().replace("️", "").replace("︎", "")
 
 
 class Bot:
@@ -30,16 +42,19 @@ class Bot:
         http_client: httpx.AsyncClient | None = None,
         llm: LLMClient | None = None,
         history: History | None = None,
+        messages: MessageCache | None = None,
         command_registry: Registry | None = None,
     ) -> None:
         self.config = config
         self.registry = command_registry or registry
         self.history = history or History(config.history_turns, config.history_ttl)
+        self.messages = messages or MessageCache(config.message_cache, config.history_ttl)
+        self._ask_key = emoji_key(config.ask_reaction)
         self._owns_http = http_client is None
         self._http = http_client or httpx.AsyncClient(timeout=30.0)
         self._llm = llm if llm is not None else LLMClient(config.llm, client=self._http)
-        self._seen: deque[tuple[str, str, int]] = deque(maxlen=SEEN_CACHE)
-        self._seen_set: set[tuple[str, str, int]] = set()
+        self._seen: deque[SeenKey] = deque(maxlen=SEEN_CACHE)
+        self._seen_set: set[SeenKey] = set()
         self._mention_re = re.compile(
             rf"^@?{re.escape(config.bot_name)}\b[,:;]?\s*", re.IGNORECASE
         )
@@ -58,6 +73,14 @@ class Bot:
     def llm_enabled(self) -> bool:
         return self.config.llm.enabled
 
+    @property
+    def ask_enabled(self) -> bool:
+        """Is the react-to-ask feature on? It needs both an emoji and a model."""
+        return bool(self._ask_key) and self.llm_enabled
+
+    def is_ask_reaction(self, reaction: str) -> bool:
+        return bool(self._ask_key) and emoji_key(reaction) == self._ask_key
+
     def talk(self, backend: str) -> TalkClient:
         """A client for the server that sent us this event."""
         base = self.config.nextcloud_url or backend
@@ -71,8 +94,21 @@ class Bot:
         )
 
     def seen(self, event: TalkEvent) -> bool:
-        """Record an event and report whether we already handled it."""
-        key = (event.room_token, event.type, event.message_id)
+        """Record an event and report whether we already handled it.
+
+        The actor and the reaction are part of the key, not just the message id:
+        for a reaction event the id is the message being reacted *to*, so two
+        people reacting to one message - or one person reacting twice with
+        different emoji - would otherwise look like a redelivery of the first.
+        For a chat message both are constant, so the id still decides.
+        """
+        key = (
+            event.room_token,
+            event.type,
+            event.message_id,
+            event.actor.id,
+            event.reaction,
+        )
         if event.message_id and key in self._seen_set:
             return True
         self._seen.append(key)
@@ -95,11 +131,28 @@ class Bot:
 
     async def handle(self, event: TalkEvent) -> None:
         """Entry point for a verified webhook event."""
+        # Remember messages before anything else, the bot's own included, so a
+        # reaction can name one later. Remembering is not acting on it, and a
+        # reaction to one of our own answers is a reasonable follow-up.
+        if self.ask_enabled and event.is_message:
+            self.messages.add(
+                event.room_token,
+                event.message_id,
+                event.actor.name or event.actor.id,
+                event.message.strip(),
+            )
+
         if event.actor.is_bot:
             log.debug("ignoring %s from bot %s", event.type, event.actor.id)
             return
         if self.seen(event):
             log.info("ignoring redelivered %s #%s", event.type, event.message_id)
+            return
+
+        # Gated on ask_enabled, not just the emoji: with no model configured the
+        # cache is empty too, and "I do not have that message" would be a lie.
+        if self.ask_enabled and event.type == "Like" and self.is_ask_reaction(event.reaction):
+            await self._run_reaction_query(event)
             return
 
         if event.type in {"Join", "Leave"}:
@@ -153,6 +206,47 @@ class Bot:
         if reply:
             await self._safe_reply(event, reply)
 
+    async def _run_reaction_query(self, event: TalkEvent) -> None:
+        """Answer the message somebody reacted to with the ask emoji.
+
+        The event names the message by id only, so this depends on having seen it
+        go past: a reaction to something older than the cache is a miss, and
+        saying so is better than answering the wrong thing.
+        """
+        cached = self.messages.get(event.room_token, event.message_id)
+        asker = event.actor.name or event.actor.id
+        if cached is None:
+            log.info(
+                "%s asked about message %s in %s, which is not in the cache",
+                event.actor.id,
+                event.message_id,
+                event.room_token,
+            )
+            await self._safe_reply(
+                event,
+                "I do not have that message — I only remember ones posted while I "
+                "was in the conversation. Quote it or mention me instead.",
+                reply_to=event.message_id,
+            )
+            return
+
+        log.info(
+            "%s asked about message %s in %s", event.actor.id, event.message_id, event.room_token
+        )
+        prompt = (
+            f"{asker} flagged the message below for you with {self.config.ask_reaction}. "
+            f"Answer it, or explain it if it is not a question.\n\n"
+            f"{cached.author}: {cached.text}"
+        )
+        try:
+            answer = await self.answer_with_llm(event, prompt, attribute=False)
+        except LLMError as exc:
+            log.warning("completion failed: %s", exc)
+            await self._report(event, str(exc))
+            return
+        if answer:
+            await self._safe_reply(event, answer, reply_to=event.message_id)
+
     async def _run_llm_reply(self, event: TalkEvent, prompt: str) -> None:
         if not self.llm_enabled:
             log.debug("LLM disabled; ignoring message %s", event.message_id)
@@ -168,8 +262,16 @@ class Bot:
 
     # -- actions ----------------------------------------------------------- #
 
-    async def answer_with_llm(self, event: TalkEvent, prompt: str) -> str:
-        """Run a completion in the conversation's context and remember it."""
+    async def answer_with_llm(
+        self, event: TalkEvent, prompt: str, *, attribute: bool = True
+    ) -> str:
+        """Run a completion in the conversation's context and remember it.
+
+        attribute prefixes the speaker's name. Turn it off when the caller
+        has already built a prompt naming the people involved, as the
+        react-to-ask path does - there the actor is the person asking, not the
+        author of the message being asked about.
+        """
         if not self.llm_enabled:
             raise LLMError("no model is configured (set SABLE_LLM_MODEL)")
         prompt = prompt.strip()
@@ -177,7 +279,7 @@ class Bot:
             raise LLMError("nothing to answer")
 
         room = event.room_token
-        turn = self._attributed(event, prompt)
+        turn = self._attributed(event, prompt) if attribute else prompt
         messages = [{"role": "system", "content": self._system_prompt(event)}]
         messages.extend(self.history.get(room))
         messages.append({"role": "user", "content": turn})
@@ -206,10 +308,22 @@ class Bot:
         name = event.actor.name or event.actor.id
         return f"{name}: {prompt}" if name else prompt
 
-    async def reply(self, event: TalkEvent, message: str, *, silent: bool = False) -> int:
-        """Post a message into the conversation the event came from."""
+    async def reply(
+        self,
+        event: TalkEvent,
+        message: str,
+        *,
+        silent: bool = False,
+        reply_to: int | None = None,
+    ) -> int:
+        """Post a message into the conversation the event came from.
+
+        reply_to overrides the SABLE_REPLY_AS_REPLY default, for answers that
+        make no sense floating free of the message they are about.
+        """
         client = self.talk(event.backend)
-        reply_to = event.message_id if self.config.reply_as_reply else 0
+        if reply_to is None:
+            reply_to = event.message_id if self.config.reply_as_reply else 0
         return await client.send_message(
             event.room_token, message, reply_to=reply_to, silent=silent
         )
@@ -223,7 +337,9 @@ class Bot:
             room_token, message, silent=silent, reply_to=reply_to
         )
 
-    async def _safe_reply(self, event: TalkEvent, message: str) -> None:
+    async def _safe_reply(
+        self, event: TalkEvent, message: str, *, reply_to: int | None = None
+    ) -> None:
         """Reply, treating a failed post as a log line rather than a crash.
 
         Nextcloud being unreachable is not this handler's problem to solve, and
@@ -231,7 +347,7 @@ class Bot:
         request has long since been answered.
         """
         try:
-            await self.reply(event, message)
+            await self.reply(event, message, reply_to=reply_to)
         except (TalkError, httpx.HTTPError, ValueError) as exc:
             log.warning("could not post to %s: %s", event.room_token, exc)
 

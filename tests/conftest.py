@@ -124,3 +124,30 @@ def signed_headers(body: bytes, secret: str = SECRET, backend: str = BACKEND) ->
         "X-Nextcloud-Talk-Backend": backend,
         "Content-Type": "application/json",
     }
+
+
+def reaction_payload(
+    reaction: str = "👍",
+    *,
+    message_id: int = 100,
+    room: str = ROOM,
+    actor_id: str = "users/alice",
+    actor_name: str = "Alice",
+    undo: bool = False,
+) -> dict:
+    """A Like (reaction added) or Undo (reaction removed) event."""
+    actor = {"type": "Person", "id": actor_id, "name": actor_name}
+    note = {"type": "Note", "id": str(message_id), "name": "message"}
+    target = {"type": "Collection", "id": room, "name": "Team chat"}
+    if undo:
+        return {
+            "type": "Undo",
+            "actor": actor,
+            "object": {"type": "Like", "actor": actor, "object": note, "content": reaction},
+            "target": target,
+        }
+    return {"type": "Like", "actor": actor, "object": note, "target": target, "content": reaction}
+
+
+def reaction_event(reaction: str = "👍", **kwargs: Any):
+    return parse_event(reaction_payload(reaction, **kwargs), backend=BACKEND)

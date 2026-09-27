@@ -60,7 +60,7 @@ sable --check                  # validate the config and print what it resolved 
 Then register it with Nextcloud, on the Nextcloud server as the web user:
 
 ```bash
-occ talk:bot:install "sable" "<the same secret>" "https://sable.example.org/webhook" "A helpful bot"
+occ talk:bot:install "sable" "<the same secret>" "https://sable.example.org/webhook" "A helpful bot" --feature webhook --feature response --feature reaction
 ```
 
 …and enable it per conversation under **Conversation settings → Bots**. Say hello:
@@ -81,6 +81,10 @@ The full path — TLS, reverse proxies, systemd, feature flags, verification —
 **The assistant** runs when a message mentions the bot (`@sable ...`, or `sable: ...` at the
 start of a line), when you use `!ai <question>`, or for *every* message in conversations listed
 in `SABLE_AI_ROOMS` (`*` for all of them).
+
+**Or react with ⁉️** to any message and the bot answers *that* message, threaded underneath it —
+handy for someone else's question, or as a follow-up on the bot's own reply. It only works on
+messages the bot saw arrive, because a reaction event carries the message id and not its text.
 
 History is per-conversation, in-process, capped by `SABLE_HISTORY_TURNS` and
 `SABLE_HISTORY_TTL`, and cleared by `!reset`. It is a cache, not a record — a restart forgets

@@ -12,7 +12,26 @@ Format: `## <version>`, optionally followed by a date. Anything until the next
 
 ## Unreleased
 
-_Nothing yet._
+- **React to a message with ⁉️ and the bot answers it**, in a reply threaded
+  under the original. It works on anyone's message, its own answers included,
+  which makes it a quick way to ask a follow-up. `SABLE_ASK_REACTION` sets the
+  emoji and empty disables the feature.
+  A reaction event carries the message id and never the text, and the bot API
+  cannot read a message back — that needs a user account rather than bot
+  credentials — so this depends on a new bounded, expiring per-conversation
+  cache of recent messages (`SABLE_MESSAGE_CACHE`, 200). React to something
+  older than the cache and the bot says so rather than guessing. Nothing is
+  cached when the feature is off.
+- The documented `occ talk:bot:install` now asks for `--feature reaction`
+  alongside `webhook` and `response`, so reaction events are delivered. They are
+  still only logged, but enabling the feature at install means no reinstall when
+  a handler lands.
+- Fixed a latent bug that enabling that feature would have exposed: the
+  redelivery cache keyed on `(conversation, type, message id)`, and for a
+  reaction the id is the message reacted *to* — so two people reacting to one
+  message, or one person reacting twice with different emoji, looked like a
+  redelivery and the second event was dropped. The key now includes the actor
+  and the emoji.
 
 ## 0.3
 

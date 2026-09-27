@@ -219,18 +219,23 @@ On the Nextcloud server, as the web user (`www-data`, `nginx`, `apache`, dependi
 setup):
 
 ```bash
-sudo -u www-data php occ talk:bot:install \
-  "sable" \
-  "<the same secret>" \
-  "https://sable.example.org/webhook" \
-  "A helpful bot" \
-  --feature webhook --feature response
+sudo -u www-data php occ talk:bot:install "sable" "<the same secret>" "https://sable.example.org/webhook" "A helpful bot" --feature webhook --feature response --feature reaction
 ```
 
 - The URL must end in **`/webhook`**.
-- `webhook` delivers chat messages to sable; `response` lets it post back. Both are needed.
-  Add `--feature reaction` to also receive reaction events. Omitting `--feature` installs the
-  default set.
+- **Features** are a bitmask: `webhook` (1) delivers chat messages to sable, `response` (2) lets
+  it post messages and reactions back, `reaction` (8) adds notifications when someone adds or
+  removes a reaction. `event` (4) is for bots running inside Nextcloud as PHP and is mutually
+  exclusive with these. Omitting `--feature` entirely gives you `webhook` + `response` for an
+  HTTP URL — the two a webhook bot cannot work without — so the flags above differ from the
+  default only in adding `reaction`.
+  Check what a bot ended up with using `occ talk:bot:list`; at runtime,
+  [`TalkClient.features()`](../src/sable/talk.py) asks Nextcloud and returns the bitmask, so
+  `11` means webhook + response + reaction.
+- Reaction events are **parsed but not yet acted on**: `Like` and `Undo` arrive fully decoded in
+  [`events.py`](../src/sable/events.py) and `Bot.handle` logs them. Enabling the feature now
+  costs nothing and means no reinstall when a handler lands — see
+  [future.md](future.md#talk-features-not-yet-used).
 - `--no-setup` prevents moderators from enabling the bot themselves, if you want to control
   that centrally.
 - The name is what people will see and type. Keep it in step with `SABLE_BOT_NAME`, which is
@@ -316,7 +321,7 @@ lose an answer someone is waiting for.
 
 ```bash
 occ talk:bot:uninstall --id <id>
-occ talk:bot:install "sable" "<new secret>" "https://sable.example.org/webhook" "A helpful bot"
+occ talk:bot:install "sable" "<new secret>" "https://sable.example.org/webhook" "A helpful bot" --feature webhook --feature response --feature reaction
 ```
 
 …then update `SABLE_BOT_SECRET` and restart. Expect a brief window where webhooks are rejected;

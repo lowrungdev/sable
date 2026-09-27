@@ -133,6 +133,11 @@ class Config:
     ai_rooms: list[str] = field(default_factory=list)
     reply_as_reply: bool = False
     thinking_reaction: str = ""
+    #: React with this to send a message to the model. Empty disables the
+    #: feature, and with it the message cache that makes it possible.
+    ask_reaction: str = "⁉️"
+    #: Messages remembered per conversation, so a reaction can refer to one.
+    message_cache: int = 200
     report_errors: bool = True
     unknown_command_hint: bool = True
     max_message_chars: int = 30000
@@ -195,6 +200,8 @@ class Config:
             ai_rooms=_csv("SABLE_AI_ROOMS"),
             reply_as_reply=_bool("SABLE_REPLY_AS_REPLY", False),
             thinking_reaction=_str("SABLE_THINKING_REACTION"),
+            ask_reaction=_str("SABLE_ASK_REACTION", "⁉️"),
+            message_cache=_int("SABLE_MESSAGE_CACHE", 200),
             report_errors=_bool("SABLE_REPORT_ERRORS", True),
             unknown_command_hint=_bool("SABLE_UNKNOWN_COMMAND_HINT", True),
             max_message_chars=_int("SABLE_MAX_MESSAGE_CHARS", 30000),

@@ -55,9 +55,17 @@ command rather than globally, since the point is that most commands stay open.
 suit the assistant well in busy rooms. The parameters are already there; this is a small change
 plus a config switch alongside `SABLE_REPLY_AS_REPLY`.
 
-**Reactions and join/leave.** [`events.py`](../src/sable/events.py) parses `Like`, `Undo`,
-`Join` and `Leave` fully, and `Bot.handle` logs them and stops. The hooks exist for anything
-worth doing with them — a greeting on join, a command triggered by a reaction.
+**Reactions** are handled for one emoji: ⁉️ sends the message it is attached to to the model.
+Any other reaction is parsed and ignored, so a second behaviour — an approval workflow where 👍
+from the right person does something — is a branch in `Bot.handle` next to the existing one.
+
+**Join and leave** are parsed and only logged. A greeting when the bot is enabled in a
+conversation would go in the same place.
+
+**The message cache is the weak point of the ⁉️ feature.** It is in memory, bounded by
+`SABLE_MESSAGE_CACHE` and expiring with `SABLE_HISTORY_TTL`, so reacting to anything older gets
+"I do not have that message". Making that reliable means persistence — see the note on durable
+history above, and the discussion of why a chat *log* is a different and much larger commitment.
 
 **File attachments.** The bot API can post messages and reactions, and nothing else. Uploading a
 file would need a bot *user* account and WebDAV, which is a different integration model. Worth

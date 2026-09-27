@@ -130,15 +130,22 @@ These are known and deliberate. Decide for yourself whether they are acceptable.
 5. **Model output is posted verbatim.** Nothing filters it. A participant can try to steer the
    model through prompt injection; the worst realistic outcome is embarrassing or misleading
    text, since Talk renders Markdown and sanitises HTML itself.
-6. **Chat content sits in process memory** for up to `SABLE_HISTORY_TTL` (default one hour). It
-   is never written to disk, but it would appear in a core dump.
-7. **No request size limit in the application.** The HMAC covers the whole body, so the body
+6. **Chat content sits in process memory** for up to `SABLE_HISTORY_TTL` (default one hour):
+   the assistant's per-conversation history, and — while `SABLE_ASK_REACTION` is set — the last
+   `SABLE_MESSAGE_CACHE` messages of every conversation the bot is in, so a reaction can name one.
+   Nothing is written to disk, but it would appear in a core dump. Setting `SABLE_ASK_REACTION=""`
+   disables that cache entirely.
+7. **Anyone in a conversation can send any message to the model** by reacting to it with ⁉️,
+   including messages they did not write. That is the feature working as intended, but it means
+   one participant can forward another's words to your model backend without saying anything in
+   the room.
+8. **No request size limit in the application.** The HMAC covers the whole body, so the body
    must be read before it can be checked. Cap it at the proxy — the nginx example in
    [deployment.md](deployment.md) sets `client_max_body_size 1m`.
-8. **No rate limiting of our own.** Talk rate-limits bots (HTTP 429); nothing limits how fast
+9. **No rate limiting of our own.** Talk rate-limits bots (HTTP 429); nothing limits how fast
    `/notify` can be called.
-9. **Logs are the only audit trail.** There is no separate audit log, and no metrics endpoint.
-10. **CI holds credentials**: the registry password (`RUNDECK_KEY_VALUE`) and a runner token with
+10. **Logs are the only audit trail.** There is no separate audit log, and no metrics endpoint.
+11. **CI holds credentials**: the registry password (`RUNDECK_KEY_VALUE`) and a runner token with
     write access to the repository, used to create releases. Anyone who can change a workflow on
     a branch that CI runs can reach both.
 
