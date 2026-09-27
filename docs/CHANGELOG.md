@@ -12,6 +12,21 @@ Format: `## <version>`, optionally followed by a date. Anything until the next
 
 ## Unreleased
 
+_Nothing yet._
+
+## 0.3
+
+- `compose.yaml` now mounts the host's CA directory read-only and sets
+  `SSL_CERT_FILE`, so the bot can verify a Nextcloud using an internal or
+  self-signed certificate. This needs no application code: httpx verifies
+  against its bundled certifi store by default, and that variable is what
+  redirects it to the mounted bundle. It replaces the trust store rather than
+  extending it, so it must name the complete host bundle — documented, along
+  with why `SSL_CERT_DIR` and single-file mounts are traps.
+- Two new documents: `docs/security.md` sets out the trust boundaries, what
+  protects each one, how secrets are handled and the accepted risks;
+  `docs/future.md` records known limitations with their fixes, Talk features not
+  yet used, maintenance cadence and decisions worth revisiting.
 - Every published image is now tagged with the full commit sha it was built
   from, so any image in Packages maps back to its source without inspecting
   labels. Release builds push `:<version>`, `:latest` and `:<commit>`; manual

@@ -167,6 +167,52 @@ curl -fsS https://sable.example.org/healthz
 # {"status":"ok","version":"0.1.0","bot":"sable","llm":"gpt-4o-mini","notify":true}
 ```
 
+### If your Nextcloud uses an internal or self-signed certificate
+
+That is the *outbound* direction — sable verifying Nextcloud's certificate when it posts a reply.
+It fails by default with `CERTIFICATE_VERIFY_FAILED`, because **httpx verifies against its own
+bundled certifi store, not the system one**, so installing your CA in the container's trust store
+achieves nothing on its own.
+
+The fix is two lines in [`compose.yaml`](../compose.yaml), already there:
+
+```yaml
+volumes:
+  - ${SABLE_HOST_CA_DIR:-/etc/ssl/certs}:/etc/ssl/certs:ro
+environment:
+  SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
+```
+
+The mount lends the container the host's CA bundle — which already contains your internal CA,
+since the host trusts it — and `SSL_CERT_FILE` is what redirects Python away from certifi to that
+bundle. No application setting is involved; sable has no TLS options and no way to disable
+verification.
+
+Three things that will bite you if you vary this:
+
+- **Point it at the complete bundle, not just your CA.** `SSL_CERT_FILE` *replaces* the trust
+  store rather than adding to it. A file containing only your internal CA makes the internal
+  Nextcloud work and every public HTTPS call — your model backend included — fail.
+- **Do not use `SSL_CERT_DIR` with a plain folder of `.crt` files.** OpenSSL only looks up
+  certificates there by hashed filename, so an ordinary folder silently trusts nothing, and
+  because it also replaces the store, public TLS breaks too. `openssl rehash` fixes the lookup
+  but not the replacement.
+- **Mount the directory, not the single file.** `update-ca-certificates` on the host writes a new
+  file, and a single-file bind mount pins the old inode until the container restarts.
+
+If your distribution keeps certificates elsewhere — RHEL and Fedora use `/etc/pki/tls/certs` —
+set `SABLE_HOST_CA_DIR` accordingly. Beware that Docker creates a missing bind-mount source as an
+empty directory, which would leave the container trusting nothing at all.
+
+On bare metal the host bundle is already in use, so the systemd unit needs only:
+
+```ini
+Environment=SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+```
+
+To confirm it worked, watch for the reply direction succeeding — `!ping` answering in the room is
+the real test. A failure logs `could not post to <token>: … CERTIFICATE_VERIFY_FAILED`.
+
 ## 5. Register the bot with Nextcloud
 
 On the Nextcloud server, as the web user (`www-data`, `nginx`, `apache`, depending on your
@@ -285,6 +331,11 @@ resident, and all I/O is async). Scale by running separate bots, not workers.
 that is hard to recreate.
 
 ## Hardening
+
+The operational steps are below. [security.md](security.md) has the whole posture — what
+protects each trust boundary, how secrets are handled, and the
+[accepted risks](security.md#accepted-risks) worth reading before this is reachable from
+anywhere you do not control.
 
 - **Do not publish the port.** Bind to `127.0.0.1` (or a private network) and let the proxy be
   the only client. Nextcloud is the only legitimate caller of `/webhook`.

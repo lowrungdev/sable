@@ -148,6 +148,22 @@ message has no incoming webhook to learn the server address from.
 | `SABLE_PORT` | `8080` | |
 | `SABLE_LOG_LEVEL` | `INFO` | `DEBUG` additionally logs why a message was *not* acted on, which is the fastest way to debug mention and prefix matching. |
 
+## TLS trust, for an internal or self-signed Nextcloud
+
+There is no `SABLE_` setting for this, and no way to disable certificate verification. Trust is
+configured the standard way, with the variable OpenSSL and httpx already understand:
+
+| Variable | Notes |
+| --- | --- |
+| `SSL_CERT_FILE` | Path to a CA bundle **inside the container**. `compose.yaml` mounts the host's `/etc/ssl/certs` read-only and sets this to `/etc/ssl/certs/ca-certificates.crt`. |
+
+It **replaces** the trust store rather than adding to it, so the file must be the complete bundle
+— public roots *and* your internal CA. Pointing it at a file holding only your CA makes the
+internal Nextcloud verify and every public HTTPS call fail. `SSL_CERT_DIR` is a trap here: OpenSSL
+only finds certificates in such a directory by hashed filename, so a plain folder of `.crt` files
+trusts nothing while still replacing the store. See
+[deployment.md](deployment.md#if-your-nextcloud-uses-an-internal-or-self-signed-certificate).
+
 ## Worked examples
 
 ### Commands only, no model
