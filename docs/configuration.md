@@ -63,13 +63,14 @@ Values are trimmed, and URLs have trailing slashes stripped, so a stray space or
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `SABLE_COMMAND_PREFIX` | `!` | Any string. `/` is a reasonable alternative; note Talk itself uses `/` for some client-side commands. |
-| `SABLE_AI_ROOMS` | *(empty)* | Conversations where **every** message goes to the model, no mention needed. Comma-separated conversation tokens, or `*` for all of them. Empty means mentions and `!ai` only. |
+| `SABLE_AI_ROOMS` | *(empty)* | Conversations where **every** message goes to the model, no mention needed. Comma-separated conversation **tokens or names**, or `*` for all of them. Empty means mentions and `!ai` only. See [below](#which-identifier-goes-in-sable_ai_rooms). |
 | `SABLE_REPLY_AS_REPLY` | `false` | Post answers as threaded replies to the triggering message instead of plain messages. |
 | `SABLE_THINKING_REACTION` | *(empty)* | A single emoji stuck on the triggering message while the model works, then removed — e.g. `👀`. Empty disables it, which saves two API calls per answer. Failures here are ignored; a reaction is never load-bearing. |
 | `SABLE_ASK_REACTION` | `⁉️` | React to any message with this and the bot sends that message to the model, answering in a reply threaded under it. Empty disables the feature **and** the message cache behind it. Needs `--feature reaction` at install. |
 | `SABLE_MESSAGE_CACHE` | `200` | Recent messages remembered per conversation, so a reaction can name one. Expires with `SABLE_HISTORY_TTL`. |
 | `SABLE_UNKNOWN_COMMAND_HINT` | `true` | Reply "I have no `!foo` command" on an unknown command. Turn off in busy rooms where people use other bots with the same prefix. |
 | `SABLE_REPORT_ERRORS` | `true` | Post failures into the conversation (`⚠️ Sorry — …`) as well as logging them. Off means failures are logged only and the room stays quiet. |
+| `SABLE_STARTUP_CHECK` | `true` | Call Nextcloud's `status.php` at startup and log what answered, so a wrong URL or an untrusted certificate shows up at boot. Never fatal. Needs `SABLE_NEXTCLOUD_URL`. |
 | `SABLE_MAX_MESSAGE_CHARS` | `30000` | Replies longer than this are clipped with a `_[truncated]_` marker. Talk hard-rejects anything over 32000 with HTTP 413, which is the real ceiling. |
 
 ### When does the assistant answer?
@@ -84,6 +85,32 @@ Values are trimmed, and URLs have trailing slashes stripped, so a stray space or
 | `just chatting` | Only in a conversation listed in `SABLE_AI_ROOMS` |
 | Anything from another bot | Never |
 | A ⁉️ reaction on any message | Assistant, answering that message |
+
+### Which identifier goes in `SABLE_AI_ROOMS`
+
+Either the conversation's **token** or its **display name**:
+
+```ini
+SABLE_AI_ROOMS=a1b2c3d4          # the token, from the conversation's URL
+SABLE_AI_ROOMS=AI                # the name shown in Talk
+SABLE_AI_ROOMS=AI,a1b2c3d4       # a mix is fine
+SABLE_AI_ROOMS=*                 # every conversation the bot is in
+```
+
+The token is the last segment of the conversation's URL —
+`https://cloud.example.org/call/a1b2c3d4` → `a1b2c3d4`. Names match ignoring case and surrounding
+space, so `ai`, `AI` and `  AI  ` all match a conversation called "AI".
+
+**Prefer tokens where it matters.** A token never changes; a name can be changed by any moderator
+of the conversation, which would silently start or stop the bot answering everything in it. Names
+are also not unique — two conversations called "AI" would both match.
+
+If a room is not behaving as you expect, `SABLE_LOG_LEVEL=DEBUG` prints both identifiers for
+every message it decided to ignore, so you can see exactly what to configure:
+
+```
+message in a1b2c3d4 ('AI') was not for me - no prefix, no mention, and not an AI room
+```
 
 ### Asking about a message by reacting to it
 
@@ -161,7 +188,7 @@ message has no incoming webhook to learn the server address from.
 | --- | --- | --- |
 | `SABLE_HOST` | `0.0.0.0` | Bind address. Use `127.0.0.1` when a reverse proxy on the same host is the only client. |
 | `SABLE_PORT` | `8080` | |
-| `SABLE_LOG_LEVEL` | `INFO` | `DEBUG` additionally logs why a message was *not* acted on, which is the fastest way to debug mention and prefix matching. |
+| `SABLE_LOG_LEVEL` | `INFO` | `INFO` logs the lifecycle, the resolved configuration, and who used what. `DEBUG` adds message text, prompts, command arguments, every outbound HTTP call, and why a message was *not* acted on — the fastest way to debug mention and prefix matching, but it puts chat content in the log. See [deployment.md](deployment.md#what-the-log-tells-you). |
 
 ## TLS trust, for an internal or self-signed Nextcloud
 

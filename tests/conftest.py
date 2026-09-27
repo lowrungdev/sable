@@ -28,6 +28,9 @@ def make_config(**overrides: Any) -> Config:
         "bot_name": "sable",
         "nextcloud_url": BACKEND,
         "pin_backend": True,
+        # Off by default: no test should reach the network implicitly. The probe
+        # has its own tests.
+        "startup_check": False,
         "llm": LLMConfig(model="some-model", api_key="sk-test"),
     }
     defaults.update(overrides)

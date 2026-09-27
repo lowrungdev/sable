@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import AsyncIterator
 
 import httpx
@@ -270,3 +271,54 @@ async def test_notify_reports_an_unreachable_nextcloud_as_502() -> None:
             headers={"Authorization": "Bearer alert-token"},
         )
     assert response.status_code == 502
+
+
+async def test_startup_and_shutdown_are_logged_with_the_configuration(caplog) -> None:
+    config = make_config(notify_token="t", notify_rooms={"alerts": ROOM})
+    with caplog.at_level(logging.INFO):
+        async for _client in client_for(config):
+            pass
+    text = caplog.text
+    assert "starting" in text and "ready" in text
+    assert "stopping" in text and "stopped" in text
+    assert "listening on:   http://0.0.0.0:8080" in text
+    assert "POST /webhook" in text
+    assert f"nextcloud:      {BACKEND}" in text
+    assert "some-model at https://api.openai.com/v1" in text
+    assert "alerting:       enabled, aliases: alerts" in text
+    assert "backend pin:    on" in text
+
+
+@respx.mock
+async def test_the_startup_probe_runs_when_enabled(caplog) -> None:
+    route = respx.get(f"{BACKEND}/status.php").mock(
+        return_value=httpx.Response(
+            200, json={"installed": True, "maintenance": False, "versionstring": "31.0.4"}
+        )
+    )
+    with caplog.at_level(logging.INFO):
+        async for _client in client_for(make_config(startup_check=True)):
+            pass
+    assert route.called
+    assert "connected to Nextcloud 31.0.4" in caplog.text
+
+
+async def test_the_startup_probe_can_be_turned_off() -> None:
+    # No respx mock at all: if it tried to call out, this would raise.
+    async for client in client_for(make_config(startup_check=False)):
+        assert (await client.get("/healthz")).status_code == 200
+
+
+@respx.mock
+async def test_a_relayed_alert_is_logged(caplog) -> None:
+    message_route()
+    async for client in client_for(
+        make_config(notify_token="alert-token", notify_rooms={"alerts": ROOM})
+    ):
+        with caplog.at_level(logging.INFO):
+            await client.post(
+                "/notify",
+                json={"room": "alerts", "message": "disk full"},
+                headers={"Authorization": "Bearer alert-token"},
+            )
+    assert f"relayed an alert to {ROOM} (alias alerts) as message 1" in caplog.text

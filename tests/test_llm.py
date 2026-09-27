@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 
 import httpx
 import pytest
@@ -183,3 +184,57 @@ async def test_no_model_configured() -> None:
             await client.complete(MESSAGES)
     finally:
         await client.aclose()
+
+
+@respx.mock
+async def test_a_backend_error_is_logged_with_its_url(caplog) -> None:
+    respx.post(URL).mock(return_value=httpx.Response(502, text="upstream is down"))
+    client = make_client()
+    try:
+        with caplog.at_level(logging.WARNING):
+            with pytest.raises(LLMError):
+                await client.complete(MESSAGES)
+    finally:
+        await client.aclose()
+    assert URL in caplog.text
+    assert "returned HTTP 502" in caplog.text
+    assert "upstream is down" in caplog.text
+
+
+@respx.mock
+async def test_an_unreachable_backend_logs_the_lost_connection(caplog) -> None:
+    respx.post(URL).mock(side_effect=httpx.ConnectError("refused"))
+    client = make_client()
+    try:
+        with caplog.at_level(logging.ERROR):
+            with pytest.raises(LLMError):
+                await client.complete(MESSAGES)
+    finally:
+        await client.aclose()
+    assert "lost connection to the model backend at" in caplog.text
+
+
+@respx.mock
+async def test_a_timeout_names_the_limit(caplog) -> None:
+    respx.post(URL).mock(side_effect=httpx.ReadTimeout("slow"))
+    client = make_client(timeout=7.0)
+    try:
+        with caplog.at_level(logging.WARNING):
+            with pytest.raises(LLMError):
+                await client.complete(MESSAGES)
+    finally:
+        await client.aclose()
+    assert "did not answer within 7.0s" in caplog.text
+
+
+@respx.mock
+async def test_a_successful_completion_logs_the_model_and_duration(caplog) -> None:
+    respx.post(URL).mock(return_value=httpx.Response(200, json=completion("hello")))
+    client = make_client()
+    try:
+        with caplog.at_level(logging.INFO):
+            await client.complete(MESSAGES)
+    finally:
+        await client.aclose()
+    assert "some-model answered in" in caplog.text
+    assert "5 chars" in caplog.text

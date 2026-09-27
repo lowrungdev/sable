@@ -13,6 +13,7 @@ from .config import Config
 from .events import TalkEvent
 from .history import History, MessageCache
 from .llm import LLMClient, LLMError
+from .state import ConnectionState
 from .talk import TalkClient, TalkError
 
 log = logging.getLogger(__name__)
@@ -50,6 +51,7 @@ class Bot:
         self.history = history or History(config.history_turns, config.history_ttl)
         self.messages = messages or MessageCache(config.message_cache, config.history_ttl)
         self._ask_key = emoji_key(config.ask_reaction)
+        self.nextcloud = ConnectionState("Nextcloud")
         self._owns_http = http_client is None
         self._http = http_client or httpx.AsyncClient(timeout=30.0)
         self._llm = llm if llm is not None else LLMClient(config.llm, client=self._http)
@@ -91,7 +93,65 @@ class Bot:
             self.config.bot_secret,
             client=self._http,
             max_message_chars=self.config.max_message_chars,
+            state=self.nextcloud,
         )
+
+    async def check_nextcloud(self) -> bool:
+        """Probe Nextcloud's public status endpoint and log what came back.
+
+        Only meaningful when SABLE_NEXTCLOUD_URL is configured; the webhook path
+        otherwise learns the URL from each signed event. Failure is not fatal:
+        Nextcloud may simply not be up yet, and the bot has nothing to do until a
+        webhook arrives anyway.
+        """
+        if not self.config.nextcloud_url:
+            log.info(
+                "no SABLE_NEXTCLOUD_URL configured; the server URL will be taken "
+                "from each signed webhook"
+            )
+            return False
+
+        url = f"{self.config.nextcloud_url}/status.php"
+        try:
+            response = await self._http.get(url, timeout=10.0)
+        except httpx.HTTPError as exc:
+            self.nextcloud.record_failure(exc)
+            log.warning(
+                "could not reach Nextcloud at %s: %s. Replies will fail until this "
+                "works - check the URL, DNS, and whether the certificate is trusted "
+                "(see docs/deployment.md on internal CAs)",
+                self.config.nextcloud_url,
+                exc,
+            )
+            return False
+
+        self.nextcloud.record_success()
+        if response.status_code >= 400:
+            log.warning(
+                "Nextcloud at %s answered HTTP %s on status.php; it is reachable but "
+                "may not be healthy",
+                self.config.nextcloud_url,
+                response.status_code,
+            )
+            return False
+        try:
+            status = response.json()
+        except ValueError:
+            log.warning(
+                "%s answered, but not with JSON - is %s really a Nextcloud?",
+                url,
+                self.config.nextcloud_url,
+            )
+            return False
+
+        log.info(
+            "connected to %s %s at %s%s",
+            status.get("productname") or "Nextcloud",
+            status.get("versionstring") or "(unknown version)",
+            self.config.nextcloud_url,
+            " [MAINTENANCE MODE]" if status.get("maintenance") else "",
+        )
+        return True
 
     def seen(self, event: TalkEvent) -> bool:
         """Record an event and report whether we already handled it.
@@ -155,8 +215,19 @@ class Bot:
             await self._run_reaction_query(event)
             return
 
-        if event.type in {"Join", "Leave"}:
-            log.info("bot %s conversation %s", event.type.lower(), event.room_token)
+        if event.type == "Join":
+            log.info(
+                "added to conversation %s (%r) - now receiving its messages",
+                event.room_token,
+                event.room_name,
+            )
+            return
+        if event.type == "Leave":
+            log.info(
+                "removed from conversation %s (%r) - no further messages from it",
+                event.room_token,
+                event.room_name,
+            )
             return
         if not event.is_message:
             log.debug("no handler for %s events", event.type)
@@ -171,10 +242,17 @@ class Bot:
 
         if command is not None:
             await self._run_command(event, *command)
-        elif mentioned or self.config.ai_room_allowed(event.room_token):
+        elif mentioned or self.config.ai_room_allowed(event.room_token, event.room_name):
             await self._run_llm_reply(event, remainder)
         else:
-            log.debug("message in %s was not for me", event.room_token)
+            # Naming the conversation both ways: whichever you put in
+            # SABLE_AI_ROOMS, this line shows you the value to use.
+            log.debug(
+                "message in %s (%r) was not for me - no prefix, no mention, and "
+                "not an AI room",
+                event.room_token,
+                event.room_name,
+            )
 
     async def _run_command(self, event: TalkEvent, name: str, args: str) -> None:
         command = self.registry.get(name)
@@ -189,7 +267,14 @@ class Bot:
             return
 
         ctx = Context(self, event, command.name, args, parse_argv(args))
-        log.info("running %s for %s in %s", command.name, event.actor.id, event.room_token)
+        log.info(
+            "%s ran %s%s in %s",
+            self._who(event),
+            self.config.command_prefix,
+            command.name,
+            event.room_token,
+        )
+        log.debug("arguments: %r", args)
         try:
             reply = await command.handler(ctx)
         except CommandError as exc:
@@ -231,8 +316,13 @@ class Bot:
             return
 
         log.info(
-            "%s asked about message %s in %s", event.actor.id, event.message_id, event.room_token
+            "%s asked the model about message %s in %s, written by %s",
+            self._who(event),
+            event.message_id,
+            event.room_token,
+            cached.author,
         )
+        log.debug("the message asked about: %r", cached.text)
         prompt = (
             f"{asker} flagged the message below for you with {self.config.ask_reaction}. "
             f"Answer it, or explain it if it is not a question.\n\n"
@@ -251,6 +341,13 @@ class Bot:
         if not self.llm_enabled:
             log.debug("LLM disabled; ignoring message %s", event.message_id)
             return
+        log.info(
+            "%s asked the model in %s (%d chars)",
+            self._who(event),
+            event.room_token,
+            len(prompt),
+        )
+        log.debug("prompt: %r", prompt)
         try:
             reply = await self.answer_with_llm(event, prompt)
         except LLMError as exc:
@@ -302,6 +399,12 @@ class Bot:
         if event.room_name:
             prompt += f'\nThe conversation is called "{event.room_name}".'
         return prompt
+
+    @staticmethod
+    def _who(event: TalkEvent) -> str:
+        """How a user appears in the log: display name and id, or just the id."""
+        name = event.actor.name
+        return f"{name} ({event.actor.id})" if name else event.actor.id
 
     def _attributed(self, event: TalkEvent, prompt: str) -> str:
         """Prefix the speaker's name, since rooms have more than one human."""

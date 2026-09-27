@@ -139,6 +139,7 @@ class Config:
     #: Messages remembered per conversation, so a reaction can refer to one.
     message_cache: int = 200
     report_errors: bool = True
+    startup_check: bool = True
     unknown_command_hint: bool = True
     max_message_chars: int = 30000
 
@@ -162,9 +163,25 @@ class Config:
     def notify_enabled(self) -> bool:
         return bool(self.notify_token)
 
-    def ai_room_allowed(self, token: str) -> bool:
-        """Should a plain (non-command, non-mention) message go to the LLM?"""
-        return "*" in self.ai_rooms or token in self.ai_rooms
+    def ai_room_allowed(self, token: str, name: str = "") -> bool:
+        """Should a plain (non-command, non-mention) message go to the LLM?
+
+        An entry matches either the conversation token - ``abcd1234``, the last
+        segment of the conversation's URL - or its display name, ignoring case
+        and surrounding space.
+
+        Prefer tokens where it matters: a token is permanent, while any moderator
+        can rename a conversation, which would silently change whether the bot
+        answers everything in it.
+        """
+        if "*" in self.ai_rooms:
+            return True
+        if token and token in self.ai_rooms:
+            return True
+        wanted = name.strip().casefold()
+        return bool(wanted) and any(
+            entry.strip().casefold() == wanted for entry in self.ai_rooms
+        )
 
     @classmethod
     def from_env(cls) -> Config:
@@ -203,6 +220,7 @@ class Config:
             ask_reaction=_str("SABLE_ASK_REACTION", "⁉️"),
             message_cache=_int("SABLE_MESSAGE_CACHE", 200),
             report_errors=_bool("SABLE_REPORT_ERRORS", True),
+            startup_check=_bool("SABLE_STARTUP_CHECK", True),
             unknown_command_hint=_bool("SABLE_UNKNOWN_COMMAND_HINT", True),
             max_message_chars=_int("SABLE_MAX_MESSAGE_CHARS", 30000),
             history_turns=_int("SABLE_HISTORY_TURNS", 12),

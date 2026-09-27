@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 
 import httpx
 import respx
@@ -517,3 +518,209 @@ async def test_a_model_failure_on_an_ask_is_reported(llm: FakeLLM) -> None:
     finally:
         await bot.aclose()
     assert sent(route)[0]["message"].startswith("⚠️")
+
+
+# --------------------------------------------------------------------------- #
+# The startup reachability probe
+# --------------------------------------------------------------------------- #
+
+STATUS_URL = f"{BACKEND}/status.php"
+
+
+def status_body(**overrides) -> dict:
+    body = {
+        "installed": True,
+        "maintenance": False,
+        "version": "31.0.4.1",
+        "versionstring": "31.0.4",
+        "productname": "Nextcloud",
+    }
+    body.update(overrides)
+    return body
+
+
+@respx.mock
+async def test_the_startup_probe_reports_a_reachable_nextcloud(bot: Bot, caplog) -> None:
+    route = respx.get(STATUS_URL).mock(return_value=httpx.Response(200, json=status_body()))
+    with caplog.at_level(logging.INFO):
+        assert await bot.check_nextcloud() is True
+    assert route.called
+    assert "connected to Nextcloud 31.0.4" in caplog.text
+    assert BACKEND in caplog.text
+
+
+@respx.mock
+async def test_the_startup_probe_notes_maintenance_mode(bot: Bot, caplog) -> None:
+    respx.get(STATUS_URL).mock(
+        return_value=httpx.Response(200, json=status_body(maintenance=True))
+    )
+    with caplog.at_level(logging.INFO):
+        assert await bot.check_nextcloud() is True
+    assert "MAINTENANCE MODE" in caplog.text
+
+
+@respx.mock
+async def test_an_unreachable_nextcloud_warns_and_does_not_raise(bot: Bot, caplog) -> None:
+    respx.get(STATUS_URL).mock(side_effect=httpx.ConnectError("no route to host"))
+    with caplog.at_level(logging.INFO):
+        assert await bot.check_nextcloud() is False
+    assert "could not reach Nextcloud" in caplog.text
+    # The hint matters: a self-signed certificate is the likeliest cause.
+    assert "certificate" in caplog.text
+    assert bot.nextcloud.up is False
+
+
+@respx.mock
+async def test_an_http_error_from_status_php_is_reported(bot: Bot, caplog) -> None:
+    respx.get(STATUS_URL).mock(return_value=httpx.Response(503, text="down"))
+    with caplog.at_level(logging.INFO):
+        assert await bot.check_nextcloud() is False
+    assert "answered HTTP 503" in caplog.text
+    # It answered, so it is reachable even though it is unhealthy.
+    assert bot.nextcloud.up is True
+
+
+@respx.mock
+async def test_something_that_is_not_a_nextcloud(bot: Bot, caplog) -> None:
+    respx.get(STATUS_URL).mock(return_value=httpx.Response(200, text="<html>hello</html>"))
+    with caplog.at_level(logging.INFO):
+        assert await bot.check_nextcloud() is False
+    assert "really a Nextcloud" in caplog.text
+
+
+async def test_the_probe_is_skipped_without_a_configured_url(llm: FakeLLM, caplog) -> None:
+    bot = Bot(make_config(nextcloud_url="", pin_backend=False), llm=llm)  # type: ignore[arg-type]
+    try:
+        with caplog.at_level(logging.INFO):
+            assert await bot.check_nextcloud() is False
+    finally:
+        await bot.aclose()
+    assert "taken from each signed webhook" in caplog.text
+
+
+@respx.mock
+async def test_losing_and_regaining_nextcloud_is_logged_once_each(bot: Bot, caplog) -> None:
+    route = respx.post(MESSAGE_URL)
+    route.side_effect = [
+        httpx.ConnectError("gone"),
+        httpx.ConnectError("still gone"),
+        httpx.Response(201, json={"ocs": {"data": {"id": 1}}}),
+    ]
+    with caplog.at_level(logging.INFO):
+        await bot.handle(event("!ping", message_id=1))
+        await bot.handle(event("!ping", message_id=2))
+        await bot.handle(event("!ping", message_id=3))
+    assert caplog.text.count("lost connection to Nextcloud") == 1
+    assert caplog.text.count("Nextcloud is reachable again") == 1
+
+
+# --------------------------------------------------------------------------- #
+# Who used what (and joining / leaving)
+# --------------------------------------------------------------------------- #
+
+
+@respx.mock
+async def test_a_command_logs_who_ran_it(bot: Bot, caplog) -> None:
+    message_route()
+    with caplog.at_level(logging.INFO):
+        await bot.handle(event("!echo hello there", actor_name="Alice"))
+    assert "Alice (users/alice) ran !echo in abcd1234" in caplog.text
+    # The arguments are content, so they stay at DEBUG.
+    assert "hello there" not in caplog.text
+
+
+@respx.mock
+async def test_command_arguments_appear_at_debug(bot: Bot, caplog) -> None:
+    message_route()
+    with caplog.at_level(logging.DEBUG):
+        await bot.handle(event("!echo hello there"))
+    assert "hello there" in caplog.text
+
+
+@respx.mock
+async def test_asking_the_model_logs_who_asked_but_not_what(bot: Bot, caplog) -> None:
+    message_route()
+    with caplog.at_level(logging.INFO):
+        await bot.handle(event("@sable what is the airspeed of a swallow", actor_name="Alice"))
+    assert "Alice (users/alice) asked the model in abcd1234" in caplog.text
+    assert "airspeed" not in caplog.text
+
+
+@respx.mock
+async def test_the_ask_reaction_logs_who_asked_and_the_author(bot: Bot, caplog) -> None:
+    from conftest import reaction_event
+
+    message_route()
+    await bot.handle(event("the deploy failed", message_id=100, actor_name="Bob"))
+    with caplog.at_level(logging.INFO):
+        await bot.handle(reaction_event("⁉️", message_id=100, actor_name="Alice"))
+    assert "Alice (users/alice) asked the model about message 100" in caplog.text
+    assert "written by Bob" in caplog.text
+    assert "the deploy failed" not in caplog.text
+
+
+async def test_joining_and_leaving_a_conversation_are_logged(bot: Bot, caplog) -> None:
+    from sable.events import parse_event
+
+    join = {
+        "type": "Join",
+        "actor": {"type": "Person", "id": "users/alice", "name": "Alice"},
+        "object": {"type": "Collection", "id": ROOM, "name": "Team chat"},
+    }
+    leave = dict(join, type="Leave")
+    with caplog.at_level(logging.INFO):
+        await bot.handle(parse_event(join))
+        await bot.handle(parse_event(leave))
+    assert "added to conversation abcd1234 ('Team chat')" in caplog.text
+    assert "removed from conversation abcd1234 ('Team chat')" in caplog.text
+
+
+# --------------------------------------------------------------------------- #
+# SABLE_AI_ROOMS accepts a token or a conversation name
+# --------------------------------------------------------------------------- #
+
+
+@respx.mock
+async def test_an_ai_room_can_be_named_instead_of_tokenised(llm: FakeLLM) -> None:
+    route = message_route()
+    # "Team chat" is the conversation's display name, not its token.
+    bot = Bot(make_config(ai_rooms=["Team chat"]), llm=llm)  # type: ignore[arg-type]
+    try:
+        await bot.handle(event("no mention needed"))
+    finally:
+        await bot.aclose()
+    assert sent(route)[0]["message"] == "mock answer"
+
+
+@respx.mock
+async def test_the_room_name_match_ignores_case_and_space(llm: FakeLLM) -> None:
+    route = message_route()
+    bot = Bot(make_config(ai_rooms=["  TEAM CHAT  "]), llm=llm)  # type: ignore[arg-type]
+    try:
+        await bot.handle(event("no mention needed"))
+    finally:
+        await bot.aclose()
+    assert route.called
+
+
+@respx.mock
+async def test_a_name_that_matches_nothing_is_still_ignored(llm: FakeLLM) -> None:
+    route = message_route()
+    bot = Bot(make_config(ai_rooms=["Some other room"]), llm=llm)  # type: ignore[arg-type]
+    try:
+        await bot.handle(event("no mention needed"))
+    finally:
+        await bot.aclose()
+    assert not route.called
+    assert not llm.calls
+
+
+@respx.mock
+async def test_the_ignored_message_log_names_the_room_both_ways(bot: Bot, caplog) -> None:
+    message_route()
+    with caplog.at_level(logging.DEBUG):
+        await bot.handle(event("just chatting"))
+    # Whichever identifier you meant to configure, the log shows it.
+    assert "abcd1234" in caplog.text
+    assert "Team chat" in caplog.text
+    assert "not an AI room" in caplog.text

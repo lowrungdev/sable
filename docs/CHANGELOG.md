@@ -12,6 +12,40 @@ Format: `## <version>`, optionally followed by a date. Anything until the next
 
 ## Unreleased
 
+- `SABLE_AI_ROOMS` now accepts a conversation's **display name** as well as its
+  token, matching case- and space-insensitively. It previously matched tokens
+  only, so putting the name in the list silently did nothing. Tokens are still
+  the better choice for anything that matters, since a moderator can rename a
+  conversation at any time — and two conversations can share a name.
+  The DEBUG line for an ignored message now prints both identifiers, so it shows
+  you what to configure: `message in a1b2c3d4 ('AI') was not for me - no prefix,
+  no mention, and not an AI room`.
+- **Much more verbose logging**, aimed at an operator reading the first and last
+  few lines of a container log:
+  - start and stop are logged, with the resolved configuration in between —
+    bind address, the webhook path to register, the Nextcloud URL, bot name,
+    prefix, model and its base URL, ask reaction, AI rooms, alerting and its
+    aliases, backend pinning, log level;
+  - a startup probe calls Nextcloud's `status.php` and logs the product and
+    version it reached, so a wrong URL or an untrusted certificate is obvious
+    at boot rather than on the first reply. Never fatal, and
+    `SABLE_STARTUP_CHECK=false` skips it;
+  - reachability is logged as *transitions* — one line when Nextcloud or the
+    model backend becomes unreachable and one when it returns — instead of a
+    line per retry. A transport failure counts as unreachable; an HTTP error
+    response does not, and is logged with its status and body;
+  - model calls log their outcome: duration and answer size on success, the URL
+    with status and body on an error, the limit on a timeout;
+  - joining and leaving a conversation name the conversation and say what it
+    means;
+  - every use logs who (display name and id), what (command, mention, or which
+    message a ⁉️ referred to) and where.
+  Message text stays out of `INFO`: uses are logged with sizes, not content.
+  `DEBUG` adds prompts, command arguments and referenced message text, so a
+  DEBUG log contains chat content — noted in `docs/security.md`.
+- httpx's own per-request `INFO` line is quieted unless the whole application is
+  at `DEBUG`; it said less than sable's own line about the same call and buried
+  it.
 - **React to a message with ⁉️ and the bot answers it**, in a reply threaded
   under the original. It works on anyone's message, its own answers included,
   which makes it a quick way to ask a follow-up. `SABLE_ASK_REACTION` sets the

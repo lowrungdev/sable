@@ -59,22 +59,57 @@ def create_app(config: Config | None = None, bot: Bot | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.bot = bot or Bot(config)
+
+        # What is running, and with what. An operator reading only the first
+        # dozen lines of the log should be able to tell whether the thing is
+        # configured the way they meant.
+        log.info("sable %s starting", __version__)
+        log.info("  listening on:   http://%s:%s", config.host, config.port)
+        log.info("  webhook URL:    POST /webhook  (give this to occ talk:bot:install)")
         log.info(
-            "sable %s listening as %r (commands %r, model %s, notify %s)",
-            __version__,
+            "  nextcloud:      %s",
+            config.nextcloud_url or "(taken from each signed webhook)",
+        )
+        log.info(
+            "  bot name:       %r   command prefix: %r",
             config.bot_name,
             config.command_prefix,
-            config.llm.model or "disabled",
-            "enabled" if config.notify_enabled else "disabled",
         )
+        log.info(
+            "  model:          %s",
+            f"{config.llm.model} at {config.llm.base_url}" if config.llm.enabled else "disabled",
+        )
+        log.info(
+            "  ask reaction:   %s",
+            config.ask_reaction or "disabled",
+        )
+        log.info(
+            "  ai rooms:       %s",
+            ", ".join(config.ai_rooms) if config.ai_rooms else "(mentions only)",
+        )
+        log.info(
+            "  alerting:       %s",
+            f"enabled, aliases: {', '.join(config.notify_rooms)}"
+            if config.notify_enabled and config.notify_rooms
+            else ("enabled" if config.notify_enabled else "disabled (/notify answers 404)"),
+        )
+        log.info("  backend pin:    %s", "on" if config.pin_backend else "off")
+        log.info("  log level:      %s", config.log_level)
+
+        if config.startup_check:
+            await app.state.bot.check_nextcloud()
+
+        log.info("sable %s ready", __version__)
         try:
             yield
         finally:
+            log.info("sable %s stopping", __version__)
             if tasks:
                 log.info("waiting for %d in-flight reply/replies", len(tasks))
                 await asyncio.wait(tasks, timeout=DRAIN_TIMEOUT)
             if bot is None:
                 await app.state.bot.aclose()
+            log.info("sable %s stopped", __version__)
 
     app = FastAPI(
         title="sable",
@@ -139,6 +174,13 @@ def create_app(config: Config | None = None, bot: Bot | None = None) -> FastAPI:
             log.warning("unparseable event: %s", exc)
             raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
+        log.debug(
+            "accepted %s from %s in %s (message %s)",
+            event.type,
+            event.actor.id or "?",
+            event.room_token,
+            event.message_id or "-",
+        )
         # Answer now, work later: a model call can take longer than Talk waits.
         spawn(current_bot(request).handle(event))
         return {"status": "accepted"}
@@ -178,6 +220,12 @@ def create_app(config: Config | None = None, bot: Bot | None = None) -> FastAPI:
                 status.HTTP_502_BAD_GATEWAY, f"could not reach Nextcloud: {exc}"
             ) from exc
 
+        log.info(
+            "relayed an alert to %s%s as message %s",
+            room,
+            f" (alias {payload.room})" if payload.room != room else "",
+            message_id or "?",
+        )
         return {"ok": True, "room": room, "messageId": message_id}
 
     @app.get("/", include_in_schema=False)

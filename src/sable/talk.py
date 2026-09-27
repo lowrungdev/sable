@@ -11,6 +11,7 @@ import logging
 import httpx
 
 from .signing import HEADER_BOT_RANDOM, HEADER_BOT_SIGNATURE, sign
+from .state import ConnectionState
 
 log = logging.getLogger(__name__)
 
@@ -41,9 +42,12 @@ class TalkClient:
         client: httpx.AsyncClient | None = None,
         max_message_chars: int = 30000,
         timeout: float = 30.0,
+        state: ConnectionState | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self._secret = secret
+        #: Shared across clients so the up/down transitions are logged once.
+        self._state = state
         self._max_chars = min(max_message_chars, MESSAGE_LIMIT)
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(timeout=timeout)
@@ -65,10 +69,26 @@ class TalkClient:
         self, method: str, path: str, signed_value: str, payload: dict
     ) -> httpx.Response:
         url = f"{self.base_url}{API_BASE}{path}"
-        response = await self._client.request(
-            method, url, json=payload, headers=self._headers(signed_value)
-        )
+        try:
+            response = await self._client.request(
+                method, url, json=payload, headers=self._headers(signed_value)
+            )
+        except httpx.HTTPError as exc:
+            # Transport level: Nextcloud could not be reached at all.
+            if self._state is not None:
+                self._state.record_failure(exc)
+            raise
+        # It answered, so it is reachable - even if the answer is an error.
+        if self._state is not None:
+            self._state.record_success()
         if response.status_code >= 400:
+            log.warning(
+                "Nextcloud rejected %s %s with HTTP %s: %s",
+                method,
+                path,
+                response.status_code,
+                response.text[:200],
+            )
             raise TalkError(response.status_code, response.text, f"{method} {path}")
         return response
 
@@ -104,8 +124,17 @@ class TalkClient:
         try:
             data = response.json()["ocs"]["data"]
         except (ValueError, KeyError, TypeError):
+            log.debug("posted %d chars to %s, id unknown", len(message), room_token)
             return 0
-        return int(data.get("id", 0)) if isinstance(data, dict) else 0
+        new_id = int(data.get("id", 0)) if isinstance(data, dict) else 0
+        log.debug(
+            "posted %d chars to %s as message %s%s",
+            len(message),
+            room_token,
+            new_id or "?",
+            f" (reply to {reply_to})" if reply_to else "",
+        )
+        return new_id
 
     async def react(self, room_token: str, message_id: int, reaction: str) -> None:
         """Add a single-emoji reaction to a message."""

@@ -78,9 +78,11 @@ services:
       # ===================== Chat behaviour ===============================
       # SABLE_COMMAND_PREFIX: "!"
 
-      # Conversations where every message goes to the model, no mention
-      # needed: comma-separated tokens, or * for all. Empty = mentions only.
-      # SABLE_AI_ROOMS: ""
+      # Conversations where every message goes to the model, no mention needed.
+      # Conversation tokens (a1b2c3d4, the last part of the conversation's URL)
+      # or display names (AI), or * for all. Empty = mentions and !ai only.
+      # A token never changes; a moderator can rename a conversation.
+      # SABLE_AI_ROOMS: "AI,a1b2c3d4"
 
       # Post answers as threaded replies to the triggering message.
       # SABLE_REPLY_AS_REPLY: "false"
@@ -102,6 +104,10 @@ services:
 
       # Post failures into the conversation as well as logging them.
       # SABLE_REPORT_ERRORS: "true"
+
+      # Call Nextcloud's status.php at startup and log what answered, so a wrong
+      # URL or an untrusted certificate shows up at boot. Never fatal.
+      # SABLE_STARTUP_CHECK: "true"
 
       # Replies longer than this are clipped; Talk's own ceiling is 32000.
       # SABLE_MAX_MESSAGE_CHARS: "30000"

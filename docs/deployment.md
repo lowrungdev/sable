@@ -300,10 +300,58 @@ curl -fsS -X POST https://sable.example.org/notify \
 
 ## Operations
 
-**Logs are the whole observability story.** `INFO` gives you one line per handled event
-(`running ping for users/alice in abcd1234`), warnings for rejected signatures, failed model
-calls and failed posts. `SABLE_LOG_LEVEL=DEBUG` adds a line for every message the bot decided
-*not* to act on — the fastest way to debug prefix and mention matching.
+### What the log tells you
+
+At `INFO`, sable logs its own lifecycle, its configuration, and every use — and nothing else, so
+the interesting lines are not buried:
+
+```
+sable 0.3 starting
+  listening on:   http://0.0.0.0:8080
+  webhook URL:    POST /webhook  (give this to occ talk:bot:install)
+  nextcloud:      https://cloud.example.org
+  bot name:       'sable'   command prefix: '!'
+  model:          gpt-4o-mini at https://api.openai.com/v1
+  ask reaction:   ⁉️
+  ai rooms:       (mentions only)
+  alerting:       enabled, aliases: alerts
+  backend pin:    on
+  log level:      INFO
+connected to Nextcloud 31.0.4 at https://cloud.example.org
+sable 0.3 ready
+added to conversation abcd1234 ('Team chat') - now receiving its messages
+Alice (users/alice) ran !ping in abcd1234
+Alice (users/alice) asked the model in abcd1234 (22 chars)
+gpt-4o-mini answered in 1.8s (243 chars)
+Alice (users/alice) asked the model about message 12 in abcd1234, written by Bob
+relayed an alert to abcd1234 (alias alerts) as message 4242
+removed from conversation abcd1234 ('Team chat') - no further messages from it
+sable 0.3 stopping
+sable 0.3 stopped
+```
+
+**The startup probe** (`connected to Nextcloud …`) calls `status.php`, which needs no
+credentials. It proves DNS, TLS and that the thing on the other end is a Nextcloud — so a wrong
+URL or an untrusted certificate is reported at boot rather than on the first reply someone is
+waiting for. It is never fatal: Nextcloud may simply not be up yet. `SABLE_STARTUP_CHECK=false`
+skips it.
+
+**Reachability is logged as transitions**, not per attempt, so an outage is two lines rather than
+one per retry:
+
+```
+ERROR  sable.state: lost connection to Nextcloud: ConnectError: All connection attempts failed
+INFO   sable.state: Nextcloud is reachable again
+```
+
+The same applies to the model backend. A transport failure counts as unreachable; an HTTP error
+response does not — the service answered, and that is logged with its status code and the first
+200 characters of the body.
+
+**Message text stays out of `INFO`.** A use is logged as who, what and where, with sizes rather
+than content: `asked the model in abcd1234 (22 chars)`. `SABLE_LOG_LEVEL=DEBUG` adds the prompt,
+command arguments and the message a ⁉️ referred to, plus a line for every event sable decided
+*not* to act on and one per outbound HTTP call. Treat DEBUG as containing chat content.
 
 **Health:** `GET /healthz` returns the version, the bot name, the configured model and whether
 alerting is on. It does not call Nextcloud or the model, so it stays honest as a liveness probe.

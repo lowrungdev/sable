@@ -56,6 +56,11 @@ def main(argv: list[str] | None = None) -> int:
         level=config.log_level,
         format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
     )
+    # httpx logs a line per request at INFO, which says less than our own line
+    # about the same call and buries it. Let it through only at DEBUG.
+    logging.getLogger("httpx").setLevel(
+        logging.DEBUG if config.log_level == "DEBUG" else logging.WARNING
+    )
 
     if args.check:
         print(

@@ -145,6 +145,11 @@ These are known and deliberate. Decide for yourself whether they are acceptable.
 9. **No rate limiting of our own.** Talk rate-limits bots (HTTP 429); nothing limits how fast
    `/notify` can be called.
 10. **Logs are the only audit trail.** There is no separate audit log, and no metrics endpoint.
+    At `INFO` they record who used the bot, which command or trigger, and in which conversation —
+    enough to answer "who asked it that?" but not what was said. **`DEBUG` puts chat content in
+    the log**: prompts, command arguments and the text of any message a ⁉️ referred to. Treat a
+    DEBUG-level log as containing conversation content, with whatever that implies for where it
+    is shipped and how long it is kept.
 11. **CI holds credentials**: the registry password (`RUNDECK_KEY_VALUE`) and a runner token with
     write access to the repository, used to create releases. Anyone who can change a workflow on
     a branch that CI runs can reach both.

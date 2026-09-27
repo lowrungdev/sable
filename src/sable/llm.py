@@ -9,11 +9,13 @@ OpenRouter, Together, Groq. Point ``SABLE_LLM_BASE_URL`` at it and set
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 import httpx
 
 from .config import LLMConfig
+from .state import ConnectionState
 
 log = logging.getLogger(__name__)
 
@@ -31,6 +33,7 @@ class LLMClient:
         self.config = config
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(timeout=config.timeout)
+        self._state = ConnectionState(f"the model backend at {config.base_url}")
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -61,6 +64,9 @@ class LLMClient:
             raise LLMError("no model configured (set SABLE_LLM_MODEL)")
 
         url = f"{self.config.base_url}/chat/completions"
+        used_model = model or self.config.model
+        started = time.monotonic()
+        log.debug("asking %s at %s (%d messages)", used_model, url, len(messages))
         try:
             response = await self._client.post(
                 url,
@@ -69,11 +75,26 @@ class LLMClient:
                 timeout=self.config.timeout,
             )
         except httpx.TimeoutException as exc:
+            self._state.record_failure(exc)
+            log.warning(
+                "%s did not answer within %ss", url, self.config.timeout
+            )
             raise LLMError(f"the model did not answer within {self.config.timeout}s") from exc
         except httpx.HTTPError as exc:
+            self._state.record_failure(exc)
             raise LLMError(f"could not reach {url}: {exc}") from exc
 
+        self._state.record_success()
+        elapsed = time.monotonic() - started
+
         if response.status_code >= 400:
+            log.warning(
+                "%s returned HTTP %s after %.1fs: %s",
+                url,
+                response.status_code,
+                elapsed,
+                response.text[:200],
+            )
             raise LLMError(
                 f"{url} returned HTTP {response.status_code}: {response.text[:400]}"
             )
@@ -81,9 +102,14 @@ class LLMClient:
         try:
             payload = response.json()
         except ValueError as exc:
+            log.warning("%s answered with something that is not JSON", url)
             raise LLMError("response was not JSON") from exc
 
-        return _extract_text(payload)
+        text = _extract_text(payload)
+        log.info(
+            "%s answered in %.1fs (%d chars)", used_model or "the model", elapsed, len(text)
+        )
+        return text
 
 
 def _extract_text(payload: Any) -> str:

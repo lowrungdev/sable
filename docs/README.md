@@ -80,7 +80,7 @@ The full path — TLS, reverse proxies, systemd, feature flags, verification —
 
 **The assistant** runs when a message mentions the bot (`@sable ...`, or `sable: ...` at the
 start of a line), when you use `!ai <question>`, or for *every* message in conversations listed
-in `SABLE_AI_ROOMS` (`*` for all of them).
+in `SABLE_AI_ROOMS` — by token or by name, `*` for all of them.
 
 **Or react with ⁉️** to any message and the bot answers *that* message, threaded underneath it —
 handy for someone else's question, or as a follow-up on the bot's own reply. It only works on
