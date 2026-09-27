@@ -51,7 +51,7 @@ assistant — `SABLE_LLM_BASE_URL`, `SABLE_LLM_API_KEY` and `SABLE_LLM_MODEL`. L
 `SABLE_LLM_MODEL` empty is a supported mode: you get a command bot and no model calls.
 
 ```bash
-docker compose up -d --build   # or: pip install -e . && sable
+docker compose up -d --build   # or: uv sync --locked --no-dev && uv run sable
 sable --check                  # validate the config and print what it resolved to
 ```
 
@@ -115,9 +115,12 @@ string, a shell-split `argv`, and `ctx.bot` for `answer_with_llm`, `history` and
 ## Development
 
 ```bash
-pip install -e '.[dev]'
-pytest
+uv sync --locked --extra dev    # exactly the 31 packages uv.lock pins
+uv run pytest
 ```
+
+Without uv, `pip install -e '.[dev]'` still works — you just get whatever pip resolves at that
+moment rather than the locked set.
 
 The suite covers the signature scheme in both directions, event parsing (including rich-object
 placeholders, reactions and join/leave), routing, the LLM client against a mocked backend, and

@@ -32,7 +32,7 @@ jobs:
     steps:
       - name: Install the Subversive CAs and this job's tools
         run: |
-          apt-get update && apt-get install -y ca-certificates curl jq
+          apt-get update && apt-get install -y ca-certificates curl jq python3 python3-venv
           echo "${{ secrets.SUBVERSIVE_INTERMEDIATE }}" > /usr/local/share/ca-certificates/subversive-inter-ca.crt
           echo "${{ secrets.SUBVERSIVE_ROOT }}" > /usr/local/share/ca-certificates/subversive-root-ca.crt
           update-ca-certificates
@@ -147,7 +147,16 @@ jobs:
 
       - name: Run the test suite
         if: steps.gate.outputs.publish == 'true'
-        run: docker build --target test --progress plain .
+        run: |
+          set -eu
+          python3 --version
+          python3 -m venv /tmp/uv
+          /tmp/uv/bin/pip install --quiet uv==0.12.19
+          /tmp/uv/bin/uv --version
+          # --locked installs exactly what uv.lock pins, and fails if the lock
+          # no longer matches pyproject.toml.
+          /tmp/uv/bin/uv sync --locked --extra dev
+          /tmp/uv/bin/uv run --locked pytest -q
 
       - name: Log in to Forgejo Registry
         if: steps.gate.outputs.publish == 'true'
@@ -163,7 +172,6 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
-          target: runtime
           push: true
           tags: |
             forgejo.subversive.link/subversive/sable:${{ steps.meta.outputs.version }}
@@ -182,13 +190,7 @@ jobs:
         continue-on-error: true
         run: |
           set -eu
-          docker build --target wheel -t sable-wheel:${{ github.run_number }} .
-          # `docker cp` instead of a bind mount: the daemon may not share this
-          # filesystem, so a -v mount could silently hand over an empty directory.
-          cid="$(docker create sable-wheel:${{ github.run_number }})"
-          docker cp "$cid:/dist" ./dist
-          docker rm -v "$cid" >/dev/null
-          docker image rm sable-wheel:${{ github.run_number }} >/dev/null || true
+          /tmp/uv/bin/uv build --wheel --out-dir dist
           ls -l dist
 
       - name: Create the Forgejo Release

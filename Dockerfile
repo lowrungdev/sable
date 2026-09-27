@@ -1,58 +1,43 @@
-# Multi-stage: `docker build .` produces the runtime image; CI gates on
-# `docker build --target test .`, which fails the build if pytest fails.
+# The image that ships. One stage, one job: install sable and run it.
 #
-# With BuildKit (the default since Docker 23, and what buildx uses in CI) the
-# test stage is skipped unless it is the target. The classic builder would run
-# it either way, which is slower but not wrong.
+# Dependencies come from uv.lock, so the same commit always installs the same
+# 31 packages, verified by hash. Tests and the release wheel are built by CI,
+# not here. See .forgejo/workflows/.
 
-FROM python:3.12-slim AS base
+FROM python:3.14.7-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    UV_NO_CACHE=1 \
+    UV_LINK_MODE=copy \
+    PATH="/app/.venv/bin:$PATH" \
+    SABLE_HOST=0.0.0.0 \
+    SABLE_PORT=8080
+
+RUN useradd --create-home --uid 10001 sable
 
 WORKDIR /app
 
-# Everything the build backend needs for metadata, including the version, which
-# it reads from src/sable/__init__.py.
-COPY pyproject.toml ./
+# uv.lock pins everything; pyproject.toml points at the two docs files, so the
+# project install needs them present.
+COPY pyproject.toml uv.lock ./
 COPY docs/README.md docs/LICENSE ./docs/
 COPY src ./src
 
-# --------------------------------------------------------------------------- #
-# Tests. Never part of the runtime image.
-FROM base AS test
+# --locked asserts uv.lock still matches pyproject.toml: if it does not, the
+# build fails instead of quietly installing something else. uv is uninstalled in
+# the same layer, since the image only needs the environment it produced.
+RUN pip install uv==0.12.19 \
+    && uv sync --locked --no-dev --no-editable \
+    && pip uninstall -y -q uv
 
-COPY tests ./tests
-# The changelog test reads it, and the release notes come from it.
-COPY docs/CHANGELOG.md ./docs/
-RUN pip install --no-cache-dir '.[dev]' \
-    && python -m pytest -q
-
-# --------------------------------------------------------------------------- #
-# The wheel, for attaching to a Forgejo Release. CI extracts it with
-# `docker create` + `docker cp`; nothing else needs this stage.
-FROM base AS wheel
-
-RUN pip install --no-cache-dir build \
-    && python -m build --wheel --outdir /dist
-
-# --------------------------------------------------------------------------- #
-# The image that ships.
-FROM base AS runtime
-
-ENV SABLE_HOST=0.0.0.0 \
-    SABLE_PORT=8080
-
-RUN pip install --no-cache-dir .
-
-RUN useradd --create-home --uid 10001 sable
 USER sable
 
 EXPOSE 8080
 
+# urlopen raises on a connection failure or a 4xx/5xx, which is a non-zero exit.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-    CMD python -c "import urllib.request,os,sys; \
-sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('SABLE_PORT','8080') + '/healthz', timeout=3).status == 200 else 1)"
+    CMD ["python", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('SABLE_PORT', '8080') + '/healthz', timeout=3)"]
 
 CMD ["python", "-m", "sable"]

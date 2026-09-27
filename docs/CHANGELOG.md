@@ -14,6 +14,16 @@ Format: `## <version>`, optionally followed by a date. Anything until the next
 
 _Nothing yet._
 
+## 0.2
+
+- Dependencies are locked with `uv.lock`: 31 packages pinned to exact versions
+  and verified by hash, so a given commit always installs the same set. CI and
+  the image both install with `uv sync --locked`, which fails rather than
+  re-resolving if the lock and `pyproject.toml` disagree.
+- The image moves to `python:3.14.7-slim`, pinned to the patch release.
+- Tests no longer run inside the Docker build: the Dockerfile is a single stage
+  whose only job is the runtime image, and CI runs pytest itself.
+
 ## 0.1
 
 First release.

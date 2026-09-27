@@ -73,10 +73,16 @@ sudo useradd --system --home /opt/sable --shell /usr/sbin/nologin sable
 sudo install -d -o sable -g sable /opt/sable
 sudo -u sable git clone <your-fork> /opt/sable/app
 sudo -u sable python3 -m venv /opt/sable/venv
-sudo -u sable /opt/sable/venv/bin/pip install /opt/sable/app
+sudo -u sable /opt/sable/venv/bin/pip install uv
+# --locked installs exactly the versions uv.lock pins, verified by hash.
+cd /opt/sable/app && sudo -u sable /opt/sable/venv/bin/uv sync --locked --no-dev
 sudo install -m 0640 -o sable -g sable /opt/sable/app/.env.example /opt/sable/.env
 sudo $EDITOR /opt/sable/.env
 ```
+
+That puts the environment in `/opt/sable/app/.venv`, which is what the unit below runs. Plain
+`pip install /opt/sable/app` works too, but resolves dependencies fresh instead of using the
+lock, so two servers installed a month apart will not match.
 
 `/etc/systemd/system/sable.service`:
 
@@ -91,7 +97,7 @@ Type=simple
 User=sable
 Group=sable
 WorkingDirectory=/opt/sable
-ExecStart=/opt/sable/venv/bin/sable --env-file /opt/sable/.env
+ExecStart=/opt/sable/app/.venv/bin/sable --env-file /opt/sable/.env
 Restart=on-failure
 RestartSec=5s
 
@@ -254,7 +260,7 @@ alerting is on. It does not call Nextcloud or the model, so it stays honest as a
 **Upgrades** are a restart; there is no state and no migration.
 
 ```bash
-git pull && docker compose up -d --build     # or: pip install -U . && systemctl restart sable
+git pull && docker compose up -d --build     # or: uv sync --locked --no-dev && systemctl restart sable
 ```
 
 In-flight replies get up to 30 seconds to finish during shutdown, so a rolling restart does not

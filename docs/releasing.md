@@ -100,16 +100,23 @@ runner.
 
 | Workflow | Runs on | Does |
 | --- | --- | --- |
-| [`test.yml`](../.forgejo/workflows/test.yml) | Pushes to `dev`, `main`, `release`; PRs into `dev` or `main` | `docker build --target test .` |
+| [`test.yml`](../.forgejo/workflows/test.yml) | Pushes to `dev`, `main`, `release`; PRs into `dev` or `main` | Runs pytest |
 | [`build.yml`](../.forgejo/workflows/build.yml) | **Button only** (`workflow_dispatch`) | Tests, then pushes `sable:<branch>` and `sable:<branch>-<sha>` |
 | [`release.yml`](../.forgejo/workflows/release.yml) | Pushes to `release`, **plus a button** | Tests, pushes the versioned image, creates the Forgejo Release |
 
-The suite lives in the Dockerfile's `test` stage, so CI needs nothing but Docker, and the same
-command reproduces it exactly on your laptop:
+Every workflow that builds an image runs the suite first, from the lock file:
 
 ```bash
-docker build --target test .
+uv sync --locked --extra dev
+uv run --locked pytest -q
 ```
+
+`--locked` asserts that `uv.lock` still matches `pyproject.toml` and fails if it does not, so a
+dependency change without a re-lock cannot slip through. The same two commands reproduce CI on
+your own machine.
+
+The [`Dockerfile`](../Dockerfile) has nothing to do with testing — it is one stage that installs
+sable from `uv.lock` and runs it, and `docker build .` builds exactly the image that ships.
 
 ### The buttons
 
