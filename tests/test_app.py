@@ -12,7 +12,7 @@ import pytest
 import respx
 from conftest import BACKEND, ROOM, SECRET, FakeLLM, make_config, message_payload, signed_headers
 
-from sable.app import create_app
+from sable.app import create_app, megabytes
 from sable.bot import Bot
 from sable.config import Config
 from sable.talk import API_BASE
@@ -508,3 +508,47 @@ async def test_the_text_only_contract_is_unchanged() -> None:
             )
     assert response.status_code == 201
     assert response.json() == {"ok": True, "room": ROOM, "messageId": 1}
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (104857600, "100 MB"),
+        (26214400, "25 MB"),
+        (536870912, "512 MB"),
+        (1048576, "1 MB"),
+        (1572864, "1.5 MB"),
+        (0, "0 MB"),
+    ],
+)
+def test_byte_counts_read_as_megabytes(value: int, expected: str) -> None:
+    assert megabytes(value) == expected
+
+
+async def test_startup_names_the_upload_user_folder_and_limit(caplog) -> None:
+    config = make_config(max_upload_bytes=104857600, **UPLOADS)
+    with caplog.at_level(logging.INFO):
+        async for _client in client_for(config):
+            pass
+    assert "attachments:    as sable-bot into /sable, up to 100 MB" in caplog.text
+
+
+async def test_startup_says_when_attachments_are_off(caplog) -> None:
+    with caplog.at_level(logging.INFO):
+        async for _client in client_for(make_config(notify_token="t")):
+            pass
+    assert "attachments:    disabled (set SABLE_NEXTCLOUD_USER" in caplog.text
+
+
+async def test_startup_lists_ignored_users(caplog) -> None:
+    with caplog.at_level(logging.INFO):
+        async for _client in client_for(make_config(ignore_users=["alice", "users/bob"])):
+            pass
+    assert "ignoring:       alice, users/bob" in caplog.text
+
+
+async def test_startup_says_when_nobody_is_ignored(caplog) -> None:
+    with caplog.at_level(logging.INFO):
+        async for _client in client_for(make_config()):
+            pass
+    assert "ignoring:       (nobody)" in caplog.text

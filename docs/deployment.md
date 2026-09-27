@@ -342,6 +342,8 @@ sable 0.3 starting
   ask reaction:   ⁉️
   ai rooms:       (mentions only)
   alerting:       enabled, aliases: alerts
+  attachments:    as sable-files into /sable, up to 100 MB
+  ignoring:       noisy-integration
   backend pin:    on
   log level:      INFO
 connected to Nextcloud 31.0.4 at https://cloud.example.org

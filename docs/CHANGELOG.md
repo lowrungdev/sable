@@ -31,6 +31,9 @@ Format: `## <version>`, optionally followed by a date. Anything until the next
   That account's app password cannot be scoped — it reaches that user's Files,
   Contacts and Calendar — so it is optional, used only on this path, and
   recorded in `docs/security.md` as the largest credential sable can hold.
+- The startup block names the account attachments are posted as, the folder they
+  land in, and the size limit in MB rather than bytes — plus who is being
+  ignored: `attachments:    as sable-files into /bot-uploads, up to 100 MB`.
 - **`SABLE_IGNORE_USERS`** drops everything from the listed people: commands,
   mentions and reactions, and their messages are never cached for ⁉️ either, so
   their words do not reach the model even when somebody else asks about them.

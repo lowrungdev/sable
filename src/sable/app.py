@@ -112,6 +112,17 @@ def create_app(config: Config | None = None, bot: Bot | None = None) -> FastAPI:
             if config.notify_enabled and config.notify_rooms
             else ("enabled" if config.notify_enabled else "disabled (/notify answers 404)"),
         )
+        log.info(
+            "  attachments:    %s",
+            f"as {config.nextcloud_user} into {config.upload_path}, "
+            f"up to {megabytes(config.max_upload_bytes)}"
+            if config.uploads_enabled
+            else "disabled (set SABLE_NEXTCLOUD_USER and SABLE_NEXTCLOUD_PASSWORD)",
+        )
+        log.info(
+            "  ignoring:       %s",
+            ", ".join(config.ignore_users) if config.ignore_users else "(nobody)",
+        )
         log.info("  backend pin:    %s", "on" if config.pin_backend else "off")
         log.info("  log level:      %s", config.log_level)
 
@@ -266,6 +277,12 @@ def create_app(config: Config | None = None, bot: Bot | None = None) -> FastAPI:
         return Response(f"sable {__version__}\n", media_type="text/plain")
 
     return app
+
+
+def megabytes(value: int) -> str:
+    """A byte count as something a person can read at a glance."""
+    size = value / (1024 * 1024)
+    return f"{size:.0f} MB" if abs(size - round(size)) < 0.05 else f"{size:.1f} MB"
 
 
 def _form_bool(value: object) -> bool:
