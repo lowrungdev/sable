@@ -96,7 +96,7 @@ maintain, and it drops straight into a container, a systemd unit or a `.env` fil
 rather than on the first message.
 
 *Everything is an explicit seam.* `Bot` takes its HTTP client, model client, history and command
-registry as constructor arguments. That is why the tests cover both endpoints end to end with no
+registry as constructor arguments. That is why the tests cover every endpoint end to end with no
 network, no Nextcloud and no model, and why replacing any one of those pieces is a small change
 rather than a fork.
 
@@ -109,7 +109,7 @@ rather than a fork.
 | Anything to `/notify` | A separate bearer token, compared in constant time. Unset means the route answers 404. |
 | sable to Nextcloud Files | A user account's app password, used only to upload and share attachments. It cannot be scoped, so it reaches everything that user can. |
 | Chat text to the model | Messages are sent verbatim to your configured backend. Whoever can talk to the bot can send text to that provider. |
-| A command's own reach | Whatever you give it. Commands run with the bot's credentials and anyone in the conversation can trigger them. |
+| A command's own reach | Whatever you give it. Commands run with the bot's credentials, and anyone in the conversation can trigger any that is not named in `SABLE_ADMIN_COMMANDS`. |
 
 The bot secret authenticates both directions, so it is the value that matters most; rotating it
 means running `occ talk:bot:install` again. [security.md](security.md) covers all of this

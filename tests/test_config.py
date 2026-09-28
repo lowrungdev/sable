@@ -119,3 +119,150 @@ def test_hook_names_are_case_insensitive(load: Load) -> None:
     config = load(SABLE_HOOKS=f"Komodo={ROOM}", SABLE_HOOK_TOKEN_komodo="t")
     assert config.hook_room("KOMODO") == ROOM
     assert config.hook_token("komodo") == "t"
+
+
+# --------------------------------------------------------------------------- #
+# The HTTP surface
+# --------------------------------------------------------------------------- #
+
+
+def test_the_schema_is_off_and_the_probe_open_by_default(load: Load) -> None:
+    config = load()
+    assert config.api_docs is False
+    assert config.health_token == ""
+    assert config.health_guarded is False
+
+
+def test_the_schema_and_the_probe_can_both_be_configured(load: Load) -> None:
+    config = load(SABLE_API_DOCS="true", SABLE_HEALTH_TOKEN="  h-token  ")
+    assert config.api_docs is True
+    assert config.health_token == "h-token"
+    assert config.health_guarded is True
+
+
+def test_a_non_boolean_api_docs_is_refused(load: Load) -> None:
+    with pytest.raises(ConfigError, match="SABLE_API_DOCS must be a boolean"):
+        load(SABLE_API_DOCS="sometimes")
+
+
+# --------------------------------------------------------------------------- #
+# Which proxies are believed about the client address
+# --------------------------------------------------------------------------- #
+
+
+def test_only_loopback_is_trusted_by_default(load: Load) -> None:
+    """uvicorn's own default. A proxy on the same host is the common case."""
+    assert load().trusted_proxies == ["127.0.0.1", "::1"]
+
+
+def test_addresses_and_ranges_are_both_accepted(load: Load) -> None:
+    config = load(SABLE_TRUSTED_PROXIES="10.0.0.5, 192.168.1.0/24, ::1")
+    assert config.trusted_proxies == ["10.0.0.5", "192.168.1.0/24", "::1"]
+
+
+def test_a_star_trusts_every_client(load: Load) -> None:
+    assert load(SABLE_TRUSTED_PROXIES="*").trusted_proxies == ["*"]
+
+
+def test_set_to_nothing_trusts_nobody(load: Load) -> None:
+    """Distinct from unset: naming no proxy is a choice, and uvicorn honours an
+    empty list by believing the headers from nobody at all."""
+    assert load(SABLE_TRUSTED_PROXIES="").trusted_proxies == []
+
+
+def test_a_hostname_is_refused(load: Load) -> None:
+    """uvicorn keeps one as a literal that never matches a peer address, so a
+    value that cannot work is refused here rather than silently ignored."""
+    with pytest.raises(ConfigError, match="not an IP address or a CIDR range"):
+        load(SABLE_TRUSTED_PROXIES="proxy.example.org")
+
+
+def test_a_range_with_host_bits_set_is_refused(load: Load) -> None:
+    with pytest.raises(ConfigError, match="no host bits set"):
+        load(SABLE_TRUSTED_PROXIES="172.17.0.5/16")
+
+
+def test_a_star_cannot_be_mixed_with_addresses(load: Load) -> None:
+    with pytest.raises(ConfigError, match="already means every client"):
+        load(SABLE_TRUSTED_PROXIES="*,127.0.0.1")
+
+
+# --------------------------------------------------------------------------- #
+# Who may run which command
+# --------------------------------------------------------------------------- #
+
+
+def test_every_command_is_open_by_default(load: Load) -> None:
+    config = load()
+    assert not config.admin_only("reset")
+    assert not config.is_admin_user("alice")
+
+
+def test_an_admin_command_is_closed_to_everybody_else(load: Load) -> None:
+    config = load(SABLE_ADMIN_COMMANDS="reset, ai", SABLE_ADMIN_USERS="maser,korren")
+    assert config.admin_only("reset")
+    assert config.admin_only("ai")
+    assert not config.admin_only("ping")
+    assert config.is_admin_user("maser")
+    assert config.is_admin_user("KORREN")
+    assert not config.is_admin_user("alice")
+
+
+def test_an_admin_may_be_written_as_a_full_actor_id(load: Load) -> None:
+    config = load(SABLE_ADMIN_COMMANDS="reset", SABLE_ADMIN_USERS="users/maser")
+    assert config.is_admin_user("maser")
+
+
+def test_nobody_is_an_admin_without_a_user_id(load: Load) -> None:
+    """Actor.user_id is empty for guests and for bots, and empty matches nobody."""
+    config = load(SABLE_ADMIN_COMMANDS="reset", SABLE_ADMIN_USERS="maser")
+    assert not config.is_admin_user("")
+
+
+def test_a_star_closes_every_command(load: Load) -> None:
+    config = load(SABLE_ADMIN_COMMANDS="*", SABLE_ADMIN_USERS="maser")
+    assert config.admin_only("reset")
+    assert config.admin_only("ping")
+
+
+def test_normal_commands_are_the_exceptions_to_a_star(load: Load) -> None:
+    config = load(
+        SABLE_ADMIN_COMMANDS="*",
+        SABLE_NORMAL_COMMANDS="help,ping",
+        SABLE_ADMIN_USERS="maser",
+    )
+    assert config.admin_only("reset")
+    assert not config.admin_only("help")
+    assert not config.admin_only("ping")
+
+
+def test_naming_an_alias_restricts_the_command_behind_it(load: Load) -> None:
+    """admin_only is asked about a command's name and its aliases together."""
+    config = load(SABLE_ADMIN_COMMANDS="forget", SABLE_ADMIN_USERS="maser")
+    assert config.admin_only("reset", "forget")
+
+
+def test_admin_commands_without_an_admin_are_refused(load: Load) -> None:
+    with pytest.raises(ConfigError, match="SABLE_ADMIN_USERS is empty"):
+        load(SABLE_ADMIN_COMMANDS="reset")
+
+
+def test_a_command_cannot_be_admin_and_open_at_once(load: Load) -> None:
+    with pytest.raises(ConfigError, match="reset: in both SABLE_ADMIN_COMMANDS"):
+        load(
+            SABLE_ADMIN_COMMANDS="reset",
+            SABLE_NORMAL_COMMANDS="reset",
+            SABLE_ADMIN_USERS="maser",
+        )
+
+
+def test_normal_commands_cannot_be_a_star(load: Load) -> None:
+    with pytest.raises(ConfigError, match="SABLE_NORMAL_COMMANDS cannot be"):
+        load(SABLE_NORMAL_COMMANDS="*")
+
+
+def test_admins_without_admin_commands_are_allowed(load: Load) -> None:
+    """Nothing is gated, but a custom command can still ask ctx.is_admin."""
+    config = load(SABLE_ADMIN_USERS="maser")
+    assert config.is_admin_user("maser")
+    assert not config.admin_only("reset")

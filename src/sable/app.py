@@ -1,13 +1,21 @@
-"""The HTTP surface: the Talk webhook, the alerting endpoint, and a health check.
+"""The HTTP surface: the Talk webhook, two ways in for alerts, and a health check.
 
 Routes
 ------
-``POST /webhook``  Nextcloud Talk posts events here. Signature-verified, then
-                   handled in the background so we answer well inside Talk's
-                   request timeout.
-``POST /notify``   Inbound alerting: other systems post JSON here with a bearer
-                   token and we relay it into a conversation.
-``GET  /healthz``  Liveness probe.
+``POST /webhook``     Nextcloud Talk posts events here. Signature-verified, then
+                      handled in the background so we answer well inside Talk's
+                      request timeout.
+``POST /notify``      Inbound alerting: other systems post JSON here with a
+                      bearer token and we relay it into a conversation.
+``POST /hook/{name}`` The same, for services that cannot speak that shape. Each
+                      hook has its own token and its own conversation.
+``GET  /healthz``     Liveness probe, plus the few settings worth confirming from
+                      outside. Open unless SABLE_HEALTH_TOKEN is set.
+``GET  /``            The version, as plain text.
+
+Every one of them checks its credential before doing anything else. FastAPI's
+schema and the /docs and /redoc pages built from it are not served unless
+SABLE_API_DOCS is on.
 """
 
 from __future__ import annotations
@@ -42,6 +50,10 @@ log = logging.getLogger(__name__)
 
 #: How long shutdown waits for in-flight replies to finish.
 DRAIN_TIMEOUT = 30.0
+
+#: Guards GET /healthz when SABLE_HEALTH_TOKEN is set. A header rather than a
+#: query parameter, so the value stays out of proxy and access logs.
+HEADER_HEALTH_TOKEN = "X-Health-Token"
 
 
 class NotifyFile(BaseModel):
@@ -99,6 +111,7 @@ def create_app(config: Config | None = None, bot: Bot | None = None) -> FastAPI:
             "  ask reaction:   %s",
             config.ask_reaction or "disabled",
         )
+        log.info("  admin commands: %s", admin_summary(config))
         log.info(
             "  ai rooms:       %s",
             ", ".join(config.ai_rooms) if config.ai_rooms else "(mentions only)",
@@ -129,7 +142,20 @@ def create_app(config: Config | None = None, bot: Bot | None = None) -> FastAPI:
             "  ignoring:       %s",
             ", ".join(config.ignore_users) if config.ignore_users else "(nobody)",
         )
-        log.info("  backend pin:    %s", "on" if config.pin_backend else "off")
+        log.info("  backend pin:    %s", backend_pin_summary(config))
+        log.info("  proxy trust:    %s", proxy_trust_summary(config))
+        log.info(
+            "  api docs:       %s",
+            "/docs, /redoc, /openapi.json"
+            if config.api_docs
+            else "disabled (SABLE_API_DOCS=true to serve them)",
+        )
+        log.info(
+            "  health check:   %s",
+            f"GET /healthz ({HEADER_HEALTH_TOKEN} required)"
+            if config.health_guarded
+            else "GET /healthz (open)",
+        )
         log.info("  log level:      %s", config.log_level)
 
         if config.startup_check:
@@ -152,6 +178,13 @@ def create_app(config: Config | None = None, bot: Bot | None = None) -> FastAPI:
         version=__version__,
         description="A Nextcloud Talk bot.",
         lifespan=lifespan,
+        # None removes the route entirely rather than hiding it. The schema
+        # describes every endpoint and body shape to whoever can reach the
+        # service, and the webhook has to be reachable, so this is off unless
+        # asked for.
+        docs_url="/docs" if config.api_docs else None,
+        redoc_url="/redoc" if config.api_docs else None,
+        openapi_url="/openapi.json" if config.api_docs else None,
     )
 
     def spawn(coro) -> None:
@@ -168,7 +201,23 @@ def create_app(config: Config | None = None, bot: Bot | None = None) -> FastAPI:
         return request.app.state.bot
 
     @app.get("/healthz", tags=["ops"])
-    async def healthz() -> dict[str, object]:
+    async def healthz(
+        health_token: Annotated[str, Header(alias=HEADER_HEALTH_TOKEN)] = "",
+    ) -> dict[str, object]:
+        """Liveness, plus the handful of settings worth confirming from outside.
+
+        Open unless SABLE_HEALTH_TOKEN is set: a container healthcheck and a
+        kubelet probe both expect to call this without credentials. With a token
+        set, the answer names the model and the version, so it is guarded.
+        """
+        if config.health_token and not hmac.compare_digest(
+            health_token.strip(), config.health_token
+        ):
+            log.warning("rejected a health check with a bad or missing token")
+            raise HTTPException(
+                status.HTTP_401_UNAUTHORIZED,
+                f"a valid {HEADER_HEALTH_TOKEN} header is required",
+            )
         return {
             "status": "ok",
             "version": __version__,
@@ -290,8 +339,12 @@ def create_app(config: Config | None = None, bot: Bot | None = None) -> FastAPI:
         """
         room = config.hook_room(name)
         if not room:
-            # Same answer whether the hook is unknown or the feature is unused,
-            # so probing cannot enumerate which hooks exist.
+            # A name that is not configured and hooks not being configured at all
+            # answer the same 404, so this does not say whether the feature is in
+            # use. It does distinguish a configured hook, which answers 401 for a
+            # bad token, from an unconfigured one - so hook names are guessable by
+            # probing. Each hook carries its own token, so what that costs is the
+            # name rather than access.
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"no hook named {name!r}")
 
         # Komodo and friends cannot set headers, so the token may come from the
@@ -370,6 +423,45 @@ def create_app(config: Config | None = None, bot: Bot | None = None) -> FastAPI:
         return Response(f"sable {__version__}\n", media_type="text/plain")
 
     return app
+
+
+def backend_pin_summary(config: Config) -> str:
+    """The backend pin line in the startup block.
+
+    Spelled out rather than "off", because off is the interesting state: the
+    backend header sits outside the signature, so with nothing to pin against, a
+    replayed webhook chooses where the replies to it go.
+    """
+    if config.pin_backend:
+        return f"on, replies only to {config.nextcloud_url}"
+    reason = (
+        "no SABLE_NEXTCLOUD_URL"
+        if not config.nextcloud_url
+        else "SABLE_PIN_BACKEND is off"
+    )
+    return (
+        f"OFF ({reason}) - the unsigned backend header on each webhook decides "
+        f"where replies to it go"
+    )
+
+
+def proxy_trust_summary(config: Config) -> str:
+    """The proxy trust line in the startup block."""
+    if not config.trusted_proxies:
+        return "nobody - X-Forwarded-For and X-Forwarded-Proto are ignored"
+    if "*" in config.trusted_proxies:
+        return "* - ANY client's X-Forwarded-For is believed; only safe behind a proxy that overwrites it"
+    return ", ".join(config.trusted_proxies)
+
+
+def admin_summary(config: Config) -> str:
+    """The command authorization line in the startup block."""
+    if not config.admin_commands:
+        return "(none - anyone in a conversation can run any command)"
+    which = ", ".join(config.admin_commands)
+    if config.normal_commands:
+        which += f", except {', '.join(config.normal_commands)}"
+    return f"{which} - only for {', '.join(config.admin_users)}"
 
 
 def megabytes(value: int) -> str:

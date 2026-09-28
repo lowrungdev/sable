@@ -158,11 +158,24 @@ server {
 
 The `X-Nextcloud-Talk-*` headers need no special handling — both proxies forward them as-is.
 
+`X-Forwarded-For` and `X-Forwarded-Proto` are believed only from the addresses in
+`SABLE_TRUSTED_PROXIES`, which defaults to loopback and so covers both examples above as written.
+A proxy in another container is not loopback and has to be named; a proxy that is never named just
+means the access log shows the proxy rather than the client. nginx's
+`$proxy_add_x_forwarded_for` appends to whatever the client sent, which is safe here — the
+forwarded list is read from the right, so the first address that is not a trusted proxy wins, and
+anything a client made up sits to the left of its real address. That only holds while the trusted
+list is not `*`. Details in
+[configuration.md](configuration.md#which-proxies-are-believed).
+
 Confirm the path works before involving Nextcloud:
 
 ```bash
 curl -fsS https://sable.example.org/healthz
-# {"status":"ok","version":"0.4","bot":"sable","llm":"gpt-4o-mini","notify":true}
+# {"status":"ok","version":"0.6","bot":"sable","llm":"gpt-4o-mini","notify":true}
+
+# ...or, with SABLE_HEALTH_TOKEN set:
+curl -fsS -H "X-Health-Token: $SABLE_HEALTH_TOKEN" https://sable.example.org/healthz
 ```
 
 ### If your Nextcloud uses an internal or self-signed certificate
@@ -263,7 +276,7 @@ In the conversation:
 
 ```
 !ping      →  pong 🏓
-!version   →  sable 0.4 · model gpt-4o-mini
+!version   →  sable 0.6 · model gpt-4o-mini
 ```
 
 To test the webhook path without Nextcloud — this is exactly what Talk does, with the signature
@@ -368,21 +381,26 @@ At `INFO`, sable logs its own lifecycle, its configuration, and every use — an
 the interesting lines are not buried:
 
 ```
-sable 0.3 starting
+sable 0.6 starting
   listening on:   http://0.0.0.0:8080
   webhook URL:    POST /webhook  (give this to occ talk:bot:install)
   nextcloud:      https://cloud.example.org
   bot name:       'sable'   command prefix: '!'
   model:          gpt-4o-mini at https://api.openai.com/v1
   ask reaction:   ⁉️
+  admin commands: reset - only for maser
   ai rooms:       (mentions only)
   alerting:       enabled, aliases: alerts
   attachments:    as sable-files into /sable, up to 100 MB
+  hooks:          /hook/komodo -> abcd1234
   ignoring:       noisy-integration
-  backend pin:    on
+  backend pin:    on, replies only to https://cloud.example.org
+  proxy trust:    127.0.0.1, ::1
+  api docs:       disabled (SABLE_API_DOCS=true to serve them)
+  health check:   GET /healthz (open)
   log level:      INFO
 connected to Nextcloud 31.0.4 at https://cloud.example.org
-sable 0.3 ready
+sable 0.6 ready
 added to conversation abcd1234 ('Team chat') - now receiving its messages
 Alice (users/alice) ran !ping in abcd1234
 Alice (users/alice) asked the model in abcd1234 (22 chars)
@@ -390,8 +408,8 @@ gpt-4o-mini answered in 1.8s (243 chars)
 Alice (users/alice) asked the model about message 12 in abcd1234, written by Bob
 relayed an alert to abcd1234 (alias alerts) as message 4242
 removed from conversation abcd1234 ('Team chat') - no further messages from it
-sable 0.3 stopping
-sable 0.3 stopped
+sable 0.6 stopping
+sable 0.6 stopped
 ```
 
 The startup probe, the line reading `connected to Nextcloud`, calls `status.php`, which needs no
@@ -419,7 +437,11 @@ sable decided not to act on and one per outbound HTTP call. Treat a DEBUG log as
 content.
 
 `GET /healthz` returns the version, the bot name, the configured model and whether alerting is
-on. It does not call Nextcloud or the model, which keeps it honest as a liveness probe.
+on. It does not call Nextcloud or the model, which keeps it honest as a liveness probe. It is open
+unless `SABLE_HEALTH_TOKEN` is set, in which case the same answer needs that value in an
+`X-Health-Token` header — see
+[configuration.md](configuration.md#guarding-the-health-probe). FastAPI's schema and its `/docs`
+and `/redoc` pages are **not** served unless `SABLE_API_DOCS=true`.
 
 Upgrading is a restart. There is no state and no migration.
 
@@ -468,8 +490,9 @@ tokens.
 
 Two things are easy to forget. Every message the assistant answers is sent to your model
 backend, which for a hosted provider means chat content leaving your infrastructure. And anyone
-in a conversation can trigger any command, so one that shells out or touches production needs
-its own authorisation check — `ctx.event.actor.user_id` tells you who is asking.
+in a conversation can trigger any command not named in `SABLE_ADMIN_COMMANDS`, so one that shells
+out or touches production belongs in that list, with the people allowed to run it in
+`SABLE_ADMIN_USERS`.
 
 ## Troubleshooting
 
@@ -486,5 +509,10 @@ its own authorisation check — `ctx.event.actor.user_id` tells you who is askin
 | `HTTP 429` from Talk | The bot is posting too fast. Talk rate-limits bots; batch or slow down whatever is calling `/notify`. |
 | Mentions ignored | `SABLE_BOT_NAME` must match what people type. Set `SABLE_LOG_LEVEL=DEBUG` and watch for `message in <token> was not for me`. |
 | `/notify` returns 404 | `SABLE_NOTIFY_TOKEN` is unset, so the route is disabled. |
+| `/hook/<name>` returns 404 | No hook by that name, or `SABLE_HOOKS` is unset. A configured hook with a bad token answers 401 instead, so 404 means the name. |
+| `!reset is for administrators only` | The sender's Nextcloud user id is not in `SABLE_ADMIN_USERS`. The log line names who was refused. Display names are never matched, only user ids. |
+| `/docs` or `/openapi.json` returns 404 | Expected: set `SABLE_API_DOCS=true` to serve them. |
+| `/healthz` returns 401 | `SABLE_HEALTH_TOKEN` is set, so the probe needs an `X-Health-Token` header. The image's own healthcheck sends it; anything else calling `/healthz` has to as well. |
+| Access log shows the proxy's IP, not the client's | The proxy's address is not in `SABLE_TRUSTED_PROXIES`, so its `X-Forwarded-For` is ignored. In Docker that is the usual case: name the network's subnet. |
 | `/notify` returns 400 | The `room` is neither a known alias nor a plausible conversation token, or Talk rejected it. |
 | Config error on startup | See [the table in configuration.md](configuration.md#startup-errors-and-what-they-mean). |

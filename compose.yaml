@@ -17,7 +17,7 @@ services:
   sable:
     # Build from this checkout. To run a published release instead, delete these
     # two lines and use the image CI built (see docs/releasing.md):
-    #   image: forgejo.subversive.link/subversive/sable:1.1
+    #   image: forgejo.subversive.link/subversive/sable:0.6
     build: .
     image: sable:latest
     container_name: sable
@@ -116,6 +116,20 @@ services:
       # Matches a bare user id, a full actor id (users/alice) or a display name.
       # SABLE_IGNORE_USERS: "spammy-integration,users/alice"
 
+      # ===================== Who may run which command ====================
+      # Commands only SABLE_ADMIN_USERS may run; everything else stays open to
+      # everyone in the conversation, guests included. "*" closes every command
+      # and makes SABLE_NORMAL_COMMANDS the exceptions. Naming a command covers
+      # its aliases, so "reset" also covers !forget.
+      # SABLE_ADMIN_COMMANDS: "reset,ai"
+
+      # The exceptions to SABLE_ADMIN_COMMANDS "*". Redundant otherwise.
+      # SABLE_NORMAL_COMMANDS: "help,ping,whoami"
+
+      # Nextcloud user ids allowed to run them - never display names, which
+      # anybody can change to yours. Required once the list above is set.
+      # SABLE_ADMIN_USERS: "maser,korren"
+
       # ===================== Conversation memory ==========================
       # In-process and lost on restart. A turn is a question plus its answer.
       # SABLE_HISTORY_TURNS: "12"
@@ -185,6 +199,32 @@ services:
 
       # Largest attachment /notify accepts, in bytes. Default 25 MiB.
       # SABLE_MAX_UPLOAD_BYTES: "26214400"
+
+      # ===================== The HTTP surface itself =======================
+      # Serve FastAPI's schema at /openapi.json and its doc pages at /docs and
+      # /redoc. Off by default - they describe every route and body shape to
+      # whoever can reach us, and nothing needs them at runtime. Off means the
+      # routes are gone (404), not protected (401).
+      # SABLE_API_DOCS: "false"
+
+      # Require this in an X-Health-Token header on GET /healthz. Empty leaves
+      # the probe open, which is the default and what the image's healthcheck
+      # expects - it reads this variable and sends the header when set, so
+      # guarding the probe does not fail the container. Keep it in .env.
+      # SABLE_HEALTH_TOKEN: "${SABLE_HEALTH_TOKEN:-}"
+
+      # Proxies whose X-Forwarded-For and X-Forwarded-Proto are believed. The
+      # default trusts loopback only, which is right when the proxy runs on the
+      # host and reaches sable through the published port below.
+      #
+      # A PROXY IN ANOTHER CONTAINER IS NOT LOOPBACK. It arrives from the shared
+      # network, so name that network or the proxy's address, or the forwarded
+      # headers are ignored and the access log shows the bridge gateway:
+      #   SABLE_TRUSTED_PROXIES: "172.17.0.0/16"
+      # `docker network inspect <name>` prints the subnet to use. Set it to ""
+      # to trust nobody. A range must have no host bits set and a hostname is
+      # refused, since uvicorn would keep it as a literal that never matches.
+      # SABLE_TRUSTED_PROXIES: "127.0.0.1,::1"
 
       # ===================== Process ======================================
       # Leave the bind address alone: it is the container's own interface,

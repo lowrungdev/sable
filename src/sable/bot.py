@@ -8,7 +8,15 @@ from collections import deque
 
 import httpx
 
-from .commands import CommandError, Context, Registry, parse_argv, registry, split_command
+from .commands import (
+    Command,
+    CommandError,
+    Context,
+    Registry,
+    parse_argv,
+    registry,
+    split_command,
+)
 from .config import Config
 from .events import TalkEvent
 from .files import FilesClient
@@ -75,6 +83,10 @@ class Bot:
     @property
     def llm_enabled(self) -> bool:
         return self.config.llm.enabled
+
+    def admin_only(self, command: Command) -> bool:
+        """Is this command restricted to SABLE_ADMIN_USERS?"""
+        return self.config.admin_only(command.name, *command.aliases)
 
     @property
     def ask_enabled(self) -> bool:
@@ -296,6 +308,20 @@ class Bot:
                     f"I have no `{name}` command. "
                     f"Try `{self.config.command_prefix}help`.",
                 )
+            return
+
+        if self.admin_only(command) and not self.config.is_admin_user(event.actor.user_id):
+            log.warning(
+                "refused %s%s for %s - not in SABLE_ADMIN_USERS",
+                self.config.command_prefix,
+                command.name,
+                self._who(event),
+            )
+            await self._safe_reply(
+                event,
+                f"`{self.config.command_prefix}{command.name}` is for "
+                "administrators only.",
+            )
             return
 
         ctx = Context(self, event, command.name, args, parse_argv(args))

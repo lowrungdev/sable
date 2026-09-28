@@ -37,7 +37,9 @@ USER sable
 EXPOSE 8080
 
 # urlopen raises on a connection failure or a 4xx/5xx, which is a non-zero exit.
+# SABLE_HEALTH_TOKEN, when set, is sent as the header /healthz then requires -
+# otherwise guarding the probe would fail the container it is checking.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-    CMD ["python", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('SABLE_PORT', '8080') + '/healthz', timeout=3)"]
+    CMD ["python", "-c", "import os, urllib.request; t = os.environ.get('SABLE_HEALTH_TOKEN', '').strip(); u = 'http://127.0.0.1:' + os.environ.get('SABLE_PORT', '8080') + '/healthz'; urllib.request.urlopen(urllib.request.Request(u, headers={'X-Health-Token': t} if t else {}), timeout=3)"]
 
 CMD ["python", "-m", "sable"]
