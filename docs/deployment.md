@@ -387,7 +387,9 @@ sable 0.6 starting
   nextcloud:      https://cloud.example.org
   bot name:       'sable'   command prefix: '!'
   model:          gpt-4o-mini at https://api.openai.com/v1
+  concurrency:    up to 8 replies at once, the rest queued
   ask reaction:   ⁉️
+  ask rooms:      every conversation the bot is in
   admin commands: reset - only for maser
   ai rooms:       (mentions only)
   alerting:       enabled, aliases: alerts
@@ -395,7 +397,7 @@ sable 0.6 starting
   hooks:          /hook/komodo -> abcd1234
   ignoring:       noisy-integration
   backend pin:    on, replies only to https://cloud.example.org
-  proxy trust:    127.0.0.1, ::1
+  proxy trust:    127.0.0.1, ::1 - believed by sable's own uvicorn, and read by nothing else
   api docs:       disabled (SABLE_API_DOCS=true to serve them)
   health check:   GET /healthz (open)
   log level:      INFO
@@ -436,8 +438,11 @@ prompt, command arguments and the message a reaction referred to, plus a line fo
 sable decided not to act on and one per outbound HTTP call. Treat a DEBUG log as containing chat
 content.
 
-`GET /healthz` returns the version, the bot name, the configured model and whether alerting is
-on. It does not call Nextcloud or the model, which keeps it honest as a liveness probe. It is open
+`GET /healthz` returns the version, the bot name, the configured model, whether alerting is on,
+and a `nextcloud` field saying whether the last call to Nextcloud succeeded (`null` until one has
+been made). It does not call Nextcloud or the model *to answer the probe*, which keeps it honest
+as a liveness probe — the field reports what ordinary traffic already discovered, and the
+status stays `ok` either way. It is open
 unless `SABLE_HEALTH_TOKEN` is set, in which case the same answer needs that value in an
 `X-Health-Token` header — see
 [configuration.md](configuration.md#guarding-the-health-probe). FastAPI's schema and its `/docs`

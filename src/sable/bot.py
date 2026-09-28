@@ -88,10 +88,34 @@ class Bot:
         """Is this command restricted to SABLE_ADMIN_USERS?"""
         return self.config.admin_only(command.name, *command.aliases)
 
+    def is_admin_actor(self, event: TalkEvent) -> bool:
+        """May whoever caused this event use the restricted paths?
+
+        The bot check belongs in the decision rather than in front of it: an
+        actor typed ``Application`` with an id like ``users/maser`` resolves a
+        user id, and it is the administrator's, so is_admin_user says yes to it.
+        What stops that today is the is_bot early return in handle happening to
+        run first - true, and only true while nobody moves a line. Refusing here
+        holds wherever the question is asked from.
+        """
+        return not event.actor.is_bot and self.config.is_admin_user(event.actor.user_id)
+
     @property
     def ask_enabled(self) -> bool:
         """Is the react-to-ask feature on? It needs both an emoji and a model."""
         return bool(self._ask_key) and self.llm_enabled
+
+    def remembers_messages(self, event: TalkEvent) -> bool:
+        """Are this conversation's messages kept, so a reaction can name one?
+
+        Scoped per conversation because the cache is the whole data-at-rest cost
+        of the feature (accepted risk 6): every room the bot sits in otherwise
+        holds its last SABLE_MESSAGE_CACHE messages in memory to serve a reaction
+        that, in most of them, nobody will ever send.
+        """
+        return self.ask_enabled and self.config.ask_room_allowed(
+            event.room_token, event.room_name
+        )
 
     def is_ask_reaction(self, reaction: str) -> bool:
         return bool(self._ask_key) and emoji_key(reaction) == self._ask_key
@@ -238,7 +262,11 @@ class Bot:
         # Remember messages before anything else, the bot's own included, so a
         # reaction can name one later. Remembering is not acting on it, and a
         # reaction to one of our own answers is a reasonable follow-up.
-        if self.ask_enabled and event.is_message:
+        #
+        # Which conversation it is, is the one further thing this may turn on: it
+        # is a fact about the room rather than about the sender or the event, so
+        # asking it here cannot quietly reintroduce the checks below.
+        if event.is_message and self.remembers_messages(event):
             self.messages.add(
                 event.room_token,
                 event.message_id,
@@ -310,7 +338,7 @@ class Bot:
                 )
             return
 
-        if self.admin_only(command) and not self.config.is_admin_user(event.actor.user_id):
+        if self.admin_only(command) and not self.is_admin_actor(event):
             log.warning(
                 "refused %s%s for %s - not in SABLE_ADMIN_USERS",
                 self.config.command_prefix,
@@ -356,19 +384,49 @@ class Bot:
         go past: a reaction to something older than the cache is a miss, and
         saying so is better than answering the wrong thing.
         """
+        if self.config.ask_admins_only and not self.is_admin_actor(event):
+            # Refused in the log and nowhere else. A reaction is not a command: it
+            # asks nobody anything, so there is no question left hanging by
+            # silence, while a refusal would be threaded under a third person's
+            # message for everyone in the room to read - and the room has done
+            # nothing wrong. Nothing of ours is showing either, the thinking
+            # reaction never having gone on, so there is nothing to take back.
+            log.warning(
+                "refused the %s reaction on message %s in %s for %s - not in "
+                "SABLE_ADMIN_USERS",
+                self.config.ask_reaction,
+                event.message_id,
+                event.room_token,
+                self._who(event),
+            )
+            return
+
         cached = self.messages.get(event.room_token, event.message_id)
         asker = event.actor.name or event.actor.id
         if cached is None:
+            # Same miss, two reasons, and they send the reader different places: in
+            # a conversation outside SABLE_ASK_ROOMS nothing was ever kept, so
+            # blaming the age of the message would have somebody scrolling for one
+            # that could not have been there however recent it was.
+            unlisted = not self.remembers_messages(event)
             log.info(
-                "%s asked about message %s in %s, which is not in the cache",
+                "%s asked about message %s in %s, which is not in the cache%s",
                 event.actor.id,
                 event.message_id,
                 event.room_token,
+                " - the conversation is not in SABLE_ASK_ROOMS" if unlisted else "",
             )
             await self._safe_reply(
                 event,
-                "I do not have that message — I only remember ones posted while I "
-                "was in the conversation. Quote it or mention me instead.",
+                (
+                    "I do not keep this conversation's messages, so I cannot see "
+                    "the one you reacted to. Quote it or mention me instead."
+                )
+                if unlisted
+                else (
+                    "I do not have that message — I only remember ones posted while "
+                    "I was in the conversation. Quote it or mention me instead."
+                ),
                 reply_to=event.message_id,
             )
             return

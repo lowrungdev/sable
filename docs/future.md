@@ -26,7 +26,9 @@ way off, so the constraint is documented rather than treated as a bug.
 **No rate limiting on `/notify`.** Nothing stops a misconfigured alertmanager posting a thousand
 messages. Talk will start returning 429 and the bot will log failures, but the noise has already
 happened. A token bucket per room, or rate limiting at the proxy, fixes it. Something upstream
-will misbehave eventually.
+will misbehave eventually. Note what this is *not*: `SABLE_MAX_CONCURRENT_REPLIES` caps how many
+model calls run at once, which bounds the resources a flood consumes, but it queues the work
+rather than shedding it. A thousand alerts still become a thousand messages, just more slowly.
 
 **Command authorization is global, not per room.** `SABLE_ADMIN_COMMANDS` and `SABLE_ADMIN_USERS`
 say who may run what across every conversation the bot is in. What they cannot say is "maser may

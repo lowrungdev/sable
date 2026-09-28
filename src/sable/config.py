@@ -18,7 +18,13 @@ from dataclasses import dataclass, field
 #: URL. Talk's own routes only match lowercase, so anything else can never
 #: reach a conversation - and in practice means someone pasted the room's
 #: *name* where its token belongs.
-TOKEN_RE = re.compile(r"^[a-z0-9]{4,64}$")
+#:
+#: ``\Z`` and not ``$``: ``$`` also matches immediately before a final newline,
+#: so ``abcd1234\n`` passed a check that is the whole boundary between a value
+#: somebody supplied and a URL built around it. A token with a trailing newline
+#: got as far as httpx, which refuses it as an invalid URL - an unhandled error,
+#: so the /notify caller was told 500 where the same value uppercased got 400.
+TOKEN_RE = re.compile(r"^[a-z0-9]{4,64}\Z")
 
 #: Said whenever a token turns out not to be one.
 TOKEN_HINT = (
@@ -165,6 +171,11 @@ class LLMConfig:
 class Config:
     # --- Talk bot identity -------------------------------------------------
     bot_secret: str
+    #: The secret being rotated away from, accepted on incoming webhooks only.
+    #: Talk holds one secret per bot install, so changing it means uninstalling
+    #: and reinstalling the bot, and every event that arrives in between fails
+    #: its signature check. Keeping the old value here covers that window.
+    bot_secret_previous: str = ""
     bot_name: str = "sable"
     nextcloud_url: str = ""
     pin_backend: bool = True
@@ -177,12 +188,28 @@ class Config:
     #: React with this to send a message to the model. Empty disables the
     #: feature, and with it the message cache that makes it possible.
     ask_reaction: str = "⁉️"
+    #: Restrict that reaction to the admin_users. Anybody in a conversation can
+    #: otherwise forward somebody else's words to the model backend without
+    #: saying anything in the room, which is accepted risk 7 in security.md.
+    ask_admins_only: bool = False
+    #: Conversations whose messages are cached for the reaction, matched like
+    #: ai_rooms. Empty means *every* conversation, which is the asymmetry to
+    #: watch: an empty ai_rooms means no rooms. Deliberate - reading empty as
+    #: none would switch the feature off for every existing deployment on
+    #: upgrade, silently, which is the one outcome worth ruling out.
+    ask_rooms: list[str] = field(default_factory=list)
     #: Messages remembered per conversation, so a reaction can refer to one.
     message_cache: int = 200
     report_errors: bool = True
     startup_check: bool = True
     unknown_command_hint: bool = True
     max_message_chars: int = 30000
+    #: Model calls allowed to be in flight at once; 0 lifts the ceiling. Every
+    #: trigger becomes a background task with no limit of its own, so a busy room
+    #: or a burst of redeliveries means that many completions open together, each
+    #: holding the llm.timeout open. Talk rate-limits the replies we send, not
+    #: the events it sends us, so nothing upstream applies the brakes either.
+    max_concurrent_replies: int = 8
 
     # --- conversation memory ----------------------------------------------
     history_turns: int = 12
@@ -260,6 +287,23 @@ class Config:
         return bool(self.notify_token)
 
     @property
+    def inbound_secrets(self) -> tuple[str, ...]:
+        """The secrets an incoming signature may have been made with, current first.
+
+        One entry normally, two while a rotation is in progress. Try them in this
+        order and stop at the first that verifies.
+
+        Incoming verification only. Everything sable *sends* - the bot API calls
+        in bot.py - is signed with ``bot_secret`` and never with the previous one:
+        Talk has already been given the new value by then, so signing with the old
+        one would be rejected. The previous secret exists to keep believing events
+        that were signed before the reinstall, nothing more.
+        """
+        if self.bot_secret_previous:
+            return (self.bot_secret, self.bot_secret_previous)
+        return (self.bot_secret,)
+
+    @property
     def health_guarded(self) -> bool:
         """Does GET /healthz need a token?"""
         return bool(self.health_token)
@@ -300,6 +344,21 @@ class Config:
             if value
         }
         return any(entry.strip().casefold() in candidates for entry in self.ignore_users)
+
+    @property
+    def fragile_ignore_users(self) -> list[str]:
+        """The ignore_users entries that look like display names rather than ids.
+
+        Whitespace is the practical signal: a Nextcloud user id has none, and a
+        display name usually does. Worth putting in front of an operator at
+        startup, because a name is the one kind of entry the ignored person can
+        defeat themselves, by renaming - their ignore then quietly lapses, which
+        is the opposite of what was configured.
+
+        Returns the entries and judges nothing else; naming a person by their
+        display name is allowed, and sometimes it is all an operator has.
+        """
+        return [entry for entry in self.ignore_users if re.search(r"\s", entry.strip())]
 
     @staticmethod
     def _listed(entries: list[str], name: str) -> bool:
@@ -356,6 +415,28 @@ class Config:
             entry.strip().casefold() == wanted for entry in self.ai_rooms
         )
 
+    def ask_room_allowed(self, token: str, name: str = "") -> bool:
+        """Should this conversation's messages be cached for the ask reaction?
+
+        Entries are matched exactly as :meth:`ai_room_allowed` matches its own -
+        conversation token or display name, ignoring case and surrounding space,
+        with ``*`` for all of them - and tokens are preferable here for the same
+        reason: renaming a conversation would otherwise change what is cached.
+
+        An empty list means **every** conversation, where an empty ``ai_rooms``
+        means none. The asymmetry is deliberate: the cache is on today for every
+        room the bot is in, and reading empty as none would turn the reaction off
+        across every existing deployment the moment it upgraded.
+        """
+        if not self.ask_rooms or "*" in self.ask_rooms:
+            return True
+        if token and token in self.ask_rooms:
+            return True
+        wanted = name.strip().casefold()
+        return bool(wanted) and any(
+            entry.strip().casefold() == wanted for entry in self.ask_rooms
+        )
+
     @classmethod
     def from_env(cls) -> Config:
         secret = _str("SABLE_BOT_SECRET")
@@ -368,6 +449,18 @@ class Config:
             raise ConfigError(
                 "SABLE_BOT_SECRET must be 40-128 characters, matching what Nextcloud "
                 f"accepts for a bot secret (got {len(secret)})."
+            )
+        previous = _str("SABLE_BOT_SECRET_PREVIOUS")
+        if previous and not 40 <= len(previous) <= 128:
+            raise ConfigError(
+                "SABLE_BOT_SECRET_PREVIOUS must be 40-128 characters, the same range "
+                f"Nextcloud accepts for the secret it replaces (got {len(previous)})."
+            )
+        if previous and previous == secret:
+            raise ConfigError(
+                "SABLE_BOT_SECRET_PREVIOUS is the same value as SABLE_BOT_SECRET, so "
+                "nothing has been rotated. It is there to hold the secret you are "
+                "rotating away from; set it to the old value, or unset it."
             )
 
         llm = LLMConfig(
@@ -383,6 +476,7 @@ class Config:
 
         config = cls(
             bot_secret=secret,
+            bot_secret_previous=previous,
             bot_name=_str("SABLE_BOT_NAME", "sable"),
             nextcloud_url=_str("SABLE_NEXTCLOUD_URL").rstrip("/"),
             pin_backend=_bool("SABLE_PIN_BACKEND", True),
@@ -391,11 +485,14 @@ class Config:
             reply_as_reply=_bool("SABLE_REPLY_AS_REPLY", False),
             thinking_reaction=_str("SABLE_THINKING_REACTION"),
             ask_reaction=_str("SABLE_ASK_REACTION", "⁉️"),
+            ask_admins_only=_bool("SABLE_ASK_ADMINS_ONLY", False),
+            ask_rooms=_csv("SABLE_ASK_ROOMS"),
             message_cache=_int("SABLE_MESSAGE_CACHE", 200),
             report_errors=_bool("SABLE_REPORT_ERRORS", True),
             startup_check=_bool("SABLE_STARTUP_CHECK", True),
             unknown_command_hint=_bool("SABLE_UNKNOWN_COMMAND_HINT", True),
             max_message_chars=_int("SABLE_MAX_MESSAGE_CHARS", 30000),
+            max_concurrent_replies=_int("SABLE_MAX_CONCURRENT_REPLIES", 8),
             history_turns=_int("SABLE_HISTORY_TURNS", 12),
             history_ttl=_int("SABLE_HISTORY_TTL", 3600),
             llm=llm,
@@ -464,6 +561,18 @@ class Config:
                 "SABLE_ADMIN_COMMANDS is set but SABLE_ADMIN_USERS is empty, so "
                 "nobody at all could run those commands. Name the administrators, "
                 "or drop the commands from the list to leave them open."
+            )
+        if config.ask_admins_only and not config.admin_users:
+            raise ConfigError(
+                "SABLE_ASK_ADMINS_ONLY is on but SABLE_ADMIN_USERS is empty, so "
+                "nobody at all could use the reaction. Name the administrators, or "
+                "turn it off to leave the reaction open to everyone."
+            )
+        if config.max_concurrent_replies < 0:
+            raise ConfigError(
+                "SABLE_MAX_CONCURRENT_REPLIES cannot be negative. Use 0 for no "
+                "ceiling at all, or a count of model calls to allow at once "
+                f"(got {config.max_concurrent_replies})."
             )
 
         missing = sorted(set(config.hooks) - set(config.hook_tokens))

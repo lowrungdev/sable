@@ -104,7 +104,7 @@ rather than a fork.
 
 | Boundary | What protects it |
 | --- | --- |
-| Nextcloud to `/webhook` | HMAC-SHA256 over the raw body, so a body rewritten after signing fails. Then the backend pin. |
+| Nextcloud to `/webhook` | HMAC-SHA256 over the raw body, so a body rewritten after signing fails. Then a replay check on the random, the backend pin, and the conversation token. |
 | sable to the Talk bot API | The same shared secret, signed per endpoint. Anyone holding it can post as the bot. |
 | Anything to `/notify` | A separate bearer token, compared in constant time. Unset means the route answers 404. |
 | sable to Nextcloud Files | A user account's app password, used only to upload and share attachments. It cannot be scoped, so it reaches everything that user can. |

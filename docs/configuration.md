@@ -56,9 +56,41 @@ Values are trimmed and URLs have trailing slashes stripped, so a stray space or 
 | Variable | Default | Notes |
 | --- | --- | --- |
 | `SABLE_BOT_SECRET` | **required** | The shared secret, identical to the one given to `occ talk:bot:install`. Must be 40–128 characters — Nextcloud enforces the same range. `openssl rand -hex 32` gives a good 64-char value. |
+| `SABLE_BOT_SECRET_PREVIOUS` | *(empty)* | The secret you are rotating away from, accepted on **incoming** webhooks only. Same 40–128 range, and repeating `SABLE_BOT_SECRET` is a startup error. See [below](#rotating-the-bot-secret). |
 | `SABLE_BOT_NAME` | `sable` | Drives mention detection, and should match the name you installed the bot under. `@sable ...` or `sable: ...` at the start of a message triggers the assistant. |
 | `SABLE_NEXTCLOUD_URL` | *(from the webhook header)* | Your Nextcloud base URL, no trailing slash, e.g. `https://cloud.example.org`. Optional for the webhook path, because each signed event carries the server URL in `X-Nextcloud-Talk-Backend`. **Required** if you enable `/notify`, which has no incoming request to learn it from. |
 | `SABLE_PIN_BACKEND` | `true` | Reject webhooks whose backend header is not `SABLE_NEXTCLOUD_URL`. Automatically disabled when no URL is set. Leave it on unless the header genuinely differs from the URL you configured — see the 403 entry in [deployment.md](deployment.md#troubleshooting). |
+
+### Rotating the bot secret
+
+Talk holds exactly one secret per bot install, and there is no command to change it in place. A
+rotation is therefore three steps — `occ talk:bot:uninstall`, install again with the new value,
+restart sable — and every event that arrives between the first and the last fails its signature
+check. Nextcloud retries, but a message somebody is waiting for is late, and a reaction that gets
+dropped is gone.
+
+`SABLE_BOT_SECRET_PREVIOUS` closes that window. Set it to the value you are rotating *away
+from*, put the new value in `SABLE_BOT_SECRET`, and an incoming signature is checked against the
+current secret first and the previous one second:
+
+```ini
+SABLE_BOT_SECRET=<the new value, the one you give occ>
+SABLE_BOT_SECRET_PREVIOUS=<the old value>
+```
+
+Then do the rotation in whatever order suits you, and **clear
+`SABLE_BOT_SECRET_PREVIOUS` afterwards** — a secret kept past its rotation is one that still
+works, which is the thing rotating was meant to stop.
+
+Incoming only. Everything sable *sends* is signed with `SABLE_BOT_SECRET` and never with the
+previous value: by then Nextcloud has been given the new one, so signing an outgoing call with
+the old secret would simply be rejected. That also means the two halves of the window are not
+symmetric — replies fail until Talk and `SABLE_BOT_SECRET` agree, while inbound events keep being
+believed throughout.
+
+Repeating `SABLE_BOT_SECRET` in `SABLE_BOT_SECRET_PREVIOUS` is a startup error. Nothing has been
+rotated, so it can only be a copy-paste, and accepting it would read as a rotation in progress
+that is not.
 
 ## Chat behaviour
 
@@ -69,6 +101,8 @@ Values are trimmed and URLs have trailing slashes stripped, so a stray space or 
 | `SABLE_REPLY_AS_REPLY` | `false` | Post answers as threaded replies to the triggering message instead of plain messages. |
 | `SABLE_THINKING_REACTION` | *(empty)* | A single emoji stuck on the triggering message while the model works, then removed — e.g. `👀`. Empty disables it, which saves two API calls per answer. Failures here are ignored; a reaction is never load-bearing. |
 | `SABLE_ASK_REACTION` | `⁉️` | React to any message with this and the bot sends that message to the model, answering in a reply threaded under it. Empty disables the feature **and** the message cache behind it. Needs `--feature reaction` at install. |
+| `SABLE_ASK_ADMINS_ONLY` | `false` | Restrict that reaction to `SABLE_ADMIN_USERS`. On with an empty `SABLE_ADMIN_USERS` is a startup error, since nobody could then use it. See [below](#restricting-the-reaction-and-the-rooms-it-caches). |
+| `SABLE_ASK_ROOMS` | *(empty)* | Conversations whose messages are cached for that reaction. Same identifiers as `SABLE_AI_ROOMS`. **Empty means every conversation**, unlike `SABLE_AI_ROOMS` where empty means none — see [below](#restricting-the-reaction-and-the-rooms-it-caches). |
 | `SABLE_MESSAGE_CACHE` | `200` | Recent messages remembered per conversation, so a reaction can name one. Expires with `SABLE_HISTORY_TTL`. |
 | `SABLE_UNKNOWN_COMMAND_HINT` | `true` | Reply "I have no `!foo` command" on an unknown command. Turn off in busy rooms where people use other bots with the same prefix. |
 | `SABLE_REPORT_ERRORS` | `true` | Post failures into the conversation as well as logging them; the reply is prefixed with a warning sign. Off means failures are logged only and the room stays quiet. |
@@ -78,6 +112,7 @@ Values are trimmed and URLs have trailing slashes stripped, so a stray space or 
 | `SABLE_NORMAL_COMMANDS` | *(empty)* | The exceptions to `SABLE_ADMIN_COMMANDS=*`. Redundant otherwise, since anything not named as an admin command is open already. |
 | `SABLE_ADMIN_USERS` | *(empty)* | Nextcloud user ids that may run the admin commands, comma-separated. **Required** once `SABLE_ADMIN_COMMANDS` is set, or nobody could run them. |
 | `SABLE_MAX_MESSAGE_CHARS` | `30000` | Replies longer than this are clipped with a `_[truncated]_` marker. Talk hard-rejects anything over 32000 with HTTP 413, which is the real ceiling. |
+| `SABLE_MAX_CONCURRENT_REPLIES` | `8` | Model calls allowed to be in flight at once; `0` lifts the ceiling. A negative value is a startup error. See [below](#how-many-model-calls-at-once). |
 
 ### When does the assistant answer?
 
@@ -129,6 +164,65 @@ cannot read a message back — that needs a user account rather than bot credent
 only answer about messages it saw arrive, and keeps the last `SABLE_MESSAGE_CACHE` of them per
 conversation for the purpose. React to something older, or posted before the bot joined, and it
 says so rather than guessing. Nothing is cached at all when `SABLE_ASK_REACTION` is empty.
+
+### Restricting the reaction, and the rooms it caches
+
+Two settings narrow the feature, for two different reasons.
+
+`SABLE_ASK_ADMINS_ONLY=true` lets only `SABLE_ADMIN_USERS` trigger it. The reaction works on
+anybody's message, which is what makes it useful and also means one participant can forward
+another person's words to your model backend without saying anything in the room — [accepted risk
+7](security.md#accepted-risks). Restricting it to the people you already trust with the admin
+commands is the answer where that matters. Turning it on with an empty `SABLE_ADMIN_USERS` is a
+startup error, the same as `SABLE_ADMIN_COMMANDS` with nobody to run them: it would leave the
+feature usable by no one at all, which is a misconfiguration rather than a thorough way of
+switching it off. To switch it off, empty `SABLE_ASK_REACTION`.
+
+`SABLE_ASK_ROOMS` narrows what is *cached*, which is a memory and data-at-rest question rather
+than a permissions one. While `SABLE_ASK_REACTION` is set, the last `SABLE_MESSAGE_CACHE` messages
+of every conversation the bot is in are held in process memory — [accepted risk
+6](security.md#accepted-risks) — and most rooms will never use the reaction. Naming the ones that
+do stops the rest being cached at all:
+
+```ini
+SABLE_ASK_ROOMS=a1b2c3d4,Ops     # only these two are cached
+SABLE_ASK_ROOMS=*                # every conversation, said explicitly
+SABLE_ASK_ROOMS=                 # every conversation — see below
+```
+
+Identifiers are matched exactly as [`SABLE_AI_ROOMS`](#which-identifier-goes-in-sable_ai_rooms)
+matches its own: conversation token or display name, ignoring case and surrounding space, with
+tokens preferable for the same reason — a moderator renaming a conversation would otherwise
+change what is cached.
+
+**An empty `SABLE_ASK_ROOMS` means every room, where an empty `SABLE_AI_ROOMS` means none.** That
+asymmetry is deliberate, and it is the one thing to carry away from this section. Reading empty as
+"no rooms" would be the more consistent rule, and it would also switch the reaction off in every
+conversation of every existing deployment the moment it upgraded, without saying so — a setting
+nobody had touched changing what the bot does. Consistency is worth less than that. If you want
+the feature off, empty `SABLE_ASK_REACTION`, which stops the caching too.
+
+### How many model calls at once
+
+`SABLE_MAX_CONCURRENT_REPLIES` caps how many completions may be in flight together. Each trigger
+— a mention, an AI room, `!ai`, a reaction — is handled in a background task, and those tasks have
+no ceiling of their own, so a busy conversation or a burst of redelivered webhooks produces as
+many simultaneous model calls as there were events, each holding `SABLE_LLM_TIMEOUT` seconds open.
+
+Nothing upstream applies the brakes. Talk rate-limits the messages sable *sends* with HTTP 429; it
+does not rate-limit the webhooks it sends sable, and there is no rate limiting of our own —
+[accepted risk 9](security.md#accepted-risks). The default of `8` is a ceiling rather than a
+target, and most deployments never reach it.
+
+```ini
+SABLE_MAX_CONCURRENT_REPLIES=1     # a local model that serves one request at a time
+SABLE_MAX_CONCURRENT_REPLIES=32    # a hosted backend with headroom
+SABLE_MAX_CONCURRENT_REPLIES=0     # no ceiling, which is how it behaved before this setting
+```
+
+Beyond the ceiling a trigger waits its turn rather than being dropped, so raising
+`SABLE_LLM_TIMEOUT` and lowering this at the same time can leave somebody waiting a long while.
+`0` means unlimited; a negative value is a startup error, since `0` already says that.
 
 ## Webhooks from other services
 
@@ -368,8 +462,11 @@ turning it off does not advertise that there was ever something there.
 
 ### Guarding the health probe
 
-`GET /healthz` answers with the version, the bot name, the configured model and whether alerting
-is on. It is **open by default**, which is deliberate: a container healthcheck and a Kubernetes
+`GET /healthz` answers with the version, the bot name, the configured model, whether alerting is
+on, and whether Nextcloud was reachable the last time sable called it — `true`, `false`, or
+`null` before anything has been tried. The status stays `ok` and the code stays 200 even when
+Nextcloud is down: a liveness probe that fails because a dependency failed gets a healthy process
+restarted for no reason. Read the field and decide for yourself. It is **open by default**, which is deliberate: a container healthcheck and a Kubernetes
 probe both call it without credentials, and liveness that needs a secret is liveness that fails
 for the wrong reasons.
 
@@ -500,6 +597,8 @@ SABLE_LOG_LEVEL=INFO
 | --- | --- |
 | `SABLE_BOT_SECRET is required` | Set it to the value you gave `occ talk:bot:install`. |
 | `SABLE_BOT_SECRET must be 40-128 characters` | Nextcloud's own limit. `openssl rand -hex 32`. |
+| `SABLE_BOT_SECRET_PREVIOUS must be 40-128 characters` | The same limit, for the secret being rotated away from. |
+| `SABLE_BOT_SECRET_PREVIOUS is the same value as SABLE_BOT_SECRET` | Nothing has been rotated. Set it to the *old* value, or unset it — see [rotating the bot secret](#rotating-the-bot-secret). |
 | `SABLE_NEXTCLOUD_URL is required when SABLE_NOTIFY_TOKEN is set` | Set the URL, or drop the notify token. |
 | `… must be a boolean` / `… must be an integer` / `… must be a number` | A typo in the value; see [value formats](#value-formats). |
 | `… is not valid JSON` / `must be a JSON object` | `SABLE_LLM_EXTRA_BODY` needs an object: `{"top_k": 40}`. Quote it in a shell. |
@@ -509,6 +608,8 @@ SABLE_LOG_LEVEL=INFO
 | `every hook needs its own token` | Add `SABLE_HOOK_TOKEN_<NAME>` for each hook in `SABLE_HOOKS`. |
 | `has no matching entry in SABLE_HOOKS` | A `SABLE_HOOK_TOKEN_<NAME>` or `SABLE_HOOK_TEMPLATE_<NAME>` for a hook that is not in `SABLE_HOOKS`. |
 | `SABLE_ADMIN_COMMANDS is set but SABLE_ADMIN_USERS is empty` | Name the administrators, or drop the commands from the list to leave them open. |
+| `SABLE_ASK_ADMINS_ONLY is on but SABLE_ADMIN_USERS is empty` | The same shape: name the administrators, or turn it off to leave the reaction open. To disable the reaction, empty `SABLE_ASK_REACTION`. |
+| `SABLE_MAX_CONCURRENT_REPLIES cannot be negative` | `0` is already how you ask for no ceiling. |
 | `so who may run them is not decided` | A command appears in both `SABLE_ADMIN_COMMANDS` and `SABLE_NORMAL_COMMANDS`. Pick one list. |
 | `SABLE_NORMAL_COMMANDS cannot be '*'` | Everything not named as an admin command is open already; use the list for the exceptions to `SABLE_ADMIN_COMMANDS=*`. |
 | `is not an IP address or a CIDR range` | A `SABLE_TRUSTED_PROXIES` entry is a hostname, a typo, or a range with host bits set (`172.17.0.0/16`, not `172.17.0.5/16`). |

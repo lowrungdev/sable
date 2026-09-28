@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
+from typing import Iterable
 
 #: Headers Nextcloud sets on an incoming webhook.
 HEADER_SIGNATURE = "X-Nextcloud-Talk-Signature"
@@ -40,6 +41,25 @@ def verify(random: str, signature: str, body: bytes, secret: str) -> bool:
     if not random or not signature:
         return False
     return hmac.compare_digest(digest(random, body, secret), signature.strip().lower())
+
+
+def verify_any(random: str, signature: str, body: bytes, candidates: Iterable[str]) -> bool:
+    """Verify an incoming signature against several secrets, stopping at the first.
+
+    For the rotation window: Talk holds one secret per bot install, so replacing
+    it means a reinstall, and events signed with the old value keep arriving for
+    as long as it takes. ``Config.inbound_secrets`` is that list, current secret
+    first.
+
+    Incoming only. :func:`sign` still takes one secret, and everything sable
+    sends is signed with the current one - Talk has been given the new value by
+    then, so a call signed with the old one would be refused.
+
+    Every comparison goes through :func:`verify`, so each is constant-time in the
+    digest. Trying a second secret costs a second HMAC of the body, which is why
+    the list is short and ordered: a rotation that is over leaves one entry.
+    """
+    return any(verify(random, signature, body, secret) for secret in candidates)
 
 
 def sign(data: str, secret: str) -> tuple[str, str]:

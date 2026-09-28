@@ -59,8 +59,12 @@ class Context:
         SABLE_ADMIN_COMMANDS can express - check it and raise CommandError.
         Commands named in SABLE_ADMIN_COMMANDS are already gated before the
         handler runs.
+
+        Asks the bot rather than the config, so a bot actor is refused here too:
+        an actor typed ``Application`` with an id like ``users/maser`` does
+        resolve an administrator's user id, and this is what !help filters on.
         """
-        return self.bot.config.is_admin_user(self.event.actor.user_id)
+        return self.bot.is_admin_actor(self.event)
 
 
 Handler = Callable[[Context], Awaitable[str | None]]
