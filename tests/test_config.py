@@ -395,3 +395,32 @@ def test_an_entry_with_a_space_in_it_is_reported_as_a_display_name(load: Load) -
     config = load(SABLE_IGNORE_USERS="alice,Alice Anderson,users/bob")
     assert config.fragile_ignore_users == ["Alice Anderson"]
     assert config.is_ignored("users/carol", "Alice Anderson")
+
+
+# --------------------------------------------------------------------------- #
+# Time, and the request body
+# --------------------------------------------------------------------------- #
+
+
+def test_a_time_zone_is_checked_at_startup(load: Load) -> None:
+    with pytest.raises(ConfigError, match="not an IANA time zone"):
+        load(SABLE_TIMEZONE="EST5EDT/nope")
+
+
+def test_a_real_time_zone_is_kept(load: Load) -> None:
+    assert load(SABLE_TIMEZONE="America/New_York").timezone == "America/New_York"
+
+
+def test_no_time_zone_means_the_host_clock(load: Load) -> None:
+    assert load().timezone == ""
+
+
+def test_extra_body_may_not_override_the_fields_sable_builds(load: Load) -> None:
+    # stream in particular: sable would then be handed SSE and fail to parse it.
+    with pytest.raises(ConfigError, match="must not set stream"):
+        load(SABLE_LLM_EXTRA_BODY='{"stream": true}')
+
+
+def test_extra_body_still_takes_provider_specific_fields(load: Load) -> None:
+    config = load(SABLE_LLM_EXTRA_BODY='{"tool_ids": ["server:mcp:1"], "top_k": 40}')
+    assert config.llm.extra_body == {"tool_ids": ["server:mcp:1"], "top_k": 40}

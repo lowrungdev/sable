@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 import re
 from collections import deque
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -26,6 +28,18 @@ from .state import ConnectionState
 from .talk import TalkClient, TalkError
 
 log = logging.getLogger(__name__)
+
+
+def now(timezone: str = "") -> str:
+    """The current time, written for a model rather than for a log.
+
+    A model has no clock. Asked what something costs *now*, it answers from
+    whenever its training data stopped - confidently, and with a figure that can
+    be years stale. One line of prompt is the whole fix.
+    """
+    moment = datetime.now(ZoneInfo(timezone)) if timezone else datetime.now().astimezone()
+    label = timezone or moment.tzname() or "local time"
+    return f"{moment:%A %d %B %Y, %H:%M} ({label})"
 
 #: How many recently handled events to remember, so a redelivered webhook does
 #: not produce a second reply.
@@ -514,6 +528,7 @@ class Bot:
         prompt = self.config.llm.system_prompt
         if event.room_name:
             prompt += f'\nThe conversation is called "{event.room_name}".'
+        prompt += f"\nThe current date and time is {now(self.config.timezone)}."
         return prompt
 
     @staticmethod

@@ -270,6 +270,12 @@ services:
       # debug prefix and mention matching.
       # SABLE_LOG_LEVEL: "INFO"
 
+      # The zone the assistant answers in, as an IANA name. Empty follows the
+      # container clock, which is usually UTC. The model is told the date either
+      # way; without it, questions about "right now" are answered from training
+      # data.
+      # SABLE_TIMEZONE: "America/New_York"
+
     ports:
       # Published to localhost only: put a TLS-terminating reverse proxy in
       # front of this. Nextcloud will not send webhooks to plain HTTP unless an

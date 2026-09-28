@@ -509,6 +509,20 @@ anything, so it would fail silently; sable names it and exits 2 instead.
 so the peer address belongs to that network and the default ignores its headers. Name the subnet
 — `docker network inspect <name>` prints it — or the proxy's own address.
 
+## Time
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `SABLE_TIMEZONE` | *(the host clock)* | An IANA zone name such as `America/New_York`. A wrong name is a startup error rather than a silent fallback. |
+
+The system prompt always ends with the current date and time, whichever zone that
+resolves to. It is one line, and it prevents a whole category of confident wrongness: a
+model with no clock answers "what is gold worth right now" from whatever was true when its
+training data stopped, and has no way to notice that the figure is years old.
+
+In a container the host clock is usually UTC, so set this if the room cares about local
+working hours.
+
 ## Process
 
 | Variable | Default | Notes |

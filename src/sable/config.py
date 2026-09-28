@@ -13,6 +13,7 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 #: A Talk conversation token, as it appears at the end of the conversation's
 #: URL. Talk's own routes only match lowercase, so anything else can never
@@ -277,6 +278,13 @@ class Config:
         default_factory=lambda: list(DEFAULT_TRUSTED_PROXIES)
     )
 
+    # --- time ---------------------------------------------------------------
+    #: IANA name for the zone the bot answers in, e.g. ``America/New_York``.
+    #: Empty follows the host clock. The model is told the date either way: a
+    #: model that does not know today will answer "what is it now" with whatever
+    #: was true when it was trained, confidently and wrongly.
+    timezone: str = ""
+
     # --- process -----------------------------------------------------------
     host: str = "0.0.0.0"
     port: int = 8080
@@ -515,6 +523,7 @@ class Config:
             api_docs=_bool("SABLE_API_DOCS", False),
             trusted_proxies=_csv_or("SABLE_TRUSTED_PROXIES", DEFAULT_TRUSTED_PROXIES),
             health_token=_str("SABLE_HEALTH_TOKEN"),
+            timezone=_str("SABLE_TIMEZONE"),
             host=_str("SABLE_HOST", "0.0.0.0"),
             port=_int("SABLE_PORT", 8080),
             log_level=_str("SABLE_LOG_LEVEL", "INFO").upper(),
@@ -612,6 +621,22 @@ class Config:
             raise ConfigError(
                 "SABLE_NEXTCLOUD_URL is required when SABLE_HOOKS is set: a webhook "
                 "from another service carries no Nextcloud address to reply to."
+            )
+        if config.timezone:
+            try:
+                ZoneInfo(config.timezone)
+            except (ZoneInfoNotFoundError, ValueError) as exc:
+                raise ConfigError(
+                    f"SABLE_TIMEZONE={config.timezone!r} is not an IANA time zone "
+                    f"name such as America/New_York or Europe/Berlin ({exc})"
+                ) from exc
+        forbidden = sorted({"stream", "messages"} & set(config.llm.extra_body))
+        if forbidden:
+            raise ConfigError(
+                "SABLE_LLM_EXTRA_BODY must not set "
+                + ", ".join(forbidden)
+                + ": sable builds those itself, and overriding them breaks the "
+                "reply it gets back"
             )
         if config.max_hook_bytes <= 0:
             raise ConfigError("SABLE_MAX_HOOK_BYTES must be greater than zero")

@@ -12,6 +12,27 @@ Format: `## <version>`, optionally followed by a date. Anything until the next
 
 ## Unreleased
 
+- **The model is told what day it is.** The system prompt now ends with the
+  current date, time and zone, set by `SABLE_TIMEZONE` or the host clock. This
+  is not cosmetic: asked what gold was worth "right now", a model with no clock
+  answered with the 1933 statutory price and a figure from two years ago, and
+  had no way to notice either was stale. The same question with a date in it
+  came back correct to the dollar. A zone name that is not an IANA zone is a
+  startup error rather than a silent fall back to UTC.
+- **A tool call nobody executed is no longer posted as an answer.** A backend
+  that offers a model tools but does not run them hands the call straight back,
+  and the reply then contains no answer at all - only `tool_calls`, and often a
+  page of `reasoning_content` listing every tool the model considered. sable was
+  posting that reasoning to the room and storing it in conversation history,
+  where it taught the model to do the same thing next turn. Now it raises an
+  error naming the tool that went unanswered, which is usually enough to find
+  the misconfiguration at the backend. Reasoning still stands in for an
+  ordinary empty answer, which is what that fallback was for.
+- Text containing tool-call markup - a model writing `<|tool_call>` rather than
+  calling one - is refused for the same reason, rather than posted verbatim.
+- `SABLE_LLM_EXTRA_BODY` refuses `stream` and `messages`. Both are built by
+  sable, and overriding `stream` in particular left it parsing an event stream
+  as JSON.
 - **A trailing newline in a conversation token returned 500.** `TOKEN_RE` ended in
   `$`, which in Python also matches immediately before a final newline, so
   `{"room": "abcd1234"}` plus one cleared the boundary check on `POST /notify`,
