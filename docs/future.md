@@ -17,11 +17,16 @@ swap the class for one backed by Redis or SQLite; it has three methods and `Bot`
 constructor argument, so nothing else changes. Worth doing when people start noticing that a
 deploy loses context mid-conversation.
 
-**One process only.** History, the message cache and the redelivery cache all live in memory, so
-running two workers would split them: replies would forget context depending on which worker
-answered, and a redelivered webhook could be handled twice. Moving that state into a shared
-store makes horizontal scaling real. For a bot handling a few webhooks a minute that is a long
-way off, so the constraint is documented rather than treated as a bug.
+**One process only.** History, the message cache, the redelivery cache and the replay cache all
+live in memory, so running two workers would split them: replies would forget context depending
+on which worker answered, and a redelivered webhook could be handled twice. The replay cache is
+the one that costs more than context — a webhook whose random one worker has already refused
+is new to the other, so the 401 becomes a coin toss and the protection is only as good as the
+load balancer's stickiness. Moving that state into a shared store makes horizontal scaling real.
+For a bot handling a few webhooks a minute that is a long way off, so the constraint is
+documented rather than treated as a bug. It is also the reason not to reach for two workers as a
+throughput fix: `SABLE_MAX_CONCURRENT_REPLIES` raises the ceiling within one process without
+splitting anything.
 
 **No rate limiting on `/notify`.** Nothing stops a misconfigured alertmanager posting a thousand
 messages. Talk will start returning 429 and the bot will log failures, but the noise has already
@@ -118,8 +123,8 @@ still contain `tests/` and `.forgejo/`.
 ## Operations
 
 There are no metrics. `/healthz` reports liveness and a little configuration, optionally behind
-`SABLE_HEALTH_TOKEN`; there is no `/metrics` endpoint. A Prometheus endpoint counting commands, model calls, latency and failures is a
-contained addition if anyone wants dashboards.
+`SABLE_HEALTH_TOKEN`; there is no `/metrics` endpoint. A Prometheus endpoint counting commands,
+model calls, latency and failures is a contained addition if anyone wants dashboards.
 
 There is no integration test. The suite covers everything without a network, which is why it is
 fast and reliable, but nothing exercises a real Nextcloud. A compose-based test against a
@@ -127,8 +132,12 @@ throwaway instance would catch API drift that mocks cannot.
 
 Logs are the only audit trail; see [security.md](security.md#accepted-risks).
 
-`sable --check` prints less than the startup block does — it predates the attachment and ignore
-settings, and has not been brought back into line.
+`sable --check` prints less than the startup block does, and the gap keeps widening: seven lines
+against the block's nineteen. It has never named attachments, hooks or the ignore list, and now
+also misses the concurrency ceiling, the cached rooms, the API docs, the health check, the proxy
+trust and the backend pin — most of the settings somebody would run `--check` to confirm before
+deploying. Either it grows to match the block or it stops claiming to show the resolved
+configuration; feeding both from the same summary helpers would keep them from drifting again.
 
 ## Decisions worth revisiting
 
