@@ -280,6 +280,50 @@ async def test_notify_reports_an_unreachable_nextcloud_as_502() -> None:
     assert response.status_code == 502
 
 
+# --------------------------------------------------------------------------- #
+# The HTTP surface that is not the three endpoints
+# --------------------------------------------------------------------------- #
+
+
+async def test_the_schema_and_its_doc_pages_are_off_by_default() -> None:
+    """They describe every route and body shape to whoever can reach us."""
+    async for client in client_for(make_config()):
+        for path in ["/openapi.json", "/docs", "/redoc"]:
+            assert (await client.get(path)).status_code == 404, path
+
+
+async def test_the_schema_can_be_turned_on() -> None:
+    async for client in client_for(make_config(api_docs=True)):
+        for path in ["/openapi.json", "/docs", "/redoc"]:
+            assert (await client.get(path)).status_code == 200, path
+
+
+async def test_healthz_is_open_when_no_token_is_set() -> None:
+    """A container healthcheck and a kubelet probe both call it bare."""
+    async for client in client_for(make_config()):
+        response = await client.get("/healthz")
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+
+
+async def test_healthz_needs_its_token_once_one_is_set() -> None:
+    async for client in client_for(make_config(health_token="h" * 20)):
+        bare = await client.get("/healthz")
+        wrong = await client.get("/healthz", headers={"X-Health-Token": "nope"})
+        right = await client.get("/healthz", headers={"X-Health-Token": "h" * 20})
+    assert bare.status_code == 401
+    assert wrong.status_code == 401
+    assert "X-Health-Token" in wrong.json()["detail"]
+    assert right.status_code == 200
+    assert right.json()["version"]
+
+
+async def test_a_guarded_healthz_tolerates_surrounding_space() -> None:
+    async for client in client_for(make_config(health_token="h" * 20)):
+        response = await client.get("/healthz", headers={"X-Health-Token": " " + "h" * 20 + " "})
+    assert response.status_code == 200
+
+
 async def test_startup_and_shutdown_are_logged_with_the_configuration(caplog) -> None:
     config = make_config(notify_token="t", notify_rooms={"alerts": ROOM})
     with caplog.at_level(logging.INFO):
@@ -293,7 +337,62 @@ async def test_startup_and_shutdown_are_logged_with_the_configuration(caplog) ->
     assert f"nextcloud:      {BACKEND}" in text
     assert "some-model at https://api.openai.com/v1" in text
     assert "alerting:       enabled, aliases: alerts" in text
-    assert "backend pin:    on" in text
+    assert f"backend pin:    on, replies only to {BACKEND}" in text
+    assert "admin commands: (none" in text
+    assert "api docs:       disabled" in text
+    assert "health check:   GET /healthz (open)" in text
+    assert "proxy trust:    127.0.0.1, ::1" in text
+
+
+async def test_trusting_every_proxy_is_called_out_at_startup(caplog) -> None:
+    with caplog.at_level(logging.INFO):
+        async for _client in client_for(make_config(trusted_proxies=["*"])):
+            pass
+    assert "proxy trust:    * - ANY client" in caplog.text
+
+
+async def test_trusting_no_proxy_is_called_out_at_startup(caplog) -> None:
+    with caplog.at_level(logging.INFO):
+        async for _client in client_for(make_config(trusted_proxies=[])):
+            pass
+    assert "proxy trust:    nobody" in caplog.text
+
+
+async def test_the_guarded_surface_is_named_at_startup(caplog) -> None:
+    config = make_config(api_docs=True, health_token="h" * 20)
+    with caplog.at_level(logging.INFO):
+        async for _client in client_for(config):
+            pass
+    assert "api docs:       /docs, /redoc, /openapi.json" in caplog.text
+    assert "health check:   GET /healthz (X-Health-Token required)" in caplog.text
+
+
+async def test_an_unpinned_backend_says_so_at_startup(caplog) -> None:
+    """Off is the state worth spelling out: with nothing to pin against, the
+    unsigned backend header on a replayed webhook chooses where replies go."""
+    config = make_config(nextcloud_url="", pin_backend=False)
+    with caplog.at_level(logging.INFO):
+        async for _client in client_for(config):
+            pass
+    assert "backend pin:    OFF (no SABLE_NEXTCLOUD_URL)" in caplog.text
+
+
+async def test_turning_the_pin_off_by_hand_says_which_it_was(caplog) -> None:
+    config = make_config(pin_backend=False)
+    with caplog.at_level(logging.INFO):
+        async for _client in client_for(config):
+            pass
+    assert "backend pin:    OFF (SABLE_PIN_BACKEND is off)" in caplog.text
+
+
+async def test_the_admin_commands_are_named_at_startup(caplog) -> None:
+    config = make_config(
+        admin_commands=["*"], normal_commands=["help", "ping"], admin_users=["maser"]
+    )
+    with caplog.at_level(logging.INFO):
+        async for _client in client_for(config):
+            pass
+    assert "admin commands: *, except help, ping - only for maser" in caplog.text
 
 
 @respx.mock

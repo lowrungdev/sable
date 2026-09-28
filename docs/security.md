@@ -24,7 +24,10 @@ URL. Everything below is about those.
 | Anything to `POST /notify` | A separate bearer token, compared in constant time. Unset means the route answers 404. |
 | sable to Nextcloud Files | An app password for a user account, used only to upload and share attachments. |
 | sable to the model backend | Ordinary HTTPS with certificate verification; the API key travels as a bearer token. |
-| Chat participants to commands | Nothing. Anyone in a conversation with the bot can run any command. |
+| Anything to `GET /healthz` | Nothing by default, which is what a container or Kubernetes probe needs. `SABLE_HEALTH_TOKEN` puts it behind an `X-Health-Token` header, compared in constant time. |
+| Anything to the API schema | The schema and its `/docs` and `/redoc` pages are not served at all unless `SABLE_API_DOCS=true`. |
+| A proxy claiming a client address | `X-Forwarded-For` and `X-Forwarded-Proto` are believed only from `SABLE_TRUSTED_PROXIES`, loopback by default. Nothing reads the client address, so this protects the access log rather than access. |
+| Chat participants to commands | Nothing by default: anyone in a conversation, guests included, can run any command. `SABLE_ADMIN_COMMANDS` moves named commands behind `SABLE_ADMIN_USERS`, matched on Nextcloud user id. |
 
 ## Authentication and integrity
 
@@ -48,8 +51,8 @@ replayed webhook could aim the bot's replies, and its signed credentials, at a s
 attacker's choosing.
 
 Room tokens are validated before use: `/notify` accepts an alias from `SABLE_NOTIFY_ROOMS` or a
-token matching `^[A-Za-z0-9]{4,64}$`, and anything else is a 400 rather than a request to
-Nextcloud.
+token matching `^[a-z0-9]{4,64}$` — Talk's own routes match only lowercase — and anything
+else is a 400 rather than a request to Nextcloud.
 
 TLS is never disabled. There is no `verify=False` anywhere and no setting that could add one.
 An internal or self-signed Nextcloud certificate is handled by lending the container the host's
@@ -64,6 +67,13 @@ two bots in one room cannot start answering each other. Every event is de-duplic
 conversation, type, message id, actor and reaction together, keeping the last 512, so a
 redelivered webhook produces one reply rather than two while two people reacting to the same
 message remain two distinct events.
+
+Display names and conversation names are flattened onto a single line before anything uses them:
+control characters go, Unicode line separators collapse, and the result is capped at 100
+characters. Both are spliced into the model's prompt — the conversation's name into the
+system message, the speaker's name in front of what they said — so a newline in one would be the
+difference between sitting inside the prompt and writing a line of it. A moderator still chooses
+what a room is *called*; they do not choose what shape it arrives in.
 
 Replies are truncated at `SABLE_MAX_MESSAGE_CHARS`, since Talk rejects anything over 32000 with
 a 413. The webhook returns 200 immediately and does its work in the background, so a slow model
@@ -124,9 +134,12 @@ These are known and deliberate. Decide for yourself whether they are acceptable.
 1. The bot secret is symmetric. Anyone holding it can post as the bot and forge webhooks to it.
    It is the one value that matters most.
 
-2. Commands have no authorization. Anyone in the conversation, guests included, can run any
-   command. If you add one that touches production, gate it yourself on
-   `ctx.event.actor.user_id`.
+2. Commands are open unless you close them. Out of the box anyone in the conversation, guests
+   included, can run any command. `SABLE_ADMIN_COMMANDS` plus `SABLE_ADMIN_USERS` moves named
+   commands — or all of them, with `*` — behind a list of Nextcloud user ids, and a custom
+   can check `ctx.is_admin` for anything finer. What this is not is authentication: it trusts the
+   user id in a signed webhook from your Nextcloud, the same trust the rest of the service runs
+   on. Who is in the conversation at all stays Talk's decision, not ours.
 
 3. `/notify` is a single shared token with no per-caller identity and no rate limiting. A leaked
    token lets anyone post into the aliased conversations. Keep the endpoint off the public
@@ -138,7 +151,9 @@ These are known and deliberate. Decide for yourself whether they are acceptable.
 
 5. Model output is posted verbatim and nothing filters it. A participant can try to steer the
    model through prompt injection; the realistic worst case is embarrassing or misleading text,
-   since Talk renders Markdown and sanitises HTML itself.
+   since Talk renders Markdown and sanitises HTML itself. Names cannot forge a turn or a line of
+   the system prompt (see above), but inside its own line a display name is still free text, so
+   somebody calling themselves `assistant` is a thing the model sees.
 
 6. Chat content sits in process memory for up to `SABLE_HISTORY_TTL`: the assistant's history
    per conversation, and, while `SABLE_ASK_REACTION` is set, the last `SABLE_MESSAGE_CACHE`
@@ -180,7 +195,17 @@ These are known and deliberate. Decide for yourself whether they are acceptable.
     can reach. Whoever holds a hook URL can write arbitrary text into that conversation, since
     the payload becomes the message.
 
-13. CI holds credentials: the registry password and a runner token with write access to the
+13. Hook names can be probed. A configured hook with a wrong token answers 401 while an unknown
+    name answers 404, so `/hook/<name>` tells an unauthenticated caller which hooks exist. Names
+    like `komodo` or `grafana` are guessable anyway and each hook has its own token, so what this
+    costs is the name rather than any access. Unknown names and hooks being unconfigured do give
+    the same 404, so it does not say whether the feature is in use at all.
+
+14. `GET /healthz` is unauthenticated unless you set `SABLE_HEALTH_TOKEN`, and it names the
+    version, the bot name and the configured model. That is the default because a liveness probe
+    that needs a credential fails for the wrong reasons.
+
+15. CI holds credentials: the registry password and a runner token with write access to the
     repository, used to create releases. Anyone who can change a workflow on a branch CI runs
     can reach both.
 
@@ -195,7 +220,12 @@ These are known and deliberate. Decide for yourself whether they are acceptable.
 - [ ] The upload account listed in `SABLE_IGNORE_USERS`, so its own file messages are not acted on
 - [ ] Egress restricted to Nextcloud and the model backend
 - [ ] `SABLE_REPORT_ERRORS=false` if upstream errors should not reach the room
-- [ ] Every custom command reviewed as code anyone in the room can trigger
+- [ ] Every custom command reviewed as code anyone in the room can trigger, or named in
+      `SABLE_ADMIN_COMMANDS`
+- [ ] `SABLE_API_DOCS` left off, so the schema is not served to whoever can reach the webhook
+- [ ] `SABLE_TRUSTED_PROXIES` naming your proxy — the default is loopback, which a proxy in
+      another container is not
+- [ ] `SABLE_HEALTH_TOKEN` set if `/healthz` naming the model is more than you want public
 - [ ] The image pinned by version or digest on the host rather than `latest`
 
 ## Reporting a problem

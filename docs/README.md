@@ -5,8 +5,11 @@ official webhook Bot API.
 
 It runs commands (`!help`, `!ping`, `!ai` and whatever you add), answers questions through any
 OpenAI-compatible model backend, and relays alerts from other systems into a conversation with
-`POST /notify`, optionally with a file attached. Every webhook is HMAC-SHA256 verified before
-anything else happens, and every call back into Talk is signed the way the bot API expects.
+`POST /notify`, optionally with a file attached, or `POST /hook/{name}` for services that cannot
+speak that shape. Every webhook is HMAC-SHA256 verified before anything else happens, every
+alerting call needs its own token, and every call back into Talk is signed the way the bot API
+expects. Commands are open to everyone in the conversation unless you name them in
+`SABLE_ADMIN_COMMANDS`.
 
 ## Documentation
 
@@ -25,8 +28,9 @@ anything else happens, and every call back into Talk is signed the way the bot A
 ```
 Nextcloud Talk ──POST /webhook (signed)──▶ sable ──┬──▶ command handler ──┐
                                                    │                      │
-                    Prometheus/CI ──POST /notify──▶ ├──▶ model backend ────┤
-                                                   │   (chat completions) │
+                   Prometheus/CI ──POST /notify──▶ ┼──▶ model backend ────┤
+          Komodo/Grafana ──POST /hook/{name}──▶ ───┤   (chat completions) │
+                                                   │                      │
                     ◀──── POST /bot/{token}/message (signed) ─────────────┘
 ```
 
@@ -116,8 +120,9 @@ written; anything else is logged and reported as a crash. `ctx` carries the pars
 raw argument string, a shell-split `argv`, and `ctx.bot` for `answer_with_llm`, `history` and
 `reply`.
 
-Bear in mind that anyone in the conversation can run any command. If yours touches something
-that matters, check `ctx.event.actor.user_id` yourself.
+Bear in mind that by default anyone in the conversation can run any command. If yours touches
+something that matters, name it in `SABLE_ADMIN_COMMANDS` and the people allowed to run it in
+`SABLE_ADMIN_USERS`; for anything finer, `ctx.is_admin` says whether the sender is one of them.
 
 ## Development
 
@@ -131,8 +136,8 @@ disagree. Without uv, `pip install -e '.[dev]'` still works; you just get whatev
 at that moment rather than the locked set.
 
 The suite covers the signature scheme in both directions, event parsing, routing, the model
-client and the file client against mocked backends, and both HTTP endpoints end to end. It
-needs no network, no Nextcloud and no model.
+client and the file client against mocked backends, and all three HTTP endpoints end to end,
+`/webhook`, `/notify` and `/hook/{name}`. It needs no network, no Nextcloud and no model.
 
 The code is small enough to read in a sitting:
 [signing.py](../src/sable/signing.py) for the HMAC in both directions,

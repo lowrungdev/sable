@@ -28,11 +28,13 @@ messages. Talk will start returning 429 and the bot will log failures, but the n
 happened. A token bucket per room, or rate limiting at the proxy, fixes it. Something upstream
 will misbehave eventually.
 
-**No authorization on commands.** Any participant can run any command, which is fine for `!ping`
-and not fine for a command that deploys something. A decorator checking
-`ctx.event.actor.user_id` against an allowlist, applied per command rather than globally, is the
-shape — the point is that most commands stay open. Do it when you add the first command with
-side effects outside the chat.
+**Command authorization is global, not per room.** `SABLE_ADMIN_COMMANDS` and `SABLE_ADMIN_USERS`
+say who may run what across every conversation the bot is in. What they cannot say is "maser may
+deploy, but only from the ops room", or defer to Talk's own notion of a moderator — which is
+the thing an operator reaches for next. The participant type already arrives on the event
+(`event.actor.participant_type`), so a rule expressed against it is a small change; it is not
+there yet because it is one more thing to get wrong for a bot whose admin list is usually two
+names. Revisit when the first per-room rule is actually wanted.
 
 ## Talk features not yet used
 
@@ -113,8 +115,8 @@ still contain `tests/` and `.forgejo/`.
 
 ## Operations
 
-There are no metrics. `/healthz` reports liveness and configuration; there is no `/metrics`
-endpoint. A Prometheus endpoint counting commands, model calls, latency and failures is a
+There are no metrics. `/healthz` reports liveness and a little configuration, optionally behind
+`SABLE_HEALTH_TOKEN`; there is no `/metrics` endpoint. A Prometheus endpoint counting commands, model calls, latency and failures is a
 contained addition if anyone wants dashboards.
 
 There is no integration test. The suite covers everything without a network, which is why it is

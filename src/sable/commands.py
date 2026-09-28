@@ -10,6 +10,11 @@ Adding a command is one decorator::
 
 Return a Markdown string to reply, or ``None`` to stay silent. Raising
 :class:`CommandError` replies with the message instead of logging a traceback.
+
+Every command is open to everyone in the conversation unless it is named in
+``SABLE_ADMIN_COMMANDS``, which is checked before the handler runs. For anything
+that list cannot express, ``ctx.is_admin`` says whether the sender is one of the
+configured administrators.
 """
 
 from __future__ import annotations
@@ -45,6 +50,17 @@ class Context:
     @property
     def sender(self) -> str:
         return self.event.actor.name or self.event.actor.id
+
+    @property
+    def is_admin(self) -> bool:
+        """May the sender run the admin commands?
+
+        Here for custom commands that need to be narrower than
+        SABLE_ADMIN_COMMANDS can express - check it and raise CommandError.
+        Commands named in SABLE_ADMIN_COMMANDS are already gated before the
+        handler runs.
+        """
+        return self.bot.config.is_admin_user(self.event.actor.user_id)
 
 
 Handler = Callable[[Context], Awaitable[str | None]]
@@ -137,15 +153,30 @@ async def help_command(ctx: Context) -> str:
             lines.append(f"Usage: `{prefix}{command.usage}`")
         if command.aliases:
             lines.append("Aliases: " + ", ".join(f"`{prefix}{a}`" for a in command.aliases))
+        if ctx.bot.admin_only(command):
+            lines.append("_Administrators only._")
         return "\n".join(lines)
 
-    lines = [f"- `{prefix}{c.usage or c.name}` - {c.help}" for c in ctx.bot.registry.visible()]
+    def can_run(command: Command) -> bool:
+        return ctx.is_admin or not ctx.bot.admin_only(command)
+
+    # A command somebody cannot run is noise in their list. Nothing is kept
+    # secret by leaving it out: running one says plainly who it is for.
+    lines = [
+        f"- `{prefix}{c.usage or c.name}` - {c.help}"
+        + (" _(admin)_" if ctx.bot.admin_only(c) else "")
+        for c in ctx.bot.registry.visible()
+        if can_run(c)
+    ]
     body = "\n".join(lines)
     if ctx.bot.llm_enabled:
-        body += (
-            f"\n\nMention me (`@{ctx.bot.config.bot_name}`) or use "
-            f"`{prefix}ai <question>` to talk to the model."
-        )
+        # A mention reaches the model whatever SABLE_ADMIN_COMMANDS says: only
+        # the command is gated, so only the command is conditional here.
+        ai = ctx.bot.registry.get("ai")
+        ways = f"Mention me (`@{ctx.bot.config.bot_name}`)"
+        if ai is not None and can_run(ai):
+            ways += f" or use `{prefix}ai <question>`"
+        body += f"\n\n{ways} to talk to the model."
     return f"**Commands**\n{body}"
 
 

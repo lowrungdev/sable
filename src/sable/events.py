@@ -23,6 +23,18 @@ PLACEHOLDER_RE = re.compile(r"\{([a-zA-Z0-9_-]+)\}")
 #: Parameter types rendered with an ``@`` prefix.
 MENTION_TYPES = {"user", "call", "guest", "user-group", "group", "federated_user", "email"}
 
+#: Control characters, stripped from every name before anything sees it. A
+#: display name and a conversation name both get spliced into the model's
+#: prompt, and a newline there is the difference between sitting inside the
+#: prompt and writing a line of it. The line separators Unicode adds on top of
+#: these - U+0085, U+2028, U+2029 - are whitespace to str.split, which is what
+#: collapses them.
+CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+#: Longer than any name a person has, short enough that nobody can crowd out the
+#: prompt their name sits in.
+NAME_LIMIT = 100
+
 
 class EventError(ValueError):
     """Raised when a payload is not a shape we understand."""
@@ -93,12 +105,17 @@ def render_message(message: str, parameters: dict) -> str:
     return PLACEHOLDER_RE.sub(replace, message)
 
 
+def clean_name(value: str) -> str:
+    """A display name or conversation name, flattened onto a single line."""
+    return " ".join(CONTROL_RE.sub(" ", value).split())[:NAME_LIMIT].strip()
+
+
 def _actor(payload: dict) -> Actor:
     raw = payload.get("actor") or {}
     return Actor(
         type=str(raw.get("type", "")),
         id=str(raw.get("id", "")),
-        name=str(raw.get("name", "")),
+        name=clean_name(str(raw.get("name", ""))),
         participant_type=str(raw.get("talkParticipantType", "")),
     )
 
@@ -128,7 +145,7 @@ def parse_event(payload: dict, backend: str = "") -> TalkEvent:
     # Join/Leave carry the conversation in 'object'; everything else in 'target'.
     room = target if target else obj
     room_token = str(room.get("id", ""))
-    room_name = str(room.get("name", ""))
+    room_name = clean_name(str(room.get("name", "")))
     if not room_token:
         raise EventError(f"no conversation token in a {event_type} event")
 

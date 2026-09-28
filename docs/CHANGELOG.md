@@ -10,6 +10,69 @@ is not worth publishing.
 Format: `## <version>`, optionally followed by a date. Anything until the next
 `##` heading is the body.
 
+## 0.6
+
+- **`SABLE_ADMIN_COMMANDS` and `SABLE_ADMIN_USERS`** put commands behind a list of
+  people. Name the commands only administrators may run and the Nextcloud user
+  ids that may run them; everything else stays open to everyone in the
+  conversation, which is where all of them were before. `SABLE_ADMIN_COMMANDS=*`
+  inverts it, closing every command and letting `SABLE_NORMAL_COMMANDS` name the
+  exceptions — the safer shape once you have commands with side effects, since
+  then the mistake is forgetting to open one rather than forgetting to close one.
+  Restricting a command restricts its aliases with it, so `reset` covers
+  `!forget`. `!help` lists only what the asker can run and marks the rest
+  `(admin)` for those who can; running one you may not answers plainly and logs a
+  warning naming you. An admin is matched on their user id and never their
+  display name — anybody can set that to yours — so guests, having no user id,
+  are never administrators. A command in both lists, or admin commands with no
+  admin users, is refused at startup. `ctx.is_admin` is the hook for a custom
+  command that needs something these two lists cannot say.
+  Worth knowing: restricting `ai` restricts the `!ai` command and nothing else
+  — a mention, an `SABLE_AI_ROOMS` conversation and `SABLE_ASK_REACTION` are not
+  commands and still reach the model.
+- **Display names and conversation names are flattened onto one line** before
+  anything uses them: control characters removed, Unicode line separators
+  collapsed, capped at 100 characters. Both are spliced into the model's prompt,
+  so a newline in one was the difference between sitting inside the prompt and
+  writing a line of it — a moderator renaming a room could add a line to the
+  system message. They still choose what a room is called, not what shape the
+  name arrives in.
+- The `backend pin:` line at startup now says *why* it is off and what that
+  means, rather than just `off`: with nothing to pin against, the unsigned
+  backend header on each webhook decides where the replies to it go. The startup
+  block and `--check` also name the admin commands.
+- **`SABLE_API_DOCS`**, off by default, decides whether FastAPI's generated
+  schema and its `/docs` and `/redoc` pages are served. They were on, as FastAPI
+  ships them, which described every route, header and body shape to anybody who
+  could reach the service — and the webhook has to be reachable. Off removes
+  the routes, so they answer 404 rather than 401.
+- **`SABLE_HEALTH_TOKEN`** puts `GET /healthz` behind an `X-Health-Token` header,
+  compared in constant time. Empty, the default, leaves the probe open: a
+  container healthcheck and a kubelet probe both call it without credentials.
+  The image's healthcheck reads the variable and sends the header when it is set,
+  so guarding the probe does not fail the container it is checking.
+- **`SABLE_TRUSTED_PROXIES`** replaces trusting every client's
+  `X-Forwarded-For`. uvicorn was started with `forwarded_allow_ips="*"`, so any
+  client could claim any address and the access log would record it. The default
+  is now loopback, uvicorn's own, and the value takes IP addresses, CIDR ranges,
+  `*`, or nothing at all to ignore the headers entirely. A hostname or a range
+  with host bits set is refused at startup rather than kept as a literal that
+  silently never matches, which is what uvicorn does with one.
+  Nothing in sable reads the client address, so this is about the access log
+  telling the truth. **In Docker the proxy is another container and not
+  loopback**, so name its network's subnet or its address.
+- The comment claiming `/hook/<name>` could not be probed for which hooks exist
+  was wrong, and is now accurate: an unknown name answers 404 while a configured
+  one answers 401, so names are discoverable. Each hook has its own token, so
+  that costs the name rather than access. Recorded as an accepted risk.
+- The startup block gained `proxy trust:`, `api docs:` and `health check:` lines,
+  and the sample of it in `docs/deployment.md` was three versions stale and
+  missing the `hooks:` line; both it and the `--check` sample now match what the
+  code prints.
+- `docs/security.md` said conversation tokens were matched against
+  `^[A-Za-z0-9]{4,64}$`. The code has always matched `^[a-z0-9]{4,64}$`, which is
+  what Talk's own routes accept; the documentation was wrong, not the check.
+
 ## 0.5
 
 - **`/notify` can attach a file** — same URL, same single call. It accepts the

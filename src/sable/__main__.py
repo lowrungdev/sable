@@ -70,6 +70,8 @@ def main(argv: list[str] | None = None) -> int:
             f"  prefix:     {config.command_prefix}\n"
             f"  model:      {config.llm.model or '(disabled)'} @ {config.llm.base_url}\n"
             f"  ai rooms:   {', '.join(config.ai_rooms) or '(mentions only)'}\n"
+            f"  admin cmds: {', '.join(config.admin_commands) or '(none)'}"
+            f"{' for ' + ', '.join(config.admin_users) if config.admin_commands else ''}\n"
             f"  notify:     {'enabled' if config.notify_enabled else 'disabled'}"
             f"{' aliases: ' + ', '.join(config.notify_rooms) if config.notify_rooms else ''}"
         )
@@ -84,9 +86,12 @@ def main(argv: list[str] | None = None) -> int:
         port=args.port or config.port,
         reload=args.reload,
         log_level=config.log_level.lower(),
-        # Talk sends the signature over the raw body; never let a proxy rewrite it.
+        # X-Forwarded-For and X-Forwarded-Proto are believed only from the peers
+        # in SABLE_TRUSTED_PROXIES. Nothing in sable reads the client address, so
+        # this decides whether the access log tells the truth rather than who
+        # gets in; an empty list trusts nobody.
         proxy_headers=True,
-        forwarded_allow_ips="*",
+        forwarded_allow_ips=config.trusted_proxies,
     )
     return 0
 

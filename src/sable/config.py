@@ -8,6 +8,7 @@ copy-ready template.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import re
@@ -24,6 +25,12 @@ TOKEN_HINT = (
     "a conversation token is the lowercase string at the end of the "
     "conversation's URL (.../call/abcd1234), not the name of the room"
 )
+
+
+#: uvicorn's own default, and the right one for a proxy on the same host. A
+#: proxy in another container arrives from the bridge network instead, so that
+#: deployment has to name it - see docs/deployment.md.
+DEFAULT_TRUSTED_PROXIES = ("127.0.0.1", "::1")
 
 
 class ConfigError(ValueError):
@@ -67,6 +74,14 @@ def _float(name: str, default: float | None) -> float | None:
 
 def _csv(name: str) -> list[str]:
     return [part.strip() for part in _str(name).split(",") if part.strip()]
+
+
+def _csv_or(name: str, default: list[str]) -> list[str]:
+    """Like :func:`_csv`, but telling an unset variable from an empty one apart:
+    setting it to nothing is a choice (trust nobody) and must not read as absent."""
+    if name not in os.environ:
+        return list(default)
+    return _csv(name)
 
 
 def _mapping(name: str) -> dict[str, str]:
@@ -181,6 +196,17 @@ class Config:
     #: id, the full actor id, or the display name.
     ignore_users: list[str] = field(default_factory=list)
 
+    # --- who may run which command -----------------------------------------
+    #: Commands only the admin users may run. ``*`` stands for every command,
+    #: with normal_commands naming the exceptions.
+    admin_commands: list[str] = field(default_factory=list)
+    #: Commands everybody may run. Every command not in admin_commands is
+    #: already one of these, so this only carries weight against ``*`` - and as
+    #: somewhere to write the intent down where an operator will read it.
+    normal_commands: list[str] = field(default_factory=list)
+    #: Nextcloud user ids allowed to run the admin commands.
+    admin_users: list[str] = field(default_factory=list)
+
     # --- inbound alerting endpoint ----------------------------------------
     notify_token: str = ""
     notify_rooms: dict[str, str] = field(default_factory=dict)
@@ -208,6 +234,22 @@ class Config:
     #: Largest attachment /notify will accept, in bytes.
     max_upload_bytes: int = 25 * 1024 * 1024
 
+    # --- the HTTP surface itself -------------------------------------------
+    #: Serve FastAPI's generated schema and the two doc pages built from it.
+    #: Off by default: they describe every route, header and body shape to
+    #: anybody who can reach the service, and nothing needs them at runtime.
+    api_docs: bool = False
+    #: When set, GET /healthz requires it in an X-Health-Token header. Empty
+    #: leaves the probe open, which is what a container or k8s check expects.
+    health_token: str = ""
+    #: Peers whose X-Forwarded-For and X-Forwarded-Proto we believe: IP
+    #: addresses, CIDR ranges, or ``*`` for any client. Empty trusts nobody.
+    #: Nothing in sable reads the client address, so this decides whether the
+    #: access log tells the truth, not who gets in.
+    trusted_proxies: list[str] = field(
+        default_factory=lambda: list(DEFAULT_TRUSTED_PROXIES)
+    )
+
     # --- process -----------------------------------------------------------
     host: str = "0.0.0.0"
     port: int = 8080
@@ -216,6 +258,11 @@ class Config:
     @property
     def notify_enabled(self) -> bool:
         return bool(self.notify_token)
+
+    @property
+    def health_guarded(self) -> bool:
+        """Does GET /healthz need a token?"""
+        return bool(self.health_token)
 
     def hook_room(self, name: str) -> str:
         """The conversation a hook posts into, or '' if there is no such hook.
@@ -253,6 +300,41 @@ class Config:
             if value
         }
         return any(entry.strip().casefold() in candidates for entry in self.ignore_users)
+
+    @staticmethod
+    def _listed(entries: list[str], name: str) -> bool:
+        wanted = name.strip().casefold()
+        return bool(wanted) and any(entry.strip().casefold() == wanted for entry in entries)
+
+    def admin_only(self, *names: str) -> bool:
+        """Does running this command need an admin?
+
+        Pass the command's own name and its aliases. Either is a reasonable
+        thing for an operator to have written down, and restricting ``reset``
+        has to restrict ``forget`` with it or the restriction is decoration.
+        """
+        if any(self._listed(self.normal_commands, name) for name in names):
+            return False
+        if "*" in self.admin_commands:
+            return True
+        return any(self._listed(self.admin_commands, name) for name in names)
+
+    def is_admin_user(self, user_id: str) -> bool:
+        """May this Nextcloud user run the admin commands?
+
+        Matched on the user id and nothing else. A display name is whatever the
+        person says it is, so matching one would hand the admin commands to
+        anybody who can join the room and rename themselves - which is why
+        SABLE_IGNORE_USERS may match a name and this may not. Guests and bots
+        have no user id at all, so they are never admins.
+        """
+        if not user_id or not self.admin_users:
+            return False
+        wanted = user_id.casefold()
+        return any(
+            entry.strip().casefold().removeprefix("users/") == wanted
+            for entry in self.admin_users
+        )
 
     def ai_room_allowed(self, token: str, name: str = "") -> bool:
         """Should a plain (non-command, non-mention) message go to the LLM?
@@ -318,6 +400,9 @@ class Config:
             history_ttl=_int("SABLE_HISTORY_TTL", 3600),
             llm=llm,
             ignore_users=_csv("SABLE_IGNORE_USERS"),
+            admin_commands=_csv("SABLE_ADMIN_COMMANDS"),
+            normal_commands=_csv("SABLE_NORMAL_COMMANDS"),
+            admin_users=_csv("SABLE_ADMIN_USERS"),
             notify_token=_str("SABLE_NOTIFY_TOKEN"),
             notify_rooms=_mapping("SABLE_NOTIFY_ROOMS"),
             hooks={
@@ -330,10 +415,56 @@ class Config:
             nextcloud_password=_str("SABLE_NEXTCLOUD_PASSWORD"),
             upload_path="/" + _str("SABLE_UPLOAD_PATH", "/sable").strip("/"),
             max_upload_bytes=_int("SABLE_MAX_UPLOAD_BYTES", 25 * 1024 * 1024),
+            api_docs=_bool("SABLE_API_DOCS", False),
+            trusted_proxies=_csv_or("SABLE_TRUSTED_PROXIES", DEFAULT_TRUSTED_PROXIES),
+            health_token=_str("SABLE_HEALTH_TOKEN"),
             host=_str("SABLE_HOST", "0.0.0.0"),
             port=_int("SABLE_PORT", 8080),
             log_level=_str("SABLE_LOG_LEVEL", "INFO").upper(),
         )
+
+        if "*" in config.trusted_proxies and len(config.trusted_proxies) > 1:
+            raise ConfigError(
+                "SABLE_TRUSTED_PROXIES lists '*' alongside other entries, but '*' "
+                "already means every client. Drop one or the other."
+            )
+        for entry in config.trusted_proxies:
+            if entry == "*":
+                continue
+            try:
+                # strict=True, matching uvicorn: it keeps an unparseable entry as
+                # a literal that can never match a peer address, so a typo would
+                # silently stop the header being believed. Refuse it here instead.
+                ipaddress.ip_network(entry) if "/" in entry else ipaddress.ip_address(entry)
+            except ValueError as exc:
+                raise ConfigError(
+                    f"SABLE_TRUSTED_PROXIES entry {entry!r} is not an IP address "
+                    f"or a CIDR range ({exc}). A range must have no host bits set, "
+                    f"so 172.17.0.0/16 rather than 172.17.0.5/16."
+                ) from exc
+
+        if "*" in config.normal_commands:
+            raise ConfigError(
+                "SABLE_NORMAL_COMMANDS cannot be '*': every command not named in "
+                "SABLE_ADMIN_COMMANDS is open to everyone already. Use it to name "
+                "the exceptions to SABLE_ADMIN_COMMANDS=*."
+            )
+        contested = sorted(
+            {name.strip().casefold() for name in config.admin_commands}
+            & {name.strip().casefold() for name in config.normal_commands}
+        )
+        if contested:
+            raise ConfigError(
+                f"{', '.join(contested)}: in both SABLE_ADMIN_COMMANDS and "
+                "SABLE_NORMAL_COMMANDS, so who may run them is not decided. Name "
+                "each command in one list or the other."
+            )
+        if config.admin_commands and not config.admin_users:
+            raise ConfigError(
+                "SABLE_ADMIN_COMMANDS is set but SABLE_ADMIN_USERS is empty, so "
+                "nobody at all could run those commands. Name the administrators, "
+                "or drop the commands from the list to leave them open."
+            )
 
         missing = sorted(set(config.hooks) - set(config.hook_tokens))
         if missing:

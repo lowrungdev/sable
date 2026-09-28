@@ -23,12 +23,13 @@ sable --check
 ```
 
 ```
-sable 0.4 config OK
+sable 0.6 config OK
   bot name:   sable
   nextcloud:  https://cloud.example.org
   prefix:     !
   model:      gpt-4o-mini @ https://api.openai.com/v1
   ai rooms:   *
+  admin cmds: reset for maser
   notify:     enabled aliases: alerts, deploys
 ```
 
@@ -73,6 +74,9 @@ Values are trimmed and URLs have trailing slashes stripped, so a stray space or 
 | `SABLE_REPORT_ERRORS` | `true` | Post failures into the conversation as well as logging them; the reply is prefixed with a warning sign. Off means failures are logged only and the room stays quiet. |
 | `SABLE_STARTUP_CHECK` | `true` | Call Nextcloud's `status.php` at startup and log what answered, so a wrong URL or an untrusted certificate shows up at boot. Never fatal. Needs `SABLE_NEXTCLOUD_URL`. |
 | `SABLE_IGNORE_USERS` | *(empty)* | Users to ignore completely. Comma-separated; each entry matches a bare user id (`alice`), a full actor id (`users/alice`), or a display name. See [below](#ignoring-people). |
+| `SABLE_ADMIN_COMMANDS` | *(empty)* | Commands only `SABLE_ADMIN_USERS` may run. Comma-separated, or `*` for all of them. Empty means every command is open to everyone. See [below](#who-may-run-which-command). |
+| `SABLE_NORMAL_COMMANDS` | *(empty)* | The exceptions to `SABLE_ADMIN_COMMANDS=*`. Redundant otherwise, since anything not named as an admin command is open already. |
+| `SABLE_ADMIN_USERS` | *(empty)* | Nextcloud user ids that may run the admin commands, comma-separated. **Required** once `SABLE_ADMIN_COMMANDS` is set, or nobody could run them. |
 | `SABLE_MAX_MESSAGE_CHARS` | `30000` | Replies longer than this are clipped with a `_[truncated]_` marker. Talk hard-rejects anything over 32000 with HTTP 413, which is the real ceiling. |
 
 ### When does the assistant answer?
@@ -231,6 +235,53 @@ SABLE_IGNORE_USERS=noisy-integration,users/bob,guests/abc123
 Prefer ids here too. A display name can be changed by the person themselves, which would quietly
 stop them being ignored, the opposite of what you configured.
 
+### Who may run which command
+
+By default every command is open to everybody in the conversation, guests included. That is right
+for `!ping` and wrong for anything that touches something outside the chat, so commands can be
+moved behind a list of administrators.
+
+```ini
+SABLE_ADMIN_COMMANDS=reset,ai      # these two need an admin
+SABLE_ADMIN_USERS=maser,korren     # and these are the admins
+```
+
+Everything not named stays open. The other direction is `*`, which closes everything and lets
+`SABLE_NORMAL_COMMANDS` name what stays open — the safer shape if you are adding commands with
+side effects and would rather forget to open one than forget to close one:
+
+```ini
+SABLE_ADMIN_COMMANDS=*
+SABLE_NORMAL_COMMANDS=help,ping,whoami
+SABLE_ADMIN_USERS=maser
+```
+
+An admin is matched on their **user id** and nothing else. `maser` and `users/maser` both work,
+case-insensitively. A display name is deliberately not accepted, unlike `SABLE_IGNORE_USERS`:
+anybody who can join a conversation can set their display name to yours, and for an ignore list
+that costs you an ignore while here it would cost you the commands. Guests and bots have no user
+id, so they are never administrators.
+
+Restricting a command restricts its aliases too — `reset` covers `!forget` — and naming an
+alias
+restricts the command behind it. `!help` lists only what the asker can run, marking the rest
+`(admin)` for those who can; `!help reset` says who it is for, and running a command you may not
+answers "`!reset` is for administrators only." and logs a warning naming you. Nothing is hidden,
+in other words; the list is just tailored.
+
+Two combinations are refused at startup: a command in both lists, since who may run it is then
+undecided, and `SABLE_ADMIN_COMMANDS` with an empty `SABLE_ADMIN_USERS`, which would leave those
+commands runnable by nobody at all.
+
+One thing this does **not** do: restricting `ai` restricts the `!ai` command and nothing else.
+Mentioning the bot, a conversation listed in `SABLE_AI_ROOMS`, and `SABLE_ASK_REACTION` all still
+reach the model, because none of them is a command. To keep people away from the model itself,
+that is `SABLE_IGNORE_USERS`, an empty `SABLE_LLM_MODEL`, or not putting the bot in the
+conversation.
+
+Setting `SABLE_ADMIN_USERS` alone is allowed and gates nothing — useful because a custom command
+can ask `ctx.is_admin` for itself, which is the hook for anything these two lists cannot express.
+
 ## Conversation memory
 
 | Variable | Default | Notes |
@@ -293,6 +344,73 @@ A conversation is named by its *token*, not by its name. The token is the lowerc
 the end of the conversation's URL — in `https://cloud.example.org/call/a1b2c3d4` it is
 `a1b2c3d4`. Talk's own routes only match lowercase, so a room name put where a token belongs
 cannot work, and both `SABLE_NOTIFY_ROOMS` and `SABLE_HOOKS` are checked for it at startup.
+
+## The HTTP surface itself
+
+Three settings about the service as an HTTP endpoint, rather than about the bot.
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `SABLE_API_DOCS` | `false` | Serve FastAPI's generated schema at `/openapi.json` and the doc pages at `/docs` and `/redoc`. Off removes the routes entirely, so they answer 404 rather than 401. |
+| `SABLE_HEALTH_TOKEN` | *(empty)* | Require this value in an `X-Health-Token` header on `GET /healthz`. Empty leaves the probe open. |
+| `SABLE_TRUSTED_PROXIES` | `127.0.0.1,::1` | Proxies whose `X-Forwarded-For` and `X-Forwarded-Proto` are believed. IP addresses and CIDR ranges, or `*` for any client. Set it to nothing to trust nobody. |
+
+### The schema and its doc pages
+
+`SABLE_API_DOCS` is off because the webhook has to be reachable from Nextcloud, so whatever your
+proxy exposes is what an unauthenticated caller can read — and the schema describes every
+route, every header and every body shape in one request. Nothing at runtime needs it: Nextcloud
+posts to a URL you configured with `occ`, and your alerting callers were written against
+[deployment.md](deployment.md). Turn it on while writing a caller, then turn it off again.
+
+Off means the routes do not exist. `GET /docs` answers 404, the same as any unrouted path, so
+turning it off does not advertise that there was ever something there.
+
+### Guarding the health probe
+
+`GET /healthz` answers with the version, the bot name, the configured model and whether alerting
+is on. It is **open by default**, which is deliberate: a container healthcheck and a Kubernetes
+probe both call it without credentials, and liveness that needs a secret is liveness that fails
+for the wrong reasons.
+
+Set `SABLE_HEALTH_TOKEN` and the same answer needs the token:
+
+```bash
+curl -fsS -H "X-Health-Token: $SABLE_HEALTH_TOKEN" https://sable.example.org/healthz
+```
+
+A header rather than a query parameter, so the value stays out of proxy and access logs. Anything
+missing or wrong is a 401 and a logged warning. The container image's healthcheck reads
+`SABLE_HEALTH_TOKEN` from its own environment and sends the header when it is set, so guarding
+the probe does not fail the container it is checking.
+
+### Which proxies are believed
+
+`X-Forwarded-For` and `X-Forwarded-Proto` are believed only from the addresses in
+`SABLE_TRUSTED_PROXIES`, and the default is loopback — right for a proxy on the same host,
+reaching sable through a published port or a localhost bind.
+
+```ini
+SABLE_TRUSTED_PROXIES=127.0.0.1,::1      # the default: a proxy on this host
+SABLE_TRUSTED_PROXIES=172.17.0.0/16      # a proxy in another container
+SABLE_TRUSTED_PROXIES=10.0.0.5           # one specific proxy
+SABLE_TRUSTED_PROXIES=                   # nobody: ignore both headers
+SABLE_TRUSTED_PROXIES=*                  # any client, which is the thing to avoid
+```
+
+Nothing in sable reads the client address — no rate limit, no allowlist, no authorization
+decision — so this decides whether the access log tells the truth, not who gets in. That
+still matters: with `*`, any client can put what it likes in `X-Forwarded-For` and the log records
+that instead of where the request came from.
+
+Two kinds of value are refused at startup rather than accepted and ignored. A hostname cannot
+work, since the comparison is against the peer's IP address, and a range with host bits set
+(`172.17.0.5/16`) is not a range. uvicorn keeps either as a literal string that never matches
+anything, so it would fail silently; sable names it and exits 2 instead.
+
+**In Docker, the proxy is not loopback.** Another container reaches sable over the shared network,
+so the peer address belongs to that network and the default ignores its headers. Name the subnet
+— `docker network inspect <name>` prints it — or the proxy's own address.
 
 ## Process
 
@@ -389,6 +507,14 @@ SABLE_LOG_LEVEL=INFO
 | `… is neither a conversation token nor a SABLE_NOTIFY_ROOMS alias` | A `SABLE_HOOKS` entry names a room instead of its token. Take the token from the conversation's URL. |
 | `… is not a conversation token` | The same, for a `SABLE_NOTIFY_ROOMS` entry. |
 | `every hook needs its own token` | Add `SABLE_HOOK_TOKEN_<NAME>` for each hook in `SABLE_HOOKS`. |
+| `has no matching entry in SABLE_HOOKS` | A `SABLE_HOOK_TOKEN_<NAME>` or `SABLE_HOOK_TEMPLATE_<NAME>` for a hook that is not in `SABLE_HOOKS`. |
+| `SABLE_ADMIN_COMMANDS is set but SABLE_ADMIN_USERS is empty` | Name the administrators, or drop the commands from the list to leave them open. |
+| `so who may run them is not decided` | A command appears in both `SABLE_ADMIN_COMMANDS` and `SABLE_NORMAL_COMMANDS`. Pick one list. |
+| `SABLE_NORMAL_COMMANDS cannot be '*'` | Everything not named as an admin command is open already; use the list for the exceptions to `SABLE_ADMIN_COMMANDS=*`. |
+| `is not an IP address or a CIDR range` | A `SABLE_TRUSTED_PROXIES` entry is a hostname, a typo, or a range with host bits set (`172.17.0.0/16`, not `172.17.0.5/16`). |
+| `SABLE_TRUSTED_PROXIES lists '*' alongside other entries` | `*` already means every client. Keep one or the other. |
+| `SABLE_NEXTCLOUD_USER and SABLE_NEXTCLOUD_PASSWORD go together` | Set both to enable attachments, or neither. |
+| `SABLE_NEXTCLOUD_URL is required for file attachments` | Uploads need the server address up front; there is no incoming request to learn it from. |
 
 Runtime problems — 401s, 403s, silence — are in
 [deployment.md](deployment.md#troubleshooting).
