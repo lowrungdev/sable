@@ -19,15 +19,27 @@ from .commands import (
     registry,
     split_command,
 )
-from .config import Config
+from .config import Config, LLMConfig
 from .events import TalkEvent
 from .files import FilesClient
 from .history import History, MessageCache
 from .llm import LLMClient, LLMError
+from .openwebui import OpenWebUIClient
 from .state import ConnectionState
 from .talk import TalkClient, TalkError
 
 log = logging.getLogger(__name__)
+
+
+def llm_client(config: LLMConfig, http: httpx.AsyncClient) -> LLMClient | OpenWebUIClient:
+    """Whichever backend the configuration asks for.
+
+    Both answer ``complete(messages) -> str`` and raise ``LLMError``, so nothing
+    downstream needs to know which one it is holding.
+    """
+    if config.agentic:
+        return OpenWebUIClient(config, client=http)
+    return LLMClient(config, client=http)
 
 
 def now(timezone: str = "") -> str:
@@ -77,7 +89,7 @@ class Bot:
         self.nextcloud = ConnectionState("Nextcloud")
         self._owns_http = http_client is None
         self._http = http_client or httpx.AsyncClient(timeout=30.0)
-        self._llm = llm if llm is not None else LLMClient(config.llm, client=self._http)
+        self._llm = llm if llm is not None else llm_client(config.llm, self._http)
         self._seen: deque[SeenKey] = deque(maxlen=SEEN_CACHE)
         self._seen_set: set[SeenKey] = set()
         self._mention_re = re.compile(

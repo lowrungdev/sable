@@ -424,3 +424,66 @@ def test_extra_body_may_not_override_the_fields_sable_builds(load: Load) -> None
 def test_extra_body_still_takes_provider_specific_fields(load: Load) -> None:
     config = load(SABLE_LLM_EXTRA_BODY='{"tool_ids": ["server:mcp:1"], "top_k": 40}')
     assert config.llm.extra_body == {"tool_ids": ["server:mcp:1"], "top_k": 40}
+
+
+# --------------------------------------------------------------------------- #
+# Which backend, and what it is allowed to reach
+# --------------------------------------------------------------------------- #
+
+OWUI = {
+    "SABLE_LLM_BACKEND": "openwebui",
+    "SABLE_LLM_BASE_URL": "https://ai.example.org/api",
+    "SABLE_LLM_API_KEY": "sk-test",
+    "SABLE_LLM_MODEL": "gemma-focused",
+}
+
+
+def test_the_plain_openai_backend_is_the_default(load: Load) -> None:
+    assert load().llm.backend == "openai"
+    assert not load().llm.agentic
+
+
+def test_the_openwebui_backend_is_selectable(load: Load) -> None:
+    config = load(**OWUI, SABLE_LLM_TOOL_IDS="server:mcp:1,server:mcp:2")
+    assert config.llm.agentic
+    assert config.llm.tool_ids == ["server:mcp:1", "server:mcp:2"]
+
+
+def test_an_unknown_backend_is_refused(load: Load) -> None:
+    with pytest.raises(ConfigError, match="SABLE_LLM_BACKEND must be one of"):
+        load(SABLE_LLM_BACKEND="ollama")
+
+
+def test_the_openwebui_backend_needs_a_key(load: Load) -> None:
+    # The key is the account the tools run as, not just authentication.
+    env = {**OWUI, "SABLE_LLM_API_KEY": ""}
+    with pytest.raises(ConfigError, match="SABLE_LLM_API_KEY is required"):
+        load(**env)
+
+
+def test_a_base_url_without_api_is_refused(load: Load) -> None:
+    env = {**OWUI, "SABLE_LLM_BASE_URL": "https://ai.example.org"}
+    with pytest.raises(ConfigError, match="must end in /api"):
+        load(**env)
+
+
+def test_an_unknown_builtin_feature_is_refused(load: Load) -> None:
+    with pytest.raises(ConfigError, match="SABLE_LLM_FEATURES may name"):
+        load(**OWUI, SABLE_LLM_FEATURES="web_search,telepathy")
+
+
+def test_builtin_features_need_the_openwebui_backend(load: Load) -> None:
+    with pytest.raises(ConfigError, match="only applies to the openwebui backend"):
+        load(SABLE_LLM_FEATURES="web_search")
+
+
+def test_builtin_features_need_a_session(load: Load) -> None:
+    # Without a session id Open WebUI never offers them, so this would be a
+    # setting that silently did nothing.
+    with pytest.raises(ConfigError, match="needs SABLE_LLM_BUILTIN_TOOLS on"):
+        load(**OWUI, SABLE_LLM_FEATURES="web_search", SABLE_LLM_BUILTIN_TOOLS="false")
+
+
+def test_a_zero_poll_interval_is_refused(load: Load) -> None:
+    with pytest.raises(ConfigError, match="SABLE_LLM_POLL_INTERVAL"):
+        load(**OWUI, SABLE_LLM_POLL_INTERVAL="0")

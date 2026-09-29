@@ -190,8 +190,36 @@ services:
       # SABLE_LLM_TIMEOUT: "120"
 
       # JSON object merged into the request body last, for provider-specific
-      # fields. Single-quote it so YAML does not read it as a mapping.
+      # fields. Single-quote it so YAML does not read it as a mapping. It may
+      # not set stream or messages, which sable builds itself.
       # SABLE_LLM_EXTRA_BODY: '{"top_k": 40}'
+
+      # ===================== Tools ========================================
+      # openai asks once and posts the answer; a model that asks for a tool
+      # gets no answer, because nobody runs it. openwebui hands the loop to
+      # Open WebUI, which executes tools with the API key's own permissions.
+      # That key's account is what a room participant can reach — give it one
+      # of its own. Needs SABLE_LLM_BASE_URL ending in /api.
+      # SABLE_LLM_BACKEND: "openwebui"
+
+      # Workspace tools and MCP servers, as Open WebUI names them.
+      # SABLE_LLM_TOOL_IDS: "server:mcp:1,server:mcp:2"
+
+      # Open WebUI's built-ins: web_search, code_interpreter, image_generation,
+      # memory. Needs SABLE_LLM_BUILTIN_TOOLS on.
+      # SABLE_LLM_FEATURES: "web_search"
+
+      # Off uses the blocking variant: no polling, and no built-in tools.
+      # SABLE_LLM_BUILTIN_TOOLS: "true"
+
+      # Seconds between checks while the loop runs.
+      # SABLE_LLM_POLL_INTERVAL: "2.0"
+
+      # Keep the conversation each question creates, instead of deleting it.
+      # SABLE_LLM_KEEP_CHATS: "false"
+
+      # Append what the answer cited.
+      # SABLE_LLM_SHOW_SOURCES: "false"
 
       # ===================== Alerting endpoint ============================
       # Bearer token for POST /notify. EMPTY DISABLES THE ROUTE (404).

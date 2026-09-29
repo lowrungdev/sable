@@ -131,6 +131,8 @@ def create_app(config: Config | None = None, bot: Bot | None = None) -> FastAPI:
             "  model:          %s",
             f"{config.llm.model} at {config.llm.base_url}" if config.llm.enabled else "disabled",
         )
+        if config.llm.enabled and config.llm.agentic:
+            log.info("  tools:          %s", tools_summary(config))
         log.info("  concurrency:    %s", concurrency_summary(config))
         log.info("  ask reaction:   %s", ask_reaction_summary(config))
         log.info("  ask rooms:      %s", ask_rooms_summary(config))
@@ -609,6 +611,25 @@ def ask_rooms_summary(config: Config) -> str:
     if not config.ask_rooms:
         return "every conversation the bot is in"
     return ", ".join(config.ask_rooms)
+
+
+def tools_summary(config: Config) -> str:
+    """What the Open WebUI backend will let the model reach.
+
+    Worth printing in full: these run with the API key's own permissions, so the
+    line answers "what can a stranger in a chat room set off" at a glance.
+    """
+    parts = [
+        "server-side loop via Open WebUI",
+        f"tools: {', '.join(config.llm.tool_ids) or 'none'}",
+    ]
+    if not config.llm.builtin_tools:
+        parts.append("built-ins off (one blocking request, SABLE_LLM_BUILTIN_TOOLS)")
+    else:
+        parts.append(f"built-ins: {', '.join(config.llm.features) or 'none enabled'}")
+    if config.llm.keep_chats:
+        parts.append("conversations kept")
+    return " · ".join(parts)
 
 
 def concurrency_summary(config: Config) -> str:

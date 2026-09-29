@@ -424,6 +424,60 @@ clear error naming `finish_reason` when there is nothing at all. If answers come
 truncated, raise `SABLE_LLM_MAX_TOKENS` or lower the reasoning effort via
 `SABLE_LLM_EXTRA_BODY`.
 
+`SABLE_LLM_EXTRA_BODY` may not set `stream` or `messages`: sable builds both, and overriding
+`stream` leaves the client parsing an event stream as JSON. That is a startup error.
+
+## Letting the model use tools
+
+A model offered tools does not run them. It answers with a *request* to run one, and something
+has to execute it and hand the result back. sable's own backend does one round trip, so a
+reply that contains only a tool call is an error naming the tool — accurate, but not an answer.
+
+Open WebUI will run the whole loop server-side, and `SABLE_LLM_BACKEND=openwebui` asks it to.
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `SABLE_LLM_BACKEND` | `openai` | `openai` is one request against anything that speaks chat completions. `openwebui` runs Open WebUI's agentic loop, where the server executes the tools. |
+| `SABLE_LLM_TOOL_IDS` | *(empty)* | Workspace tools and MCP servers, as Open WebUI names them: `server:mcp:1,my_tool`. `GET /api/v1/tools/` lists the workspace ones. |
+| `SABLE_LLM_FEATURES` | *(empty)* | Open WebUI's own built-ins to enable: any of `web_search`, `code_interpreter`, `image_generation`, `memory`. |
+| `SABLE_LLM_BUILTIN_TOOLS` | `true` | Sends a session id, which is what makes the built-ins available. `false` uses the blocking variant: one request that waits for the loop, no polling, but no built-ins. |
+| `SABLE_LLM_POLL_INTERVAL` | `2.0` | Seconds between checks while the loop runs. |
+| `SABLE_LLM_KEEP_CHATS` | `false` | Keep the conversation each question creates. Useful while debugging; it fills the account's chat list otherwise. |
+| `SABLE_LLM_SHOW_SOURCES` | `false` | Append what the answer cited. Worth turning on: it is how you notice an answer came from an encyclopaedia rather than from today's market. |
+
+With this backend `SABLE_LLM_BASE_URL` must end in `/api` — the chat, task and completion
+endpoints all hang off it — and `SABLE_LLM_API_KEY` is required, because **the key is the
+account the tools run as**. Both are checked at startup, as is every feature name.
+
+### What it actually does
+
+Open WebUI's tool loop lives in the code that streams events into a chat, so it only runs for a
+request that names a chat and an assistant message inside it, and only with `stream: true`. The
+answer is written into that chat rather than returned. So each question is four calls: create a
+conversation, start the completion, wait for the tasks to drain, read the message. sable then
+deletes the conversation, because it existed only to be written into. Your own history is
+unaffected — sable keeps that itself and sends it in `messages` as before.
+
+Expect this to be slower. A tool round is a second model call with the results in the prompt,
+and a few dozen tool definitions cost thousands of prompt tokens before a word is generated.
+Raise `SABLE_LLM_TIMEOUT` to 300 or so, and set `SABLE_THINKING_REACTION` so the room can see
+the bot is working.
+
+### Before it will work
+
+- The model needs **Native** function calling. Legacy mode does one round and no built-ins.
+- The model's own *Stream Chat Response* parameter overrides the request. If it is off, no tool
+  runs and nothing is written — which sable reports as a loop that finished without an answer.
+- An OAuth-protected MCP server has to be authorised once in the browser, as that user.
+
+### Who can set these tools off
+
+Anyone in a conversation with the bot. Commands can be gated with `SABLE_ADMIN_COMMANDS`, but
+asking the assistant a question is not a command, and the model decides which tool to call. If
+the tools reach Home Assistant, a stranger in a room can reach Home Assistant. Give sable a
+dedicated Open WebUI account with only the tools a chat room should have — the permissions are
+enforced there, not here. See [security.md](security.md#accepted-risks).
+
 ## Alerting endpoint
 
 | Variable | Default | Notes |

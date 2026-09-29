@@ -27,6 +27,15 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 #: so the /notify caller was told 500 where the same value uppercased got 400.
 TOKEN_RE = re.compile(r"^[a-z0-9]{4,64}\Z")
 
+#: How sable talks to a model backend.
+LLM_BACKENDS = frozenset({"openai", "openwebui"})
+
+#: Open WebUI's togglable built-in tools. The others it offers - knowledge,
+#: files, notes, channels, calendar - need no flag and come with the session.
+BUILTIN_FEATURES = frozenset(
+    {"web_search", "code_interpreter", "image_generation", "memory"}
+)
+
 #: Said whenever a token turns out not to be one.
 TOKEN_HINT = (
     "a conversation token is the lowercase string at the end of the "
@@ -163,9 +172,37 @@ class LLMConfig:
     timeout: float = 120.0
     extra_body: dict[str, object] = field(default_factory=dict)
 
+    # --- Open WebUI ---------------------------------------------------------
+    #: ``openai`` is one request and one answer, against anything that speaks
+    #: chat completions. ``openwebui`` runs Open WebUI's own agentic loop, where
+    #: the server executes tools and the answer arrives in a chat record rather
+    #: than in the HTTP response.
+    backend: str = "openai"
+    #: Workspace tools and MCP servers to offer, as Open WebUI names them:
+    #: ``server:mcp:1``, ``my_workspace_tool``.
+    tool_ids: list[str] = field(default_factory=list)
+    #: Which of Open WebUI's own built-in tools to turn on.
+    features: list[str] = field(default_factory=list)
+    #: Send a session id, which is what makes the built-ins available at all.
+    #: Without one the request blocks until the loop finishes instead of
+    #: returning a task to poll - simpler, but with no built-in tools.
+    builtin_tools: bool = True
+    #: Seconds between checks on a running loop.
+    poll_interval: float = 2.0
+    #: Keep the conversation sable creates for each question. It exists only
+    #: because the loop needs somewhere to write; by default it is deleted.
+    keep_chats: bool = False
+    #: Append the sources the loop cited. Worth having: it is how you notice an
+    #: answer came from an encyclopaedia rather than from today's market.
+    show_sources: bool = False
+
     @property
     def enabled(self) -> bool:
         return bool(self.model)
+
+    @property
+    def agentic(self) -> bool:
+        return self.backend == "openwebui"
 
 
 @dataclass(frozen=True)
@@ -480,6 +517,16 @@ class Config:
             max_tokens=_int("SABLE_LLM_MAX_TOKENS", 0) or None,
             timeout=_float("SABLE_LLM_TIMEOUT", 120.0) or 120.0,
             extra_body=_json_object("SABLE_LLM_EXTRA_BODY"),
+            backend=_str("SABLE_LLM_BACKEND", "openai").lower(),
+            tool_ids=_csv("SABLE_LLM_TOOL_IDS"),
+            features=[name.lower() for name in _csv("SABLE_LLM_FEATURES")],
+            builtin_tools=_bool("SABLE_LLM_BUILTIN_TOOLS", True),
+            # No `or 2.0` fallback: a zero here would busy-loop against the
+            # task endpoint, so it is worth refusing rather than quietly
+            # reading as "unset".
+            poll_interval=_float("SABLE_LLM_POLL_INTERVAL", 2.0) or 0.0,
+            keep_chats=_bool("SABLE_LLM_KEEP_CHATS", False),
+            show_sources=_bool("SABLE_LLM_SHOW_SOURCES", False),
         )
 
         config = cls(
@@ -630,6 +677,43 @@ class Config:
                     f"SABLE_TIMEZONE={config.timezone!r} is not an IANA time zone "
                     f"name such as America/New_York or Europe/Berlin ({exc})"
                 ) from exc
+        if config.llm.backend not in LLM_BACKENDS:
+            raise ConfigError(
+                f"SABLE_LLM_BACKEND must be one of {', '.join(sorted(LLM_BACKENDS))}, "
+                f"got {config.llm.backend!r}"
+            )
+        if config.llm.agentic:
+            if not config.llm.api_key:
+                raise ConfigError(
+                    "SABLE_LLM_API_KEY is required for the openwebui backend: the "
+                    "key is the account whose permissions the tools run with"
+                )
+            if not config.llm.base_url.endswith("/api"):
+                raise ConfigError(
+                    "SABLE_LLM_BASE_URL must end in /api for the openwebui backend "
+                    f"(got {config.llm.base_url!r}): the chat, task and completion "
+                    "endpoints all hang off it, e.g. https://ai.example.org/api"
+                )
+            if config.llm.poll_interval <= 0:
+                raise ConfigError("SABLE_LLM_POLL_INTERVAL must be greater than zero")
+        unknown = sorted(set(config.llm.features) - BUILTIN_FEATURES)
+        if unknown:
+            raise ConfigError(
+                "SABLE_LLM_FEATURES may name "
+                + ", ".join(sorted(BUILTIN_FEATURES))
+                + "; got "
+                + ", ".join(unknown)
+            )
+        if config.llm.features and not config.llm.agentic:
+            raise ConfigError(
+                "SABLE_LLM_FEATURES only applies to the openwebui backend; set "
+                "SABLE_LLM_BACKEND=openwebui or clear it"
+            )
+        if config.llm.features and not config.llm.builtin_tools:
+            raise ConfigError(
+                "SABLE_LLM_FEATURES needs SABLE_LLM_BUILTIN_TOOLS on: without a "
+                "session id Open WebUI does not offer the built-in tools at all"
+            )
         forbidden = sorted({"stream", "messages"} & set(config.llm.extra_body))
         if forbidden:
             raise ConfigError(

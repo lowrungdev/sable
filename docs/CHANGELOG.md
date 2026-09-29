@@ -12,6 +12,27 @@ Format: `## <version>`, optionally followed by a date. Anything until the next
 
 ## Unreleased
 
+- **The assistant can use tools, through Open WebUI.**
+  `SABLE_LLM_BACKEND=openwebui` hands the whole agentic loop to Open WebUI: it
+  offers the model your MCP servers, workspace tools and built-ins, executes
+  whatever the model calls, feeds the result back and asks again until there is
+  an answer. sable's own backend cannot do this and is not being changed — one
+  request, one answer, portable to anything that speaks chat completions.
+  It is a separate client because Open WebUI's loop is not chat completions at
+  all. That loop lives in the code that streams events into a chat, so it only
+  runs for a request naming a chat and an assistant message inside it, with
+  `stream: true`, and the answer is written into the chat rather than returned.
+  Each question is four calls: create a conversation, start the completion, wait
+  for the tasks to drain, read the message. The conversation is deleted
+  afterwards unless `SABLE_LLM_KEEP_CHATS` is set; sable keeps its own history
+  as before.
+  New settings: `SABLE_LLM_BACKEND`, `SABLE_LLM_TOOL_IDS`, `SABLE_LLM_FEATURES`,
+  `SABLE_LLM_BUILTIN_TOOLS`, `SABLE_LLM_POLL_INTERVAL`, `SABLE_LLM_KEEP_CHATS`
+  and `SABLE_LLM_SHOW_SOURCES`. The base URL must end in `/api` and an API key
+  is required, both checked at startup, as is every feature name.
+  Worth reading before turning it on: the tools run with the permissions of the
+  account behind that API key, and anyone in a conversation can prompt the model
+  into calling one. Accepted risk 15 in `docs/security.md` covers it.
 - **The model is told what day it is.** The system prompt now ends with the
   current date, time and zone, set by `SABLE_TIMEZONE` or the host clock. This
   is not cosmetic: asked what gold was worth "right now", a model with no clock

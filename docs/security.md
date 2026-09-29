@@ -142,6 +142,11 @@ disables the assistant while leaving commands working.
 Attachments do not leave: they are uploaded into your own Nextcloud, in the upload account's
 Files, and shared from there.
 
+With `SABLE_LLM_BACKEND=openwebui` the question also creates a conversation in that Open WebUI
+account, which is deleted once the answer has been read unless `SABLE_LLM_KEEP_CHATS` is on.
+Whatever tools the loop calls see the prompt: a web search sends the query to your configured
+search provider, and an MCP server sees whatever the model passes it.
+
 ## Accepted risks
 
 These are known and deliberate. Decide for yourself whether they are acceptable.
@@ -223,7 +228,21 @@ These are known and deliberate. Decide for yourself whether they are acceptable.
     version, the bot name and the configured model. That is the default because a liveness probe
     that needs a credential fails for the wrong reasons.
 
-15. CI holds credentials: the registry password and a runner token with write access to the
+15. **Server-side tools turn a chat room into an actuator.** With
+    `SABLE_LLM_BACKEND=openwebui`, Open WebUI executes tools with the permissions of the
+    account behind `SABLE_LLM_API_KEY`, and the model decides which to call. Asking the
+    assistant a question is not a command, so `SABLE_ADMIN_COMMANDS` does not gate it: anyone
+    in a conversation with the bot, guests included, can cause whatever those tools do. If they
+    reach Home Assistant, a stranger can turn off your lights by asking; if they can send
+    messages, the bot can be made to send them. Prompt injection stops being an
+    embarrassing-text problem, since a participant can paste text aimed at the model rather
+    than at the room.
+    The control is the account, not sable: give it a dedicated Open WebUI user holding only the
+    tools a chat room should have, and leave the rest off. sable never sends a `terminal_id`,
+    so Open Terminal is out of reach by construction. `SABLE_LLM_KEEP_CHATS=true` keeps each
+    conversation, which is the closest thing to an audit trail of what the model actually ran.
+
+16. CI holds credentials: the registry password and a runner token with write access to the
     repository, used to create releases. Anyone who can change a workflow on a branch CI runs
     can reach both.
 
@@ -249,6 +268,8 @@ These are known and deliberate. Decide for yourself whether they are acceptable.
 - [ ] `SABLE_ASK_ADMINS_ONLY` on if forwarding somebody else's message to the model should not be
       open to everyone in the room
 - [ ] `SABLE_BOT_SECRET_PREVIOUS` cleared again once a rotation has finished
+- [ ] If server-side tools are on, a dedicated Open WebUI account holding only the tools a chat
+      room should reach — the model chooses which to call, and anyone in the room can prompt it
 - [ ] The image pinned by version or digest on the host rather than `latest`
 
 ## Reporting a problem

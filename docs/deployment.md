@@ -373,6 +373,51 @@ SABLE_HOOK_TEMPLATE_KOMODO=**{level}** {data.type}: {data.data.name} on {data.da
 See [webhooks from other services](configuration.md#webhooks-from-other-services) for how the
 rendering works and what the paths are.
 
+### Giving the assistant tools, through Open WebUI
+
+Ask a model with tools what gold costs and it will answer with a request to call a search
+tool. Somebody has to run it. sable does not — it sends one request and posts the reply — so
+the answer you get is an error naming the tool nobody ran.
+
+Open WebUI runs the whole loop itself. Point sable at it:
+
+```ini
+SABLE_LLM_BACKEND=openwebui
+SABLE_LLM_BASE_URL=https://ai.example.org/api
+SABLE_LLM_API_KEY=<a key belonging to an account made for sable>
+SABLE_LLM_MODEL=<the workspace model, not the underlying one>
+SABLE_LLM_TOOL_IDS=server:mcp:1,server:mcp:2
+SABLE_LLM_FEATURES=web_search
+SABLE_LLM_TIMEOUT=300
+SABLE_THINKING_REACTION=⏳
+```
+
+Find the ids first — they are per-account:
+
+```bash
+curl -s -H "Authorization: Bearer $KEY" https://ai.example.org/api/v1/tools/ | jq '.[] | {id, name}'
+```
+
+MCP servers are addressed as `server:mcp:<id>` rather than appearing in that list.
+
+Two settings decide whether it works at all, and both live in Open WebUI rather than here. The
+model needs **Native** function calling, and its *Stream Chat Response* parameter must not be
+off — it overrides the request, and then no tool runs and nothing is written. sable reports
+that as a loop that finished without an answer.
+
+The startup block prints what the model can reach:
+
+```
+tools:          server-side loop via Open WebUI · tools: server:mcp:1, server:mcp:2 · built-ins: web_search
+```
+
+Read that line as a list of what a stranger in a chat room can set off, because it is one. The
+tools run as the account behind the API key, and the model decides which to call. Give it an
+account of its own, holding only what a chat room should have.
+
+Expect answers to take tens of seconds — a tool round is a second model call with the results
+in the prompt — which is why the timeout is raised and the thinking reaction earns its keep.
+
 ## Operations
 
 ### What the log tells you
