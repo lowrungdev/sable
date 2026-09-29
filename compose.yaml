@@ -61,6 +61,14 @@ services:
       SABLE_BOT_SECRET: "${SABLE_BOT_SECRET:?required — put it in .env (see docs/deployment.md)}"
 
       # ===================== Talk bot identity ============================
+      # The secret being rotated away from — accepted on incoming webhooks and
+      # never used to sign what sable sends. Talk holds one secret per install,
+      # so a rotation is uninstall, install with the new value, restart, and
+      # every event in that window would 401 without this. Same 40–128 range,
+      # and it may not repeat the value above. Keep it in .env; clear it when
+      # the rotation is done.
+      # SABLE_BOT_SECRET_PREVIOUS: "${SABLE_BOT_SECRET_PREVIOUS:-}"
+
       # Your Nextcloud base URL, no trailing slash. Optional for the webhook
       # path — each signed event carries the server URL in a header — but
       # required for /notify, and without it backend pinning cannot run.
@@ -95,6 +103,21 @@ services:
       # cache. Needs --feature reaction on the bot install.
       # SABLE_ASK_REACTION: "⁉️"
 
+      # Let only SABLE_ADMIN_USERS use that reaction. Otherwise anyone in the
+      # room can forward somebody else's message to the model backend without
+      # saying a word in the room. On with no SABLE_ADMIN_USERS is a startup
+      # error — it would leave the feature usable by nobody.
+      # SABLE_ASK_ADMINS_ONLY: "false"
+
+      # Conversations whose messages are cached for that reaction — tokens or
+      # display names, or "*", exactly like SABLE_AI_ROOMS.
+      # MIND THE ASYMMETRY: empty here means EVERY conversation, where an empty
+      # SABLE_AI_ROOMS means none. Deliberate — empty is what every deployment
+      # already has, and reading it as "no rooms" would switch the reaction off
+      # silently on upgrade. Naming the rooms that use it stops the others being
+      # cached, which costs less memory and holds less chat content.
+      # SABLE_ASK_ROOMS: "a1b2c3d4,Ops"
+
       # Messages remembered per conversation so a reaction can name one; a
       # reaction event carries the id, never the text. Expires with the history.
       # SABLE_MESSAGE_CACHE: "200"
@@ -111,6 +134,14 @@ services:
 
       # Replies longer than this are clipped; Talk's own ceiling is 32000.
       # SABLE_MAX_MESSAGE_CHARS: "30000"
+
+      # Model calls allowed in flight at once; "0" means no ceiling. Each
+      # trigger is a background task with no limit of its own, so a busy room or
+      # a burst of redelivered webhooks means that many completions open
+      # together, each holding SABLE_LLM_TIMEOUT. Talk rate-limits the replies
+      # sable sends, not the events it sends sable. Lower it for a local model
+      # that serves one request at a time.
+      # SABLE_MAX_CONCURRENT_REPLIES: "8"
 
       # Users to ignore completely - nothing they say or react to is acted on.
       # Matches a bare user id, a full actor id (users/alice) or a display name.
@@ -159,8 +190,36 @@ services:
       # SABLE_LLM_TIMEOUT: "120"
 
       # JSON object merged into the request body last, for provider-specific
-      # fields. Single-quote it so YAML does not read it as a mapping.
+      # fields. Single-quote it so YAML does not read it as a mapping. It may
+      # not set stream or messages, which sable builds itself.
       # SABLE_LLM_EXTRA_BODY: '{"top_k": 40}'
+
+      # ===================== Tools ========================================
+      # openai asks once and posts the answer; a model that asks for a tool
+      # gets no answer, because nobody runs it. openwebui hands the loop to
+      # Open WebUI, which executes tools with the API key's own permissions.
+      # That key's account is what a room participant can reach — give it one
+      # of its own. Needs SABLE_LLM_BASE_URL ending in /api.
+      # SABLE_LLM_BACKEND: "openwebui"
+
+      # Workspace tools and MCP servers, as Open WebUI names them.
+      # SABLE_LLM_TOOL_IDS: "server:mcp:1,server:mcp:2"
+
+      # Open WebUI's built-ins: web_search, code_interpreter, image_generation,
+      # memory. Needs SABLE_LLM_BUILTIN_TOOLS on.
+      # SABLE_LLM_FEATURES: "web_search"
+
+      # Off uses the blocking variant: no polling, and no built-in tools.
+      # SABLE_LLM_BUILTIN_TOOLS: "true"
+
+      # Seconds between checks while the loop runs.
+      # SABLE_LLM_POLL_INTERVAL: "2.0"
+
+      # Keep the conversation each question creates, instead of deleting it.
+      # SABLE_LLM_KEEP_CHATS: "false"
+
+      # Append what the answer cited.
+      # SABLE_LLM_SHOW_SOURCES: "false"
 
       # ===================== Alerting endpoint ============================
       # Bearer token for POST /notify. EMPTY DISABLES THE ROUTE (404).
@@ -238,6 +297,17 @@ services:
       # DEBUG also logs why a message was NOT acted on — the fastest way to
       # debug prefix and mention matching.
       # SABLE_LOG_LEVEL: "INFO"
+
+      # The healthcheck below asks every 30 seconds, and uvicorn logs each one
+      # — about 2,900 identical lines a day. They are dropped unless you turn
+      # this on; a probe that FAILS is logged either way.
+      # SABLE_LOG_HEALTH_CHECKS: "false"
+
+      # The zone the assistant answers in, as an IANA name. Empty follows the
+      # container clock, which is usually UTC. The model is told the date either
+      # way; without it, questions about "right now" are answered from training
+      # data.
+      # SABLE_TIMEZONE: "America/New_York"
 
     ports:
       # Published to localhost only: put a TLS-terminating reverse proxy in

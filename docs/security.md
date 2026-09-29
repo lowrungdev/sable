@@ -19,11 +19,12 @@ URL. Everything below is about those.
 
 | Boundary | What protects it |
 | --- | --- |
-| Nextcloud to `POST /webhook` | HMAC-SHA256 over the random header plus the raw body, compared in constant time, before the body is parsed. Then the backend pin. |
+| Nextcloud to `POST /webhook` | HMAC-SHA256 over the random header plus the raw body, compared in constant time, before the body is parsed, against the current secret and `SABLE_BOT_SECRET_PREVIOUS` if one is set. Then the replay check, the backend pin, and the conversation token. |
 | sable to the Talk bot API | The same shared secret, signed per endpoint with a fresh 32-byte random each time. |
 | Anything to `POST /notify` | A separate bearer token, compared in constant time. Unset means the route answers 404. |
 | sable to Nextcloud Files | An app password for a user account, used only to upload and share attachments. |
 | sable to the model backend | Ordinary HTTPS with certificate verification; the API key travels as a bearer token. |
+| A room participant to the model's tools | Nothing, with `SABLE_LLM_BACKEND=openwebui`. Asking the assistant a question is not a command, and the model chooses which tool to call, so only the Open WebUI account's own permissions bound what can happen. |
 | Anything to `GET /healthz` | Nothing by default, which is what a container or Kubernetes probe needs. `SABLE_HEALTH_TOKEN` puts it behind an `X-Health-Token` header, compared in constant time. |
 | Anything to the API schema | The schema and its `/docs` and `/redoc` pages are not served at all unless `SABLE_API_DOCS=true`. |
 | A proxy claiming a client address | `X-Forwarded-For` and `X-Forwarded-Proto` are believed only from `SABLE_TRUSTED_PROXIES`, loopback by default. Nothing reads the client address, so this protects the access log rather than access. |
@@ -48,7 +49,8 @@ Backend pinning matters more than it first appears. A signed event carries the s
 URL in `X-Nextcloud-Talk-Backend`, and that is where replies go. With `SABLE_PIN_BACKEND` on,
 which is the default, an event claiming any other backend is refused with a 403. Without it, a
 replayed webhook could aim the bot's replies, and its signed credentials, at a server of the
-attacker's choosing.
+attacker's choosing — narrower than it was, now that a repeated random is refused, but still
+true across a restart or beyond the 4096 the cache holds.
 
 Room tokens are validated before use: `/notify` accepts an alias from `SABLE_NOTIFY_ROOMS` or a
 token matching `^[a-z0-9]{4,64}$` — Talk's own routes match only lowercase — and anything
@@ -68,6 +70,20 @@ conversation, type, message id, actor and reaction together, keeping the last 51
 redelivered webhook produces one reply rather than two while two people reacting to the same
 message remain two distinct events.
 
+A webhook whose `X-Nextcloud-Talk-Random` has been seen before is refused with a 401, keeping the
+last 4096. Be clear about what that does and does not buy: the cache is process memory, so a
+restart forgets every random it held, and Talk sends no timestamp, so there is no age to enforce
+and nothing to expire against. It narrows a replay to one process lifetime and 4096 requests
+— it does not make one impossible, and it is not a substitute for TLS. The check runs *after*
+the signature is verified, so an unauthenticated caller cannot fill the cache with randoms it
+invented and have real webhooks refused.
+
+`SABLE_MAX_CONCURRENT_REPLIES` caps how many model calls can be open at once, eight by default,
+with the rest queued rather than dropped. Talk rate-limits the replies sable *sends* with a 429
+but does not limit what it delivers, so without a ceiling a redelivered batch meant one open
+model call per event, each holding `SABLE_LLM_TIMEOUT` open. The webhook still answers 200 before
+waiting for a slot, so a full queue never becomes a Talk timeout.
+
 Display names and conversation names are flattened onto a single line before anything uses them:
 control characters go, Unicode line separators collapse, and the result is capped at 100
 characters. Both are spliced into the model's prompt — the conversation's name into the
@@ -85,10 +101,10 @@ instead of stray tracebacks.
 
 | Secret | What it grants | Rotation |
 | --- | --- | --- |
-| `SABLE_BOT_SECRET` | Posting as the bot, in either direction | `occ talk:bot:uninstall`, then install with a new value, then restart |
+| `SABLE_BOT_SECRET` | Posting as the bot, in either direction | `occ talk:bot:uninstall`, then install with a new value, then restart. Put the old value in `SABLE_BOT_SECRET_PREVIOUS` first and webhooks signed with it keep verifying through the window; clear it afterwards. Outgoing calls are always signed with the current secret. |
 | `SABLE_NOTIFY_TOKEN` | Posting into the aliased conversations | Change the variable and restart, then update callers |
 | `SABLE_NEXTCLOUD_PASSWORD` | Everything that Nextcloud user can do | Revoke the app password in Nextcloud, generate another |
-| `SABLE_LLM_API_KEY` | Your model provider's billing | At the provider |
+| `SABLE_LLM_API_KEY` | Your model provider's billing. With `SABLE_LLM_BACKEND=openwebui`, also the account whose tools the model can run | At the provider |
 
 All of them come from the environment. `.env` is in both `.gitignore` and `.dockerignore`, and
 `.env.example` ships with empty values. `compose.yaml` reads the secrets as `${VAR}`
@@ -127,6 +143,11 @@ disables the assistant while leaving commands working.
 Attachments do not leave: they are uploaded into your own Nextcloud, in the upload account's
 Files, and shared from there.
 
+With `SABLE_LLM_BACKEND=openwebui` the question also creates a conversation in that Open WebUI
+account, which is deleted once the answer has been read unless `SABLE_LLM_KEEP_CHATS` is on.
+Whatever tools the loop calls see the prompt: a web search sends the query to your configured
+search provider, and an MCP server sees whatever the model passes it.
+
 ## Accepted risks
 
 These are known and deliberate. Decide for yourself whether they are acceptable.
@@ -158,12 +179,15 @@ These are known and deliberate. Decide for yourself whether they are acceptable.
 6. Chat content sits in process memory for up to `SABLE_HISTORY_TTL`: the assistant's history
    per conversation, and, while `SABLE_ASK_REACTION` is set, the last `SABLE_MESSAGE_CACHE`
    messages of every conversation the bot is in. None of it is written to disk, but it would
-   appear in a core dump. Clearing `SABLE_ASK_REACTION` disables that cache entirely.
+   appear in a core dump. `SABLE_ASK_ROOMS` narrows the cache to the conversations that actually
+   use the reaction, and clearing `SABLE_ASK_REACTION` disables it entirely.
 
 7. Anyone in a conversation can send any message to the model by reacting to it, including
    messages they did not write. That is the feature working as intended, but it means one
    participant can forward another's words to your model backend without saying anything in the
-   room.
+   room. `SABLE_ASK_ADMINS_ONLY` restricts it to `SABLE_ADMIN_USERS`; a refused reaction is
+   logged and says nothing in the room, since the message it points at belongs to somebody who
+   has done nothing.
 
 8. There is no request size limit in the application for webhooks. The HMAC covers the whole
    body, so the body has to be read before it can be checked. Cap it at the proxy. Attachments
@@ -205,7 +229,21 @@ These are known and deliberate. Decide for yourself whether they are acceptable.
     version, the bot name and the configured model. That is the default because a liveness probe
     that needs a credential fails for the wrong reasons.
 
-15. CI holds credentials: the registry password and a runner token with write access to the
+15. **Server-side tools turn a chat room into an actuator.** With
+    `SABLE_LLM_BACKEND=openwebui`, Open WebUI executes tools with the permissions of the
+    account behind `SABLE_LLM_API_KEY`, and the model decides which to call. Asking the
+    assistant a question is not a command, so `SABLE_ADMIN_COMMANDS` does not gate it: anyone
+    in a conversation with the bot, guests included, can cause whatever those tools do. If they
+    reach Home Assistant, a stranger can turn off your lights by asking; if they can send
+    messages, the bot can be made to send them. Prompt injection stops being an
+    embarrassing-text problem, since a participant can paste text aimed at the model rather
+    than at the room.
+    The control is the account, not sable: give it a dedicated Open WebUI user holding only the
+    tools a chat room should have, and leave the rest off. sable never sends a `terminal_id`,
+    so Open Terminal is out of reach by construction. `SABLE_LLM_KEEP_CHATS=true` keeps each
+    conversation, which is the closest thing to an audit trail of what the model actually ran.
+
+16. CI holds credentials: the registry password and a runner token with write access to the
     repository, used to create releases. Anyone who can change a workflow on a branch CI runs
     can reach both.
 
@@ -226,6 +264,13 @@ These are known and deliberate. Decide for yourself whether they are acceptable.
 - [ ] `SABLE_TRUSTED_PROXIES` naming your proxy — the default is loopback, which a proxy in
       another container is not
 - [ ] `SABLE_HEALTH_TOKEN` set if `/healthz` naming the model is more than you want public
+- [ ] `SABLE_ASK_ROOMS` naming only the conversations that use the reaction, so the message cache
+      holds no more chat than it must
+- [ ] `SABLE_ASK_ADMINS_ONLY` on if forwarding somebody else's message to the model should not be
+      open to everyone in the room
+- [ ] `SABLE_BOT_SECRET_PREVIOUS` cleared again once a rotation has finished
+- [ ] If server-side tools are on, a dedicated Open WebUI account holding only the tools a chat
+      room should reach — the model chooses which to call, and anyone in the room can prompt it
 - [ ] The image pinned by version or digest on the host rather than `latest`
 
 ## Reporting a problem

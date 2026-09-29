@@ -10,6 +10,7 @@ from pathlib import Path
 
 from . import __version__
 from .config import Config, ConfigError
+from .logs import quiet_health_checks
 
 
 def load_dotenv(path: Path) -> int:
@@ -61,6 +62,8 @@ def main(argv: list[str] | None = None) -> int:
     logging.getLogger("httpx").setLevel(
         logging.DEBUG if config.log_level == "DEBUG" else logging.WARNING
     )
+    if not config.log_health_checks:
+        quiet_health_checks()
 
     if args.check:
         print(
@@ -90,6 +93,10 @@ def main(argv: list[str] | None = None) -> int:
         # in SABLE_TRUSTED_PROXIES. Nothing in sable reads the client address, so
         # this decides whether the access log tells the truth rather than who
         # gets in; an empty list trusts nobody.
+        #
+        # This line here is the whole of the setting, which is why app.py's
+        # "proxy trust:" startup line names it as uvicorn's: run create_app()
+        # under another ASGI server and nothing reads SABLE_TRUSTED_PROXIES.
         proxy_headers=True,
         forwarded_allow_ips=config.trusted_proxies,
     )

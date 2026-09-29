@@ -13,12 +13,28 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 #: A Talk conversation token, as it appears at the end of the conversation's
 #: URL. Talk's own routes only match lowercase, so anything else can never
 #: reach a conversation - and in practice means someone pasted the room's
 #: *name* where its token belongs.
-TOKEN_RE = re.compile(r"^[a-z0-9]{4,64}$")
+#:
+#: ``\Z`` and not ``$``: ``$`` also matches immediately before a final newline,
+#: so ``abcd1234\n`` passed a check that is the whole boundary between a value
+#: somebody supplied and a URL built around it. A token with a trailing newline
+#: got as far as httpx, which refuses it as an invalid URL - an unhandled error,
+#: so the /notify caller was told 500 where the same value uppercased got 400.
+TOKEN_RE = re.compile(r"^[a-z0-9]{4,64}\Z")
+
+#: How sable talks to a model backend.
+LLM_BACKENDS = frozenset({"openai", "openwebui"})
+
+#: Open WebUI's togglable built-in tools. The others it offers - knowledge,
+#: files, notes, channels, calendar - need no flag and come with the session.
+BUILTIN_FEATURES = frozenset(
+    {"web_search", "code_interpreter", "image_generation", "memory"}
+)
 
 #: Said whenever a token turns out not to be one.
 TOKEN_HINT = (
@@ -156,15 +172,48 @@ class LLMConfig:
     timeout: float = 120.0
     extra_body: dict[str, object] = field(default_factory=dict)
 
+    # --- Open WebUI ---------------------------------------------------------
+    #: ``openai`` is one request and one answer, against anything that speaks
+    #: chat completions. ``openwebui`` runs Open WebUI's own agentic loop, where
+    #: the server executes tools and the answer arrives in a chat record rather
+    #: than in the HTTP response.
+    backend: str = "openai"
+    #: Workspace tools and MCP servers to offer, as Open WebUI names them:
+    #: ``server:mcp:1``, ``my_workspace_tool``.
+    tool_ids: list[str] = field(default_factory=list)
+    #: Which of Open WebUI's own built-in tools to turn on.
+    features: list[str] = field(default_factory=list)
+    #: Send a session id, which is what makes the built-ins available at all.
+    #: Without one the request blocks until the loop finishes instead of
+    #: returning a task to poll - simpler, but with no built-in tools.
+    builtin_tools: bool = True
+    #: Seconds between checks on a running loop.
+    poll_interval: float = 2.0
+    #: Keep the conversation sable creates for each question. It exists only
+    #: because the loop needs somewhere to write; by default it is deleted.
+    keep_chats: bool = False
+    #: Append the sources the loop cited. Worth having: it is how you notice an
+    #: answer came from an encyclopaedia rather than from today's market.
+    show_sources: bool = False
+
     @property
     def enabled(self) -> bool:
         return bool(self.model)
+
+    @property
+    def agentic(self) -> bool:
+        return self.backend == "openwebui"
 
 
 @dataclass(frozen=True)
 class Config:
     # --- Talk bot identity -------------------------------------------------
     bot_secret: str
+    #: The secret being rotated away from, accepted on incoming webhooks only.
+    #: Talk holds one secret per bot install, so changing it means uninstalling
+    #: and reinstalling the bot, and every event that arrives in between fails
+    #: its signature check. Keeping the old value here covers that window.
+    bot_secret_previous: str = ""
     bot_name: str = "sable"
     nextcloud_url: str = ""
     pin_backend: bool = True
@@ -177,12 +226,28 @@ class Config:
     #: React with this to send a message to the model. Empty disables the
     #: feature, and with it the message cache that makes it possible.
     ask_reaction: str = "⁉️"
+    #: Restrict that reaction to the admin_users. Anybody in a conversation can
+    #: otherwise forward somebody else's words to the model backend without
+    #: saying anything in the room, which is accepted risk 7 in security.md.
+    ask_admins_only: bool = False
+    #: Conversations whose messages are cached for the reaction, matched like
+    #: ai_rooms. Empty means *every* conversation, which is the asymmetry to
+    #: watch: an empty ai_rooms means no rooms. Deliberate - reading empty as
+    #: none would switch the feature off for every existing deployment on
+    #: upgrade, silently, which is the one outcome worth ruling out.
+    ask_rooms: list[str] = field(default_factory=list)
     #: Messages remembered per conversation, so a reaction can refer to one.
     message_cache: int = 200
     report_errors: bool = True
     startup_check: bool = True
     unknown_command_hint: bool = True
     max_message_chars: int = 30000
+    #: Model calls allowed to be in flight at once; 0 lifts the ceiling. Every
+    #: trigger becomes a background task with no limit of its own, so a busy room
+    #: or a burst of redeliveries means that many completions open together, each
+    #: holding the llm.timeout open. Talk rate-limits the replies we send, not
+    #: the events it sends us, so nothing upstream applies the brakes either.
+    max_concurrent_replies: int = 8
 
     # --- conversation memory ----------------------------------------------
     history_turns: int = 12
@@ -250,14 +315,49 @@ class Config:
         default_factory=lambda: list(DEFAULT_TRUSTED_PROXIES)
     )
 
+    # --- things that look wrong but might not be ----------------------------
+    #: Settings that are probably a mistake but that sable cannot rule out, so
+    #: they are said once at startup rather than refused. An empty tuple is the
+    #: normal case and prints nothing.
+    warnings: tuple[str, ...] = ()
+
+    # --- time ---------------------------------------------------------------
+    #: IANA name for the zone the bot answers in, e.g. ``America/New_York``.
+    #: Empty follows the host clock. The model is told the date either way: a
+    #: model that does not know today will answer "what is it now" with whatever
+    #: was true when it was trained, confidently and wrongly.
+    timezone: str = ""
+
     # --- process -----------------------------------------------------------
     host: str = "0.0.0.0"
     port: int = 8080
     log_level: str = "INFO"
+    #: Log an access line for every successful probe. Off by default: the
+    #: container healthcheck asks every thirty seconds, and 2,900 identical
+    #: lines a day hide everything else. A probe that *fails* is logged either
+    #: way, which is the part worth seeing.
+    log_health_checks: bool = False
 
     @property
     def notify_enabled(self) -> bool:
         return bool(self.notify_token)
+
+    @property
+    def inbound_secrets(self) -> tuple[str, ...]:
+        """The secrets an incoming signature may have been made with, current first.
+
+        One entry normally, two while a rotation is in progress. Try them in this
+        order and stop at the first that verifies.
+
+        Incoming verification only. Everything sable *sends* - the bot API calls
+        in bot.py - is signed with ``bot_secret`` and never with the previous one:
+        Talk has already been given the new value by then, so signing with the old
+        one would be rejected. The previous secret exists to keep believing events
+        that were signed before the reinstall, nothing more.
+        """
+        if self.bot_secret_previous:
+            return (self.bot_secret, self.bot_secret_previous)
+        return (self.bot_secret,)
 
     @property
     def health_guarded(self) -> bool:
@@ -300,6 +400,21 @@ class Config:
             if value
         }
         return any(entry.strip().casefold() in candidates for entry in self.ignore_users)
+
+    @property
+    def fragile_ignore_users(self) -> list[str]:
+        """The ignore_users entries that look like display names rather than ids.
+
+        Whitespace is the practical signal: a Nextcloud user id has none, and a
+        display name usually does. Worth putting in front of an operator at
+        startup, because a name is the one kind of entry the ignored person can
+        defeat themselves, by renaming - their ignore then quietly lapses, which
+        is the opposite of what was configured.
+
+        Returns the entries and judges nothing else; naming a person by their
+        display name is allowed, and sometimes it is all an operator has.
+        """
+        return [entry for entry in self.ignore_users if re.search(r"\s", entry.strip())]
 
     @staticmethod
     def _listed(entries: list[str], name: str) -> bool:
@@ -356,6 +471,28 @@ class Config:
             entry.strip().casefold() == wanted for entry in self.ai_rooms
         )
 
+    def ask_room_allowed(self, token: str, name: str = "") -> bool:
+        """Should this conversation's messages be cached for the ask reaction?
+
+        Entries are matched exactly as :meth:`ai_room_allowed` matches its own -
+        conversation token or display name, ignoring case and surrounding space,
+        with ``*`` for all of them - and tokens are preferable here for the same
+        reason: renaming a conversation would otherwise change what is cached.
+
+        An empty list means **every** conversation, where an empty ``ai_rooms``
+        means none. The asymmetry is deliberate: the cache is on today for every
+        room the bot is in, and reading empty as none would turn the reaction off
+        across every existing deployment the moment it upgraded.
+        """
+        if not self.ask_rooms or "*" in self.ask_rooms:
+            return True
+        if token and token in self.ask_rooms:
+            return True
+        wanted = name.strip().casefold()
+        return bool(wanted) and any(
+            entry.strip().casefold() == wanted for entry in self.ask_rooms
+        )
+
     @classmethod
     def from_env(cls) -> Config:
         secret = _str("SABLE_BOT_SECRET")
@@ -369,6 +506,18 @@ class Config:
                 "SABLE_BOT_SECRET must be 40-128 characters, matching what Nextcloud "
                 f"accepts for a bot secret (got {len(secret)})."
             )
+        previous = _str("SABLE_BOT_SECRET_PREVIOUS")
+        if previous and not 40 <= len(previous) <= 128:
+            raise ConfigError(
+                "SABLE_BOT_SECRET_PREVIOUS must be 40-128 characters, the same range "
+                f"Nextcloud accepts for the secret it replaces (got {len(previous)})."
+            )
+        if previous and previous == secret:
+            raise ConfigError(
+                "SABLE_BOT_SECRET_PREVIOUS is the same value as SABLE_BOT_SECRET, so "
+                "nothing has been rotated. It is there to hold the secret you are "
+                "rotating away from; set it to the old value, or unset it."
+            )
 
         llm = LLMConfig(
             base_url=_str("SABLE_LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/"),
@@ -379,10 +528,21 @@ class Config:
             max_tokens=_int("SABLE_LLM_MAX_TOKENS", 0) or None,
             timeout=_float("SABLE_LLM_TIMEOUT", 120.0) or 120.0,
             extra_body=_json_object("SABLE_LLM_EXTRA_BODY"),
+            backend=_str("SABLE_LLM_BACKEND", "openai").lower(),
+            tool_ids=_csv("SABLE_LLM_TOOL_IDS"),
+            features=[name.lower() for name in _csv("SABLE_LLM_FEATURES")],
+            builtin_tools=_bool("SABLE_LLM_BUILTIN_TOOLS", True),
+            # No `or 2.0` fallback: a zero here would busy-loop against the
+            # task endpoint, so it is worth refusing rather than quietly
+            # reading as "unset".
+            poll_interval=_float("SABLE_LLM_POLL_INTERVAL", 2.0) or 0.0,
+            keep_chats=_bool("SABLE_LLM_KEEP_CHATS", False),
+            show_sources=_bool("SABLE_LLM_SHOW_SOURCES", False),
         )
 
         config = cls(
             bot_secret=secret,
+            bot_secret_previous=previous,
             bot_name=_str("SABLE_BOT_NAME", "sable"),
             nextcloud_url=_str("SABLE_NEXTCLOUD_URL").rstrip("/"),
             pin_backend=_bool("SABLE_PIN_BACKEND", True),
@@ -391,11 +551,14 @@ class Config:
             reply_as_reply=_bool("SABLE_REPLY_AS_REPLY", False),
             thinking_reaction=_str("SABLE_THINKING_REACTION"),
             ask_reaction=_str("SABLE_ASK_REACTION", "⁉️"),
+            ask_admins_only=_bool("SABLE_ASK_ADMINS_ONLY", False),
+            ask_rooms=_csv("SABLE_ASK_ROOMS"),
             message_cache=_int("SABLE_MESSAGE_CACHE", 200),
             report_errors=_bool("SABLE_REPORT_ERRORS", True),
             startup_check=_bool("SABLE_STARTUP_CHECK", True),
             unknown_command_hint=_bool("SABLE_UNKNOWN_COMMAND_HINT", True),
             max_message_chars=_int("SABLE_MAX_MESSAGE_CHARS", 30000),
+            max_concurrent_replies=_int("SABLE_MAX_CONCURRENT_REPLIES", 8),
             history_turns=_int("SABLE_HISTORY_TURNS", 12),
             history_ttl=_int("SABLE_HISTORY_TTL", 3600),
             llm=llm,
@@ -418,9 +581,11 @@ class Config:
             api_docs=_bool("SABLE_API_DOCS", False),
             trusted_proxies=_csv_or("SABLE_TRUSTED_PROXIES", DEFAULT_TRUSTED_PROXIES),
             health_token=_str("SABLE_HEALTH_TOKEN"),
+            timezone=_str("SABLE_TIMEZONE"),
             host=_str("SABLE_HOST", "0.0.0.0"),
             port=_int("SABLE_PORT", 8080),
             log_level=_str("SABLE_LOG_LEVEL", "INFO").upper(),
+            log_health_checks=_bool("SABLE_LOG_HEALTH_CHECKS", False),
         )
 
         if "*" in config.trusted_proxies and len(config.trusted_proxies) > 1:
@@ -465,6 +630,18 @@ class Config:
                 "nobody at all could run those commands. Name the administrators, "
                 "or drop the commands from the list to leave them open."
             )
+        if config.ask_admins_only and not config.admin_users:
+            raise ConfigError(
+                "SABLE_ASK_ADMINS_ONLY is on but SABLE_ADMIN_USERS is empty, so "
+                "nobody at all could use the reaction. Name the administrators, or "
+                "turn it off to leave the reaction open to everyone."
+            )
+        if config.max_concurrent_replies < 0:
+            raise ConfigError(
+                "SABLE_MAX_CONCURRENT_REPLIES cannot be negative. Use 0 for no "
+                "ceiling at all, or a count of model calls to allow at once "
+                f"(got {config.max_concurrent_replies})."
+            )
 
         missing = sorted(set(config.hooks) - set(config.hook_tokens))
         if missing:
@@ -504,6 +681,66 @@ class Config:
                 "SABLE_NEXTCLOUD_URL is required when SABLE_HOOKS is set: a webhook "
                 "from another service carries no Nextcloud address to reply to."
             )
+        if config.timezone:
+            try:
+                ZoneInfo(config.timezone)
+            except (ZoneInfoNotFoundError, ValueError) as exc:
+                raise ConfigError(
+                    f"SABLE_TIMEZONE={config.timezone!r} is not an IANA time zone "
+                    f"name such as America/New_York or Europe/Berlin ({exc})"
+                ) from exc
+        warnings: list[str] = []
+        if config.llm.backend not in LLM_BACKENDS:
+            raise ConfigError(
+                f"SABLE_LLM_BACKEND must be one of {', '.join(sorted(LLM_BACKENDS))}, "
+                f"got {config.llm.backend!r}"
+            )
+        if config.llm.agentic:
+            if not config.llm.api_key:
+                raise ConfigError(
+                    "SABLE_LLM_API_KEY is required for the openwebui backend: the "
+                    "key is the account whose permissions the tools run with"
+                )
+            if not config.llm.base_url.endswith("/api"):
+                # Not fatal: a proxy may rewrite the path, so this address can
+                # be right even when it does not look it. Everything hangs off
+                # this URL though, so a mistake here 404s every question - worth
+                # saying once at startup rather than leaving to be discovered.
+                warnings.append(
+                    f"SABLE_LLM_BASE_URL is {config.llm.base_url!r}, which does "
+                    "not end in /api. Open WebUI serves the completion, chat and "
+                    "task endpoints under /api, so unless a proxy rewrites the "
+                    "path, every question will fail with a 404. Expected "
+                    "something like https://ai.example.org/api"
+                )
+            if config.llm.poll_interval <= 0:
+                raise ConfigError("SABLE_LLM_POLL_INTERVAL must be greater than zero")
+        unknown = sorted(set(config.llm.features) - BUILTIN_FEATURES)
+        if unknown:
+            raise ConfigError(
+                "SABLE_LLM_FEATURES may name "
+                + ", ".join(sorted(BUILTIN_FEATURES))
+                + "; got "
+                + ", ".join(unknown)
+            )
+        if config.llm.features and not config.llm.agentic:
+            raise ConfigError(
+                "SABLE_LLM_FEATURES only applies to the openwebui backend; set "
+                "SABLE_LLM_BACKEND=openwebui or clear it"
+            )
+        if config.llm.features and not config.llm.builtin_tools:
+            raise ConfigError(
+                "SABLE_LLM_FEATURES needs SABLE_LLM_BUILTIN_TOOLS on: without a "
+                "session id Open WebUI does not offer the built-in tools at all"
+            )
+        forbidden = sorted({"stream", "messages"} & set(config.llm.extra_body))
+        if forbidden:
+            raise ConfigError(
+                "SABLE_LLM_EXTRA_BODY must not set "
+                + ", ".join(forbidden)
+                + ": sable builds those itself, and overriding them breaks the "
+                "reply it gets back"
+            )
         if config.max_hook_bytes <= 0:
             raise ConfigError("SABLE_MAX_HOOK_BYTES must be greater than zero")
         if bool(config.nextcloud_user) != bool(config.nextcloud_password):
@@ -528,4 +765,5 @@ class Config:
         if config.pin_backend and not config.nextcloud_url:
             # Nothing to pin against; fall back to trusting the signed header.
             object.__setattr__(config, "pin_backend", False)
+        object.__setattr__(config, "warnings", tuple(warnings))
         return config

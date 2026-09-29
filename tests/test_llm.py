@@ -238,3 +238,79 @@ async def test_a_successful_completion_logs_the_model_and_duration(caplog) -> No
         await client.aclose()
     assert "some-model answered in" in caplog.text
     assert "5 chars" in caplog.text
+
+
+# --------------------------------------------------------------------------- #
+# Tool calls nobody executed
+#
+# A backend that offers tools but does not run them hands the call straight back.
+# There is no answer in that response, and three different things in it look
+# enough like one to get posted by accident.
+# --------------------------------------------------------------------------- #
+
+
+def tool_call(name: str = "search_web", **extra) -> dict:
+    message = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "type": "function",
+                "id": "abc",
+                "function": {"name": name, "arguments": '{"query":"gold"}'},
+            }
+        ],
+    }
+    message.update(extra)
+    return {"choices": [{"index": 0, "message": message, "finish_reason": "tool_calls"}]}
+
+
+@respx.mock
+async def test_an_unexecuted_tool_call_names_the_tool() -> None:
+    respx.post(URL).mock(return_value=httpx.Response(200, json=tool_call()))
+    client = make_client()
+    try:
+        with pytest.raises(LLMError, match="called search_web and nothing executed it"):
+            await client.complete(MESSAGES)
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_the_reasoning_behind_a_tool_call_is_never_posted() -> None:
+    # This is a list of the tools the model considered. It is not an answer, and
+    # it is a page long.
+    payload = tool_call(reasoning_content="1. Scan available tools: ... (Not suitable)")
+    respx.post(URL).mock(return_value=httpx.Response(200, json=payload))
+    client = make_client()
+    try:
+        with pytest.raises(LLMError, match="nothing executed it"):
+            await client.complete(MESSAGES)
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_tool_markup_in_the_text_is_refused() -> None:
+    # Some backends leave the model's own guess at a tool-call format in the
+    # content. Posting it would also store it in history and teach the model to
+    # keep doing it.
+    payload = completion('<|tool_call>call: search_web{query: "gold"}<tool_call|>')
+    respx.post(URL).mock(return_value=httpx.Response(200, json=payload))
+    client = make_client()
+    try:
+        with pytest.raises(LLMError, match="wrote a tool call as text"):
+            await client.complete(MESSAGES)
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_reasoning_still_stands_in_for_an_ordinary_empty_answer() -> None:
+    payload = completion("", reasoning_content="I think the answer is 4")
+    respx.post(URL).mock(return_value=httpx.Response(200, json=payload))
+    client = make_client()
+    try:
+        assert await client.complete(MESSAGES) == "I think the answer is 4"
+    finally:
+        await client.aclose()

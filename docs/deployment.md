@@ -172,7 +172,7 @@ Confirm the path works before involving Nextcloud:
 
 ```bash
 curl -fsS https://sable.example.org/healthz
-# {"status":"ok","version":"0.6","bot":"sable","llm":"gpt-4o-mini","notify":true}
+# {"status":"ok","version":"0.7","bot":"sable","llm":"gpt-4o-mini","notify":true}
 
 # ...or, with SABLE_HEALTH_TOKEN set:
 curl -fsS -H "X-Health-Token: $SABLE_HEALTH_TOKEN" https://sable.example.org/healthz
@@ -276,7 +276,7 @@ In the conversation:
 
 ```
 !ping      →  pong 🏓
-!version   →  sable 0.6 · model gpt-4o-mini
+!version   →  sable 0.7 · model gpt-4o-mini
 ```
 
 To test the webhook path without Nextcloud — this is exactly what Talk does, with the signature
@@ -373,6 +373,45 @@ SABLE_HOOK_TEMPLATE_KOMODO=**{level}** {data.type}: {data.data.name} on {data.da
 See [webhooks from other services](configuration.md#webhooks-from-other-services) for how the
 rendering works and what the paths are.
 
+### Giving the assistant tools, through Open WebUI
+
+Ask a model with tools what gold costs and it replies asking for a search tool to be called.
+Something has to run it. sable does not — it makes one request and posts the reply — so the
+answer you get is an error naming the tool nobody ran. Open WebUI runs the loop itself:
+
+```ini
+SABLE_LLM_BACKEND=openwebui
+SABLE_LLM_BASE_URL=https://ai.example.org/api
+SABLE_LLM_API_KEY=<a key belonging to an account made for sable>
+SABLE_LLM_MODEL=<the workspace model, not the underlying one>
+SABLE_LLM_TOOL_IDS=server:mcp:1,server:mcp:2
+SABLE_LLM_FEATURES=web_search
+SABLE_LLM_TIMEOUT=300
+SABLE_THINKING_REACTION=⏳
+```
+
+The tool ids are per-account, and MCP servers are addressed as `server:mcp:<id>` rather than
+appearing in this list:
+
+```bash
+curl -s -H "Authorization: Bearer $KEY" https://ai.example.org/api/v1/tools/ | jq '.[] | {id, name}'
+```
+
+Two settings in Open WebUI decide whether anything runs: the model needs **Native** function
+calling, and its *Stream Chat Response* parameter must not be off, since it overrides the
+request. sable reports the second as a loop that finished without writing an answer.
+
+The startup block prints what the model can reach:
+
+```
+tools:          server-side loop via Open WebUI · tools: server:mcp:1, server:mcp:2 · built-ins: web_search
+```
+
+Read that as a list of what a stranger in a chat room can set off, because it is one. The tools
+run as the account behind the API key and the model picks which to call, so give it an account
+of its own. Answers take tens of seconds, which is why the timeout is raised and the thinking
+reaction earns its keep.
+
 ## Operations
 
 ### What the log tells you
@@ -381,13 +420,15 @@ At `INFO`, sable logs its own lifecycle, its configuration, and every use — an
 the interesting lines are not buried:
 
 ```
-sable 0.6 starting
+sable 0.7 starting
   listening on:   http://0.0.0.0:8080
   webhook URL:    POST /webhook  (give this to occ talk:bot:install)
   nextcloud:      https://cloud.example.org
   bot name:       'sable'   command prefix: '!'
   model:          gpt-4o-mini at https://api.openai.com/v1
+  concurrency:    up to 8 replies at once, the rest queued
   ask reaction:   ⁉️
+  ask rooms:      every conversation the bot is in
   admin commands: reset - only for maser
   ai rooms:       (mentions only)
   alerting:       enabled, aliases: alerts
@@ -395,12 +436,12 @@ sable 0.6 starting
   hooks:          /hook/komodo -> abcd1234
   ignoring:       noisy-integration
   backend pin:    on, replies only to https://cloud.example.org
-  proxy trust:    127.0.0.1, ::1
+  proxy trust:    127.0.0.1, ::1 - believed by sable's own uvicorn, and read by nothing else
   api docs:       disabled (SABLE_API_DOCS=true to serve them)
   health check:   GET /healthz (open)
   log level:      INFO
 connected to Nextcloud 31.0.4 at https://cloud.example.org
-sable 0.6 ready
+sable 0.7 ready
 added to conversation abcd1234 ('Team chat') - now receiving its messages
 Alice (users/alice) ran !ping in abcd1234
 Alice (users/alice) asked the model in abcd1234 (22 chars)
@@ -408,8 +449,8 @@ gpt-4o-mini answered in 1.8s (243 chars)
 Alice (users/alice) asked the model about message 12 in abcd1234, written by Bob
 relayed an alert to abcd1234 (alias alerts) as message 4242
 removed from conversation abcd1234 ('Team chat') - no further messages from it
-sable 0.6 stopping
-sable 0.6 stopped
+sable 0.7 stopping
+sable 0.7 stopped
 ```
 
 The startup probe, the line reading `connected to Nextcloud`, calls `status.php`, which needs no
@@ -436,12 +477,19 @@ prompt, command arguments and the message a reaction referred to, plus a line fo
 sable decided not to act on and one per outbound HTTP call. Treat a DEBUG log as containing chat
 content.
 
-`GET /healthz` returns the version, the bot name, the configured model and whether alerting is
-on. It does not call Nextcloud or the model, which keeps it honest as a liveness probe. It is open
+`GET /healthz` returns the version, the bot name, the configured model, whether alerting is on,
+and a `nextcloud` field saying whether the last call to Nextcloud succeeded (`null` until one has
+been made). It does not call Nextcloud or the model *to answer the probe*, which keeps it honest
+as a liveness probe — the field reports what ordinary traffic already discovered, and the
+status stays `ok` either way. It is open
 unless `SABLE_HEALTH_TOKEN` is set, in which case the same answer needs that value in an
 `X-Health-Token` header — see
 [configuration.md](configuration.md#guarding-the-health-probe). FastAPI's schema and its `/docs`
 and `/redoc` pages are **not** served unless `SABLE_API_DOCS=true`.
+
+A successful probe is not logged. The container asks every thirty seconds, which would be some
+2,900 identical access lines a day; one that *fails* still appears, and
+`SABLE_LOG_HEALTH_CHECKS=true` brings the rest back.
 
 Upgrading is a restart. There is no state and no migration.
 
@@ -505,6 +553,9 @@ out or touches production belongs in that list, with the people allowed to run i
 | Nextcloud logs webhook timeouts | Something in front of sable is slow or buffering; sable itself answers before doing any work. Check the proxy, not the bot. |
 | Answers are slow or absent, `completion failed` in logs | Model timeout. Raise `SABLE_LLM_TIMEOUT`, lower `SABLE_LLM_MAX_TOKENS`, or pick a faster model. |
 | `the model returned an empty message` | A reasoning model spent its whole budget thinking. Raise `SABLE_LLM_MAX_TOKENS` or lower reasoning effort via `SABLE_LLM_EXTRA_BODY`. |
+| `called <tool> and nothing executed it` | The backend offered the model tools but does not run them, so there is no answer in the reply. Either stop offering them, or set `SABLE_LLM_BACKEND=openwebui` so Open WebUI runs the loop. |
+| `the loop finished without writing an answer` | Open WebUI accepted the work and wrote nothing. Almost always the model's own *Stream Chat Response* parameter, which overrides `stream: true` and stops the tool loop running. |
+| Tool answers are stale or invented | The model has no clock unless you give it one. Check the date line in the system prompt, and set `SABLE_TIMEZONE`. |
 | Replies are cut short with `_[truncated]_` | The answer exceeded `SABLE_MAX_MESSAGE_CHARS`; Talk's own ceiling is 32000 characters. |
 | `HTTP 429` from Talk | The bot is posting too fast. Talk rate-limits bots; batch or slow down whatever is calling `/notify`. |
 | Mentions ignored | `SABLE_BOT_NAME` must match what people type. Set `SABLE_LOG_LEVEL=DEBUG` and watch for `message in <token> was not for me`. |

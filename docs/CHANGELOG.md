@@ -10,6 +10,126 @@ is not worth publishing.
 Format: `## <version>`, optionally followed by a date. Anything until the next
 `##` heading is the body.
 
+## 0.7
+
+- **Successful health checks no longer fill the log.** The container's
+  healthcheck asks `GET /healthz` every thirty seconds and uvicorn logged each
+  one, which is about 2,900 identical lines a day with everything else buried
+  between them. They are dropped now. A probe that *fails* - a 401 once
+  `SABLE_HEALTH_TOKEN` is set, a 503 while something is wrong - is still logged,
+  which is why this filters rather than turning the access log off, and every
+  other route is untouched. `SABLE_LOG_HEALTH_CHECKS=true` brings them back.
+- **The assistant can use tools, through Open WebUI.**
+  `SABLE_LLM_BACKEND=openwebui` hands the whole agentic loop to Open WebUI: it
+  offers the model your MCP servers, workspace tools and built-ins, executes
+  whatever the model calls, feeds the result back and asks again until there is
+  an answer. sable's own backend cannot do this and is not being changed — one
+  request, one answer, portable to anything that speaks chat completions.
+  It is a separate client because Open WebUI's loop is not chat completions at
+  all. That loop lives in the code that streams events into a chat, so it only
+  runs for a request naming a chat and an assistant message inside it, with
+  `stream: true`, and the answer is written into the chat rather than returned.
+  Each question is four calls: create a conversation, start the completion, wait
+  for the tasks to drain, read the message. The conversation is deleted
+  afterwards unless `SABLE_LLM_KEEP_CHATS` is set; sable keeps its own history
+  as before.
+  New settings: `SABLE_LLM_BACKEND`, `SABLE_LLM_TOOL_IDS`, `SABLE_LLM_FEATURES`,
+  `SABLE_LLM_BUILTIN_TOOLS`, `SABLE_LLM_POLL_INTERVAL`, `SABLE_LLM_KEEP_CHATS`
+  and `SABLE_LLM_SHOW_SOURCES`. The base URL must end in `/api` and an API key
+  is required, both checked at startup, as is every feature name.
+  Worth reading before turning it on: the tools run with the permissions of the
+  account behind that API key, and anyone in a conversation can prompt the model
+  into calling one. Accepted risk 15 in `docs/security.md` covers it.
+- **The model is told what day it is.** The system prompt now ends with the
+  current date, time and zone, set by `SABLE_TIMEZONE` or the host clock. This
+  is not cosmetic: asked what gold was worth "right now", a model with no clock
+  answered with the 1933 statutory price and a figure from two years ago, and
+  had no way to notice either was stale. The same question with a date in it
+  came back correct to the dollar. A zone name that is not an IANA zone is a
+  startup error rather than a silent fall back to UTC.
+- **A tool call nobody executed is no longer posted as an answer.** A backend
+  that offers a model tools but does not run them hands the call straight back,
+  and the reply then contains no answer at all - only `tool_calls`, and often a
+  page of `reasoning_content` listing every tool the model considered. sable was
+  posting that reasoning to the room and storing it in conversation history,
+  where it taught the model to do the same thing next turn. Now it raises an
+  error naming the tool that went unanswered, which is usually enough to find
+  the misconfiguration at the backend. Reasoning still stands in for an
+  ordinary empty answer, which is what that fallback was for.
+- Text containing tool-call markup - a model writing `<|tool_call>` rather than
+  calling one - is refused for the same reason, rather than posted verbatim.
+- `SABLE_LLM_EXTRA_BODY` refuses `stream` and `messages`. Both are built by
+  sable, and overriding `stream` in particular left it parsing an event stream
+  as JSON.
+- **A trailing newline in a conversation token returned 500.** `TOKEN_RE` ended in
+  `$`, which in Python also matches immediately before a final newline, so
+  `{"room": "abcd1234"}` plus one cleared the boundary check on `POST /notify`,
+  reached httpx as a request path and raised there. The same value uppercased
+  correctly answered 400. Anchored on the end of the string instead.
+- **A replayed webhook is refused.** `X-Nextcloud-Talk-Random` was verified as
+  part of the signature and then forgotten, so a captured webhook replayed for
+  ever. The last 4096 are remembered and a repeat answers 401. What that buys is
+  bounded and `docs/security.md` says so: the cache is process memory, a restart
+  forgets it, and Talk sends no timestamp, so there is no age to enforce. The
+  check runs after the signature, so nobody can fill the cache with randoms they
+  invented and have real webhooks refused.
+- **`SABLE_MAX_CONCURRENT_REPLIES`** caps open model calls, eight by default, `0`
+  for no ceiling. Talk rate-limits the replies sable sends but not what it
+  delivers, so a redelivered batch used to mean one open model call per event,
+  each holding `SABLE_LLM_TIMEOUT`. The wait happens in the background task, so
+  the webhook still answers 200 before asking for a slot and a full queue never
+  becomes a Talk timeout.
+- **`SABLE_BOT_SECRET_PREVIOUS`** closes the rotation window. Talk holds one
+  secret per bot install, so rotating meant uninstall, install, restart — and
+  every webhook in between answered 401. The previous secret is accepted for
+  incoming verification only; outgoing calls are always signed with the current
+  one. Clear it when the rotation is done.
+- **`SABLE_ASK_ADMINS_ONLY`** restricts the ⁉️ reaction to `SABLE_ADMIN_USERS`,
+  and **`SABLE_ASK_ROOMS`** narrows which conversations are cached for it at all.
+  Accepted risks 6 and 7 — chat content held for every room the bot is in, and
+  any participant able to forward somebody else's message to the model — now
+  each have a switch. A refused reaction is logged and says nothing in the room:
+  it asks nobody anything, and the message it points at belongs to a third party
+  who has done nothing. Empty `SABLE_ASK_ROOMS` means every room, unlike
+  `SABLE_AI_ROOMS` where empty means none; the asymmetry is deliberate, so that
+  upgrading does not silently switch the feature off, and it is documented as
+  such rather than hidden.
+- **The admin decision refuses a bot actor itself.** An actor typed
+  `Application` with an id like `users/maser` resolves an administrator's user
+  id, so `is_admin_user` said yes to it. What stopped it was the `is_bot` early
+  return in `handle` happening to run first — true, and only true until somebody
+  moves a line. Both the command gate and `ctx.is_admin`, which is what `!help`
+  filters on and what a custom command is told to use, now ask a check that
+  refuses a bot wherever it is called from.
+- **The webhook validates its conversation token.** It goes straight into the
+  outbound URL path, and httpx normalises `..` segments, so an unexpected token
+  could move a request off the bot API. The check sits in the handler rather than
+  in `parse_event`, so the answer is a 400 naming the token instead of a
+  misleading "unparseable event".
+- `GET /healthz` reports whether Nextcloud was reachable on the last call
+  (`true`, `false`, or `null` before any). The reachability state was already
+  tracked and logged and nothing read it. The status stays `ok` and the code 200
+  when Nextcloud is down, because a liveness probe that fails on a dependency
+  gets a healthy process restarted.
+- Startup names the settings that decide who the bot answers: a `concurrency:`
+  line, an `ask rooms:` line, `(administrators only)` on the reaction, and a
+  warning for the `SABLE_IGNORE_USERS` entries that look like display names,
+  since matching a name means somebody can quietly un-ignore themselves by
+  renaming. The `proxy trust:` line now says the setting is applied by sable's
+  own uvicorn, which is the only thing that reads it.
+- **The documentation is tested.** `tests/test_docs.py` asserts that every
+  `SABLE_*` the code reads appears in `.env.example`, `compose.yaml` and
+  `docs/configuration.md`, that each documented default is the real one, that the
+  startup-log sample in `docs/deployment.md` has exactly the lines the code
+  prints in the order it prints them, and that every internal link and anchor
+  resolves. Eight stale facts had survived repeated review before this existed.
+- The suite grew from 302 to over 500 tests, most of it input diversity it did
+  not have: it previously exercised one conversation token and essentially one
+  actor shape across 122 parsed events, which is how the `TOKEN_RE` bug went
+  unnoticed. Guests, bots, `Application` actors and federated users are now
+  distinct cases, and `signed_headers` mints a fresh random per call, so the
+  replay refusal cannot ambush the next test that posts twice.
+
 ## 0.6
 
 - **`SABLE_ADMIN_COMMANDS` and `SABLE_ADMIN_USERS`** put commands behind a list of
