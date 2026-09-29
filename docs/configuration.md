@@ -587,6 +587,7 @@ working hours.
 | --- | --- | --- |
 | `SABLE_HOST` | `0.0.0.0` | Bind address. Use `127.0.0.1` when a reverse proxy on the same host is the only client. |
 | `SABLE_PORT` | `8080` | |
+| `SABLE_LOG_HEALTH_CHECKS` | `false` | Log an access line for every successful `GET /healthz`. The container healthcheck asks every thirty seconds — roughly 2,900 identical lines a day, which hide everything else. A probe that *fails* is logged either way, which is the part worth seeing. |
 | `SABLE_LOG_LEVEL` | `INFO` | `INFO` logs the lifecycle, the resolved configuration, and who used what. `DEBUG` adds message text, prompts, command arguments, every outbound HTTP call, and why a message was *not* acted on — the fastest way to debug mention and prefix matching, but it puts chat content in the log. See [deployment.md](deployment.md#what-the-log-tells-you). |
 
 ## TLS trust, for an internal or self-signed Nextcloud

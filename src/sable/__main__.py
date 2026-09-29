@@ -10,6 +10,7 @@ from pathlib import Path
 
 from . import __version__
 from .config import Config, ConfigError
+from .logs import quiet_health_checks
 
 
 def load_dotenv(path: Path) -> int:
@@ -61,6 +62,8 @@ def main(argv: list[str] | None = None) -> int:
     logging.getLogger("httpx").setLevel(
         logging.DEBUG if config.log_level == "DEBUG" else logging.WARNING
     )
+    if not config.log_health_checks:
+        quiet_health_checks()
 
     if args.check:
         print(

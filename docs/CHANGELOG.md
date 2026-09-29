@@ -12,6 +12,13 @@ Format: `## <version>`, optionally followed by a date. Anything until the next
 
 ## Unreleased
 
+- **Successful health checks no longer fill the log.** The container's
+  healthcheck asks `GET /healthz` every thirty seconds and uvicorn logged each
+  one, which is about 2,900 identical lines a day with everything else buried
+  between them. They are dropped now. A probe that *fails* - a 401 once
+  `SABLE_HEALTH_TOKEN` is set, a 503 while something is wrong - is still logged,
+  which is why this filters rather than turning the access log off, and every
+  other route is untouched. `SABLE_LOG_HEALTH_CHECKS=true` brings them back.
 - **The assistant can use tools, through Open WebUI.**
   `SABLE_LLM_BACKEND=openwebui` hands the whole agentic loop to Open WebUI: it
   offers the model your MCP servers, workspace tools and built-ins, executes

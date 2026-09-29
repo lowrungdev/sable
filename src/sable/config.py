@@ -332,6 +332,11 @@ class Config:
     host: str = "0.0.0.0"
     port: int = 8080
     log_level: str = "INFO"
+    #: Log an access line for every successful probe. Off by default: the
+    #: container healthcheck asks every thirty seconds, and 2,900 identical
+    #: lines a day hide everything else. A probe that *fails* is logged either
+    #: way, which is the part worth seeing.
+    log_health_checks: bool = False
 
     @property
     def notify_enabled(self) -> bool:
@@ -580,6 +585,7 @@ class Config:
             host=_str("SABLE_HOST", "0.0.0.0"),
             port=_int("SABLE_PORT", 8080),
             log_level=_str("SABLE_LOG_LEVEL", "INFO").upper(),
+            log_health_checks=_bool("SABLE_LOG_HEALTH_CHECKS", False),
         )
 
         if "*" in config.trusted_proxies and len(config.trusted_proxies) > 1:
