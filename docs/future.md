@@ -67,10 +67,17 @@ would need that same account to fetch it, and nothing has asked for it yet.
 
 ## Assistant features
 
-The assistant sees the conversation and nothing else, by design. Tool calling belongs inside a
-command, where the blast radius is explicit and you control the authorization; retrieval is the
-same argument, and the interesting question there is what corpus, and whether Nextcloud Files is
-it.
+Tool calling is borrowed, not implemented: `SABLE_LLM_BACKEND=openwebui` hands the loop to Open
+WebUI, which owns the tool registry and the credentials. sable running its own loop would mean
+becoming an MCP client and holding those credentials here, which is a different project and a
+much larger blast radius. The gap that borrowing leaves is authorization — Open WebUI decides
+what the account may reach, and sable cannot say "only maser may call this one". If that
+becomes a real need, an allowlist of tool names checked against `ctx.is_admin` before the
+question is sent is the smaller half of the fix; the other half is that the model, not sable,
+chooses the tool.
+
+Retrieval is untouched, and the interesting question there is what corpus, and whether Nextcloud
+Files is it.
 
 `SABLE_LLM_MODEL` is global. A cheap model for chatter and an expensive one for a particular
 room is a small change to `answer_with_llm`, which already takes a model override.
@@ -132,12 +139,13 @@ throwaway instance would catch API drift that mocks cannot.
 
 Logs are the only audit trail; see [security.md](security.md#accepted-risks).
 
-`sable --check` prints less than the startup block does, and the gap keeps widening: seven lines
-against the block's nineteen. It has never named attachments, hooks or the ignore list, and now
-also misses the concurrency ceiling, the cached rooms, the API docs, the health check, the proxy
-trust and the backend pin — most of the settings somebody would run `--check` to confirm before
-deploying. Either it grows to match the block or it stops claiming to show the resolved
-configuration; feeding both from the same summary helpers would keep them from drifting again.
+`sable --check` prints less than the startup block does, and the gap keeps widening: seven
+settings against the block's nineteen. It has never named attachments, hooks or the ignore list,
+and now also misses the concurrency ceiling, the cached rooms, the API docs, the health check,
+the proxy trust, the backend pin, the time zone and every tool the model can reach — most of
+what somebody runs `--check` to confirm before deploying. Either it grows to match the block or
+it stops claiming to show the resolved configuration; feeding both from the same summary helpers
+would keep them from drifting again, and `tests/test_docs.py` already pins the block's shape.
 
 ## Decisions worth revisiting
 

@@ -136,6 +136,16 @@ DOCUMENTED_DEFAULTS = {
     "SABLE_HOST": "host",
     "SABLE_PORT": "port",
     "SABLE_LOG_LEVEL": "log_level",
+    "SABLE_LOG_HEALTH_CHECKS": "log_health_checks",
+}
+
+#: The same, for settings that live on config.llm rather than on config.
+DOCUMENTED_LLM_DEFAULTS = {
+    "SABLE_LLM_BACKEND": "backend",
+    "SABLE_LLM_BUILTIN_TOOLS": "builtin_tools",
+    "SABLE_LLM_POLL_INTERVAL": "poll_interval",
+    "SABLE_LLM_KEEP_CHATS": "keep_chats",
+    "SABLE_LLM_SHOW_SOURCES": "show_sources",
 }
 
 
@@ -199,7 +209,11 @@ def test_every_setting_with_a_documented_default_still_has_one() -> None:
     # Guards the mapping itself: a variable dropped from the reference, or one
     # whose Default column went away, would otherwise silently stop being checked.
     cells = default_cells()
-    missing = sorted(variable for variable in DOCUMENTED_DEFAULTS if variable not in cells)
+    missing = sorted(
+        variable
+        for variable in {**DOCUMENTED_DEFAULTS, **DOCUMENTED_LLM_DEFAULTS}
+        if variable not in cells
+    )
     assert not missing, (
         f"{', '.join(missing)}: no '| Variable | Default | Notes |' row in "
         f"docs/configuration.md any more"
@@ -315,3 +329,15 @@ def test_every_internal_link_resolves(path: Path) -> None:
                 f"{path.name} links to {target}, but no heading in {relative or path.name} "
                 f"slugifies to {fragment!r}. The section was renamed or removed."
             )
+
+
+@pytest.mark.parametrize("variable,attribute", sorted(DOCUMENTED_LLM_DEFAULTS.items()))
+def test_the_documented_model_default_is_the_one_the_code_uses(
+    variable: str, attribute: str, default_config: Config
+) -> None:
+    documented = documented_value(variable, default_cells()[variable])
+    actual = written_as(getattr(default_config.llm, attribute))
+    assert documented == actual, (
+        f"docs/configuration.md documents {variable} as defaulting to "
+        f"{documented!r}, but an unset environment gives {actual!r}."
+    )

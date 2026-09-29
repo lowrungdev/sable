@@ -29,7 +29,8 @@ expects. Commands are open to everyone in the conversation unless you name them 
 Nextcloud Talk ──POST /webhook (signed)──▶ sable ──┬──▶ command handler ──┐
                                                    │                      │
                    Prometheus/CI ──POST /notify──▶ ┼──▶ model backend ────┤
-          Komodo/Grafana ──POST /hook/{name}──▶ ───┤   (chat completions) │
+          Komodo/Grafana ──POST /hook/{name}──▶ ───┤   (or Open WebUI,    │
+                                                   │    which runs tools) │
                                                    │                      │
                     ◀──── POST /bot/{token}/message (signed) ─────────────┘
 ```
@@ -79,7 +80,13 @@ event carries the message id and not its text.
 
 History is per conversation, held in memory, capped by `SABLE_HISTORY_TURNS` and
 `SABLE_HISTORY_TTL`, and cleared by `!reset`. It is a cache rather than a record, so a restart
-forgets it. Speaker names are prefixed onto each turn so the model can tell a busy room apart.
+forgets it. Speaker names are prefixed onto each turn so the model can tell a busy room apart,
+and the current date and time go in the system prompt so "right now" means something.
+
+The assistant has no tools of its own — a single request cannot run one — but pointed at Open
+WebUI with `SABLE_LLM_BACKEND=openwebui` it uses whatever that instance offers, with Open WebUI
+executing the loop. Everyone in the room can set those tools off, so read
+[letting the model use tools](configuration.md#letting-the-model-use-tools) before enabling it.
 
 ## Alerting
 
@@ -147,10 +154,12 @@ The code is small enough to read in a sitting:
 [bot.py](../src/sable/bot.py) for deciding what to do with an event,
 [commands.py](../src/sable/commands.py) for the registry and built-ins,
 [llm.py](../src/sable/llm.py) for chat completions,
+[openwebui.py](../src/sable/openwebui.py) for the server-side tool loop,
+[hooks.py](../src/sable/hooks.py) for rendering somebody else's webhook into a message,
 [app.py](../src/sable/app.py) for the HTTP surface,
 [config.py](../src/sable/config.py) for the environment, and
-[history.py](../src/sable/history.py) and [state.py](../src/sable/state.py) for the small pieces
-of in-memory state.
+[history.py](../src/sable/history.py), [state.py](../src/sable/state.py) and
+[logs.py](../src/sable/logs.py) for the small pieces around the edges.
 
 ## License
 

@@ -375,11 +375,9 @@ rendering works and what the paths are.
 
 ### Giving the assistant tools, through Open WebUI
 
-Ask a model with tools what gold costs and it will answer with a request to call a search
-tool. Somebody has to run it. sable does not — it sends one request and posts the reply — so
-the answer you get is an error naming the tool nobody ran.
-
-Open WebUI runs the whole loop itself. Point sable at it:
+Ask a model with tools what gold costs and it replies asking for a search tool to be called.
+Something has to run it. sable does not — it makes one request and posts the reply — so the
+answer you get is an error naming the tool nobody ran. Open WebUI runs the loop itself:
 
 ```ini
 SABLE_LLM_BACKEND=openwebui
@@ -392,18 +390,16 @@ SABLE_LLM_TIMEOUT=300
 SABLE_THINKING_REACTION=⏳
 ```
 
-Find the ids first — they are per-account:
+The tool ids are per-account, and MCP servers are addressed as `server:mcp:<id>` rather than
+appearing in this list:
 
 ```bash
 curl -s -H "Authorization: Bearer $KEY" https://ai.example.org/api/v1/tools/ | jq '.[] | {id, name}'
 ```
 
-MCP servers are addressed as `server:mcp:<id>` rather than appearing in that list.
-
-Two settings decide whether it works at all, and both live in Open WebUI rather than here. The
-model needs **Native** function calling, and its *Stream Chat Response* parameter must not be
-off — it overrides the request, and then no tool runs and nothing is written. sable reports
-that as a loop that finished without an answer.
+Two settings in Open WebUI decide whether anything runs: the model needs **Native** function
+calling, and its *Stream Chat Response* parameter must not be off, since it overrides the
+request. sable reports the second as a loop that finished without writing an answer.
 
 The startup block prints what the model can reach:
 
@@ -411,12 +407,10 @@ The startup block prints what the model can reach:
 tools:          server-side loop via Open WebUI · tools: server:mcp:1, server:mcp:2 · built-ins: web_search
 ```
 
-Read that line as a list of what a stranger in a chat room can set off, because it is one. The
-tools run as the account behind the API key, and the model decides which to call. Give it an
-account of its own, holding only what a chat room should have.
-
-Expect answers to take tens of seconds — a tool round is a second model call with the results
-in the prompt — which is why the timeout is raised and the thinking reaction earns its keep.
+Read that as a list of what a stranger in a chat room can set off, because it is one. The tools
+run as the account behind the API key and the model picks which to call, so give it an account
+of its own. Answers take tens of seconds, which is why the timeout is raised and the thinking
+reaction earns its keep.
 
 ## Operations
 
@@ -493,6 +487,10 @@ unless `SABLE_HEALTH_TOKEN` is set, in which case the same answer needs that val
 [configuration.md](configuration.md#guarding-the-health-probe). FastAPI's schema and its `/docs`
 and `/redoc` pages are **not** served unless `SABLE_API_DOCS=true`.
 
+A successful probe is not logged. The container asks every thirty seconds, which would be some
+2,900 identical access lines a day; one that *fails* still appears, and
+`SABLE_LOG_HEALTH_CHECKS=true` brings the rest back.
+
 Upgrading is a restart. There is no state and no migration.
 
 ```bash
@@ -555,6 +553,9 @@ out or touches production belongs in that list, with the people allowed to run i
 | Nextcloud logs webhook timeouts | Something in front of sable is slow or buffering; sable itself answers before doing any work. Check the proxy, not the bot. |
 | Answers are slow or absent, `completion failed` in logs | Model timeout. Raise `SABLE_LLM_TIMEOUT`, lower `SABLE_LLM_MAX_TOKENS`, or pick a faster model. |
 | `the model returned an empty message` | A reasoning model spent its whole budget thinking. Raise `SABLE_LLM_MAX_TOKENS` or lower reasoning effort via `SABLE_LLM_EXTRA_BODY`. |
+| `called <tool> and nothing executed it` | The backend offered the model tools but does not run them, so there is no answer in the reply. Either stop offering them, or set `SABLE_LLM_BACKEND=openwebui` so Open WebUI runs the loop. |
+| `the loop finished without writing an answer` | Open WebUI accepted the work and wrote nothing. Almost always the model's own *Stream Chat Response* parameter, which overrides `stream: true` and stops the tool loop running. |
+| Tool answers are stale or invented | The model has no clock unless you give it one. Check the date line in the system prompt, and set `SABLE_TIMEZONE`. |
 | Replies are cut short with `_[truncated]_` | The answer exceeded `SABLE_MAX_MESSAGE_CHARS`; Talk's own ceiling is 32000 characters. |
 | `HTTP 429` from Talk | The bot is posting too fast. Talk rate-limits bots; batch or slow down whatever is calling `/notify`. |
 | Mentions ignored | `SABLE_BOT_NAME` must match what people type. Set `SABLE_LOG_LEVEL=DEBUG` and watch for `message in <token> was not for me`. |

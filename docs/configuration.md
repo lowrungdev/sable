@@ -224,96 +224,7 @@ Beyond the ceiling a trigger waits its turn rather than being dropped, so raisin
 `SABLE_LLM_TIMEOUT` and lowering this at the same time can leave somebody waiting a long while.
 `0` means unlimited; a negative value is a startup error, since `0` already says that.
 
-## Webhooks from other services
-
-`/notify` expects sable's own shape, which most services cannot send, and many of them cannot
-set an `Authorization` header either. `/hook/{name}` takes whatever JSON they do send and
-renders it into a message.
-
-| Variable | Default | Notes |
-| --- | --- | --- |
-| `SABLE_HOOKS` | *(empty)* | Hook name to conversation, as `komodo=a1b2c3d4,grafana=e5f6g7h8`. The conversation is a token or a `SABLE_NOTIFY_ROOMS` alias, checked at startup. Empty means every `/hook/...` answers 404. |
-| `SABLE_HOOK_TOKEN_<NAME>` | *(required per hook)* | That hook's own token, one variable each so a secret store can inject them separately. |
-| `SABLE_HOOK_TEMPLATE_<NAME>` | *(empty)* | Optional format string. Without one the payload is rendered generically. |
-| `SABLE_MAX_HOOK_BYTES` | `262144` (256 KiB) | Largest payload accepted. Alerts are small; this is a cap on abuse. |
-
-A hook with no token, a token with no hook, or a conversation that is neither an alias nor a
-token is a startup error rather than something you discover when an alert goes missing.
-
-### What a payload turns into
-
-The renderer flattens the payload to dotted paths, so nesting stops mattering, then looks for a
-severity among `level`, `severity`, `status`, `state`, `priority` and `urgency`; a title among
-`title`, `subject`, `summary`, `alertname`, `event`, `name` and `type`; and a body among
-`message`, `text`, `description`, `details`, `body`, `reason` and `error`. Whatever is left is
-shown as key and value pairs.
-
-Identifiers and timestamps are dropped, because a chat message already has its own time and the
-ids mean nothing in a room. Repeated name and value pairs are shown once — Alertmanager sends
-`alertname` and `severity` three times over. URLs are kept, since a link back to the dashboard
-that fired is usually the most useful part. Long payloads are capped, with a count of what was
-left out.
-
-A Komodo alert arrives as:
-
-```
-**CRITICAL** sable
-resolved: false · target.type: Stack · data.type: StackStateChange · server_name: prod-1 · from: Running · to: Unhealthy
-```
-
-Anything that is not JSON is posted as text rather than rejected, on the grounds that an alert
-that arrives slightly wrong beats one that does not arrive.
-
-### Format strings
-
-Set `SABLE_HOOK_TEMPLATE_<NAME>` to take control of the wording. `{dotted.path}` is substituted
-from the same flattened payload:
-
-```ini
-SABLE_HOOK_TEMPLATE_KOMODO=**{level}** {data.type}: {data.data.name} on {data.data.server_name} went {data.data.from} to {data.data.to}
-```
-
-```
-**CRITICAL** StackStateChange: sable on prod-1 went Running to Unhealthy
-```
-
-Paths reach into lists as well, so `{alerts.0.labels.instance}` works, and naming a whole object
-gives you its JSON. Substitution is all it does: there are no expressions, no conditionals and
-nothing that can run. A path the payload does not have renders as `?` and logs a warning, so a
-template that drifts out of date still delivers the alert.
-
-Doubled braces are literal, so `{{like this}}` renders as `{like this}`.
-
-### The token in the URL
-
-Services that cannot set headers can pass `?token=...` instead, which is the only way Komodo can
-authenticate. That puts a credential in a URL, where proxies and access logs will record it,
-which is why each hook has its own token: one exposed in a log costs you that hook rather than
-everything `/notify` can reach. It is listed among the
-[accepted risks](security.md#accepted-risks).
-
-## File attachments
-
-`/notify` can carry a file, but not with the bot secret: the Talk bot API has no upload
-endpoint, and bot signatures are not accepted by the ones that do. Attachments therefore need a
-second credential — an ordinary Nextcloud user — which sable uses **only** on the `/notify` path
-and **only** when a file is actually attached.
-
-| Variable | Default | Notes |
-| --- | --- | --- |
-| `SABLE_NEXTCLOUD_USER` | *(empty)* | A Nextcloud user for the bot. Both this and the password must be set, or neither. |
-| `SABLE_NEXTCLOUD_PASSWORD` | *(empty)* | An **app password** for that user, from Settings → Security. |
-| `SABLE_UPLOAD_PATH` | `/sable` | Folder inside that user's own Files where attachments are put before sharing. Created on first use. |
-| `SABLE_MAX_UPLOAD_BYTES` | `26214400` (25 MiB) | Largest attachment `/notify` accepts. Bigger ones get a `413`. |
-
-Give it its own user account. An app password cannot be scoped to files only — it can do
-everything that user can, across Files, Contacts and Calendar. That is a much larger credential
-than the bot secret, which can only post messages, so it should belong to an account that owns
-nothing else. Add that account to `SABLE_IGNORE_USERS` as well, or the chat message its own file
-share produces comes back through the webhook and is treated as somebody talking to the bot.
-[security.md](security.md#accepted-risks) has the rest.
-
-### Ignoring people
+## Ignoring people
 
 `SABLE_IGNORE_USERS` drops everything from the listed actors: commands, mentions and reactions
 alike, and their messages are never cached for the reaction feature either. Ignore means ignore,
@@ -329,7 +240,7 @@ SABLE_IGNORE_USERS=noisy-integration,users/bob,guests/abc123
 Prefer ids here too. A display name can be changed by the person themselves, which would quietly
 stop them being ignored, the opposite of what you configured.
 
-### Who may run which command
+## Who may run which command
 
 By default every command is open to everybody in the conversation, guests included. That is right
 for `!ping` and wrong for anything that touches something outside the chat, so commands can be
@@ -429,58 +340,46 @@ truncated, raise `SABLE_LLM_MAX_TOKENS` or lower the reasoning effort via
 
 ## Letting the model use tools
 
-A model offered tools does not run them. It answers with a *request* to run one, and something
-has to execute it and hand the result back. sable's own backend does one round trip, so a
-reply that contains only a tool call is an error naming the tool — accurate, but not an answer.
+A model offered tools does not run them. It replies asking for one to be called, and something
+has to execute it and hand the result back. sable makes one request and posts one answer, so a
+reply carrying only a tool call becomes an error naming the tool nobody ran.
 
-Open WebUI will run the whole loop server-side, and `SABLE_LLM_BACKEND=openwebui` asks it to.
+`SABLE_LLM_BACKEND=openwebui` hands the loop to Open WebUI, which executes tools itself.
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `SABLE_LLM_BACKEND` | `openai` | `openai` is one request against anything that speaks chat completions. `openwebui` runs Open WebUI's agentic loop, where the server executes the tools. |
+| `SABLE_LLM_BACKEND` | `openai` | `openai` is one request against anything speaking chat completions. `openwebui` runs Open WebUI's agentic loop. |
 | `SABLE_LLM_TOOL_IDS` | *(empty)* | Workspace tools and MCP servers, as Open WebUI names them: `server:mcp:1,my_tool`. `GET /api/v1/tools/` lists the workspace ones. |
-| `SABLE_LLM_FEATURES` | *(empty)* | Open WebUI's own built-ins to enable: any of `web_search`, `code_interpreter`, `image_generation`, `memory`. |
-| `SABLE_LLM_BUILTIN_TOOLS` | `true` | Sends a session id, which is what makes the built-ins available. `false` uses the blocking variant: one request that waits for the loop, no polling, but no built-ins. |
+| `SABLE_LLM_FEATURES` | *(empty)* | Open WebUI's built-ins: any of `web_search`, `code_interpreter`, `image_generation`, `memory`. |
+| `SABLE_LLM_BUILTIN_TOOLS` | `true` | Sends a session id, which is what makes those built-ins available. `false` blocks on one request instead of polling, and gets no built-ins. |
 | `SABLE_LLM_POLL_INTERVAL` | `2.0` | Seconds between checks while the loop runs. |
-| `SABLE_LLM_KEEP_CHATS` | `false` | Keep the conversation each question creates. Useful while debugging; it fills the account's chat list otherwise. |
-| `SABLE_LLM_SHOW_SOURCES` | `false` | Append what the answer cited. Worth turning on: it is how you notice an answer came from an encyclopaedia rather than from today's market. |
+| `SABLE_LLM_KEEP_CHATS` | `false` | Keep the conversation each question creates, instead of deleting it. |
+| `SABLE_LLM_SHOW_SOURCES` | `false` | Append what the answer cited — how you notice it came from an encyclopaedia rather than today's market. |
 
-With this backend `SABLE_LLM_API_KEY` is required, because **the key is the account the tools
-run as**. That, the backend name and every feature name are checked at startup.
+`SABLE_LLM_API_KEY` is required here, because the key is the account the tools run as. It, the
+backend name and every feature name are checked at startup. `SABLE_LLM_BASE_URL` should end in
+`/api`; one that does not gets a warning rather than a refusal, since a proxy may be rewriting
+the path.
 
-`SABLE_LLM_BASE_URL` should end in `/api`, since the completion, chat and task endpoints all
-hang off it. A URL that does not is a warning rather than an error — a proxy may rewrite the
-path, so the address can be right even when it does not look it — but if no proxy is doing
-that, every question will fail with a 404.
+Open WebUI's loop lives in the code that streams events into a chat, so it runs only for a
+request naming a chat and a message inside it, with `stream: true`, and writes the answer there
+rather than returning it. Each question is therefore four calls — create a conversation, start
+the completion, wait for the tasks to drain, read the message — and sable deletes the
+conversation afterwards. Your history is unaffected; sable keeps that itself.
 
-### What it actually does
+Expect it to be slower, since a tool round is a second model call with the results in the
+prompt. Raise `SABLE_LLM_TIMEOUT` to 300 or so and set `SABLE_THINKING_REACTION`.
 
-Open WebUI's tool loop lives in the code that streams events into a chat, so it only runs for a
-request that names a chat and an assistant message inside it, and only with `stream: true`. The
-answer is written into that chat rather than returned. So each question is four calls: create a
-conversation, start the completion, wait for the tasks to drain, read the message. sable then
-deletes the conversation, because it existed only to be written into. Your own history is
-unaffected — sable keeps that itself and sends it in `messages` as before.
+Three things in Open WebUI decide whether it works at all. The model needs **Native** function
+calling. Its *Stream Chat Response* parameter must not be off, because it overrides the request
+and then nothing runs — which sable reports as a loop that finished without an answer. And an
+OAuth-protected MCP server has to be authorised once in the browser as that user.
 
-Expect this to be slower. A tool round is a second model call with the results in the prompt,
-and a few dozen tool definitions cost thousands of prompt tokens before a word is generated.
-Raise `SABLE_LLM_TIMEOUT` to 300 or so, and set `SABLE_THINKING_REACTION` so the room can see
-the bot is working.
-
-### Before it will work
-
-- The model needs **Native** function calling. Legacy mode does one round and no built-ins.
-- The model's own *Stream Chat Response* parameter overrides the request. If it is off, no tool
-  runs and nothing is written — which sable reports as a loop that finished without an answer.
-- An OAuth-protected MCP server has to be authorised once in the browser, as that user.
-
-### Who can set these tools off
-
-Anyone in a conversation with the bot. Commands can be gated with `SABLE_ADMIN_COMMANDS`, but
-asking the assistant a question is not a command, and the model decides which tool to call. If
-the tools reach Home Assistant, a stranger in a room can reach Home Assistant. Give sable a
-dedicated Open WebUI account with only the tools a chat room should have — the permissions are
-enforced there, not here. See [security.md](security.md#accepted-risks).
+**Anyone in the conversation can set these tools off.** Asking the assistant a question is not a
+command, so `SABLE_ADMIN_COMMANDS` does not gate it, and the model chooses which tool to call.
+If the tools reach Home Assistant, so does a guest. Give sable its own Open WebUI account
+holding only what a chat room should have: those permissions are enforced there, not here. See
+[security.md](security.md#accepted-risks).
 
 ## Alerting endpoint
 
@@ -496,6 +395,95 @@ A conversation is named by its *token*, not by its name. The token is the lowerc
 the end of the conversation's URL — in `https://cloud.example.org/call/a1b2c3d4` it is
 `a1b2c3d4`. Talk's own routes only match lowercase, so a room name put where a token belongs
 cannot work, and both `SABLE_NOTIFY_ROOMS` and `SABLE_HOOKS` are checked for it at startup.
+
+## File attachments
+
+`/notify` can carry a file, but not with the bot secret: the Talk bot API has no upload
+endpoint, and bot signatures are not accepted by the ones that do. Attachments therefore need a
+second credential — an ordinary Nextcloud user — which sable uses **only** on the `/notify` path
+and **only** when a file is actually attached.
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `SABLE_NEXTCLOUD_USER` | *(empty)* | A Nextcloud user for the bot. Both this and the password must be set, or neither. |
+| `SABLE_NEXTCLOUD_PASSWORD` | *(empty)* | An **app password** for that user, from Settings → Security. |
+| `SABLE_UPLOAD_PATH` | `/sable` | Folder inside that user's own Files where attachments are put before sharing. Created on first use. |
+| `SABLE_MAX_UPLOAD_BYTES` | `26214400` (25 MiB) | Largest attachment `/notify` accepts. Bigger ones get a `413`. |
+
+Give it its own user account. An app password cannot be scoped to files only — it can do
+everything that user can, across Files, Contacts and Calendar. That is a much larger credential
+than the bot secret, which can only post messages, so it should belong to an account that owns
+nothing else. Add that account to `SABLE_IGNORE_USERS` as well, or the chat message its own file
+share produces comes back through the webhook and is treated as somebody talking to the bot.
+[security.md](security.md#accepted-risks) has the rest.
+
+## Webhooks from other services
+
+`/notify` expects sable's own shape, which most services cannot send, and many of them cannot
+set an `Authorization` header either. `/hook/{name}` takes whatever JSON they do send and
+renders it into a message.
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `SABLE_HOOKS` | *(empty)* | Hook name to conversation, as `komodo=a1b2c3d4,grafana=e5f6g7h8`. The conversation is a token or a `SABLE_NOTIFY_ROOMS` alias, checked at startup. Empty means every `/hook/...` answers 404. |
+| `SABLE_HOOK_TOKEN_<NAME>` | *(required per hook)* | That hook's own token, one variable each so a secret store can inject them separately. |
+| `SABLE_HOOK_TEMPLATE_<NAME>` | *(empty)* | Optional format string. Without one the payload is rendered generically. |
+| `SABLE_MAX_HOOK_BYTES` | `262144` (256 KiB) | Largest payload accepted. Alerts are small; this is a cap on abuse. |
+
+A hook with no token, a token with no hook, or a conversation that is neither an alias nor a
+token is a startup error rather than something you discover when an alert goes missing.
+
+### What a payload turns into
+
+The renderer flattens the payload to dotted paths, so nesting stops mattering, then looks for a
+severity among `level`, `severity`, `status`, `state`, `priority` and `urgency`; a title among
+`title`, `subject`, `summary`, `alertname`, `event`, `name` and `type`; and a body among
+`message`, `text`, `description`, `details`, `body`, `reason` and `error`. Whatever is left is
+shown as key and value pairs.
+
+Identifiers and timestamps are dropped, because a chat message already has its own time and the
+ids mean nothing in a room. Repeated name and value pairs are shown once — Alertmanager sends
+`alertname` and `severity` three times over. URLs are kept, since a link back to the dashboard
+that fired is usually the most useful part. Long payloads are capped, with a count of what was
+left out.
+
+A Komodo alert arrives as:
+
+```
+**CRITICAL** sable
+resolved: false · target.type: Stack · data.type: StackStateChange · server_name: prod-1 · from: Running · to: Unhealthy
+```
+
+Anything that is not JSON is posted as text rather than rejected, on the grounds that an alert
+that arrives slightly wrong beats one that does not arrive.
+
+### Format strings
+
+Set `SABLE_HOOK_TEMPLATE_<NAME>` to take control of the wording. `{dotted.path}` is substituted
+from the same flattened payload:
+
+```ini
+SABLE_HOOK_TEMPLATE_KOMODO=**{level}** {data.type}: {data.data.name} on {data.data.server_name} went {data.data.from} to {data.data.to}
+```
+
+```
+**CRITICAL** StackStateChange: sable on prod-1 went Running to Unhealthy
+```
+
+Paths reach into lists as well, so `{alerts.0.labels.instance}` works, and naming a whole object
+gives you its JSON. Substitution is all it does: there are no expressions, no conditionals and
+nothing that can run. A path the payload does not have renders as `?` and logs a warning, so a
+template that drifts out of date still delivers the alert.
+
+Doubled braces are literal, so `{{like this}}` renders as `{like this}`.
+
+### The token in the URL
+
+Services that cannot set headers can pass `?token=...` instead, which is the only way Komodo can
+authenticate. That puts a credential in a URL, where proxies and access logs will record it,
+which is why each hook has its own token: one exposed in a log costs you that hook rather than
+everything `/notify` can reach. It is listed among the
+[accepted risks](security.md#accepted-risks).
 
 ## The HTTP surface itself
 
@@ -573,13 +561,10 @@ so the peer address belongs to that network and the default ignores its headers.
 | --- | --- | --- |
 | `SABLE_TIMEZONE` | *(the host clock)* | An IANA zone name such as `America/New_York`. A wrong name is a startup error rather than a silent fallback. |
 
-The system prompt always ends with the current date and time, whichever zone that
-resolves to. It is one line, and it prevents a whole category of confident wrongness: a
-model with no clock answers "what is gold worth right now" from whatever was true when its
-training data stopped, and has no way to notice that the figure is years old.
-
-In a container the host clock is usually UTC, so set this if the room cares about local
-working hours.
+The system prompt always ends with the current date and time. A model with no clock answers
+"what is gold worth right now" from whatever was true when its training data stopped, and
+cannot tell that the figure is years old. In a container the host clock is usually UTC, so set
+this if local working hours matter.
 
 ## Process
 
@@ -664,6 +649,27 @@ SABLE_NOTIFY_ROOMS=alerts=a1b2c3d4
 SABLE_LOG_LEVEL=INFO
 ```
 
+### An assistant that can search and reach Home Assistant
+
+Tools run as the Open WebUI account behind the key, and anybody in the room can prompt the model
+into calling one. Give it an account of its own.
+
+```ini
+SABLE_BOT_SECRET=<64 hex chars>
+SABLE_NEXTCLOUD_URL=https://cloud.example.org
+SABLE_LLM_BACKEND=openwebui
+SABLE_LLM_BASE_URL=https://ai.example.org/api
+SABLE_LLM_API_KEY=sk-<the sable account's key>
+SABLE_LLM_MODEL=gemma-focused
+SABLE_LLM_TOOL_IDS=server:mcp:1,server:mcp:2
+SABLE_LLM_FEATURES=web_search
+SABLE_LLM_SHOW_SOURCES=true
+SABLE_LLM_TIMEOUT=300
+SABLE_THINKING_REACTION=⏳
+SABLE_TIMEZONE=America/New_York
+SABLE_AI_ROOMS=AI
+```
+
 ## Startup errors and what they mean
 
 | Message | Fix |
@@ -689,6 +695,12 @@ SABLE_LOG_LEVEL=INFO
 | `SABLE_TRUSTED_PROXIES lists '*' alongside other entries` | `*` already means every client. Keep one or the other. |
 | `SABLE_NEXTCLOUD_USER and SABLE_NEXTCLOUD_PASSWORD go together` | Set both to enable attachments, or neither. |
 | `SABLE_NEXTCLOUD_URL is required for file attachments` | Uploads need the server address up front; there is no incoming request to learn it from. |
+| `SABLE_LLM_BACKEND must be one of` | Only `openai` and `openwebui` exist. |
+| `SABLE_LLM_API_KEY is required for the openwebui backend` | The key is the account whose tools the model runs. |
+| `SABLE_LLM_FEATURES may name` | One of `web_search`, `code_interpreter`, `image_generation`, `memory`, and only with `SABLE_LLM_BACKEND=openwebui`. |
+| `SABLE_LLM_FEATURES needs SABLE_LLM_BUILTIN_TOOLS on` | Without a session id Open WebUI never offers the built-ins, so the setting would do nothing. |
+| `SABLE_LLM_EXTRA_BODY must not set` | `stream` and `messages` are built by sable; overriding `stream` leaves it parsing an event stream as JSON. |
+| `SABLE_TIMEZONE … is not an IANA time zone` | A name like `America/New_York`, not an abbreviation. |
 
 Runtime problems — 401s, 403s, silence — are in
 [deployment.md](deployment.md#troubleshooting).

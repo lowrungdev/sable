@@ -24,6 +24,7 @@ URL. Everything below is about those.
 | Anything to `POST /notify` | A separate bearer token, compared in constant time. Unset means the route answers 404. |
 | sable to Nextcloud Files | An app password for a user account, used only to upload and share attachments. |
 | sable to the model backend | Ordinary HTTPS with certificate verification; the API key travels as a bearer token. |
+| A room participant to the model's tools | Nothing, with `SABLE_LLM_BACKEND=openwebui`. Asking the assistant a question is not a command, and the model chooses which tool to call, so only the Open WebUI account's own permissions bound what can happen. |
 | Anything to `GET /healthz` | Nothing by default, which is what a container or Kubernetes probe needs. `SABLE_HEALTH_TOKEN` puts it behind an `X-Health-Token` header, compared in constant time. |
 | Anything to the API schema | The schema and its `/docs` and `/redoc` pages are not served at all unless `SABLE_API_DOCS=true`. |
 | A proxy claiming a client address | `X-Forwarded-For` and `X-Forwarded-Proto` are believed only from `SABLE_TRUSTED_PROXIES`, loopback by default. Nothing reads the client address, so this protects the access log rather than access. |
@@ -103,7 +104,7 @@ instead of stray tracebacks.
 | `SABLE_BOT_SECRET` | Posting as the bot, in either direction | `occ talk:bot:uninstall`, then install with a new value, then restart. Put the old value in `SABLE_BOT_SECRET_PREVIOUS` first and webhooks signed with it keep verifying through the window; clear it afterwards. Outgoing calls are always signed with the current secret. |
 | `SABLE_NOTIFY_TOKEN` | Posting into the aliased conversations | Change the variable and restart, then update callers |
 | `SABLE_NEXTCLOUD_PASSWORD` | Everything that Nextcloud user can do | Revoke the app password in Nextcloud, generate another |
-| `SABLE_LLM_API_KEY` | Your model provider's billing | At the provider |
+| `SABLE_LLM_API_KEY` | Your model provider's billing. With `SABLE_LLM_BACKEND=openwebui`, also the account whose tools the model can run | At the provider |
 
 All of them come from the environment. `.env` is in both `.gitignore` and `.dockerignore`, and
 `.env.example` ships with empty values. `compose.yaml` reads the secrets as `${VAR}`
