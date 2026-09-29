@@ -172,7 +172,7 @@ Confirm the path works before involving Nextcloud:
 
 ```bash
 curl -fsS https://sable.example.org/healthz
-# {"status":"ok","version":"0.6","bot":"sable","llm":"gpt-4o-mini","notify":true}
+# {"status":"ok","version":"0.7","bot":"sable","llm":"gpt-4o-mini","notify":true}
 
 # ...or, with SABLE_HEALTH_TOKEN set:
 curl -fsS -H "X-Health-Token: $SABLE_HEALTH_TOKEN" https://sable.example.org/healthz
@@ -276,7 +276,7 @@ In the conversation:
 
 ```
 !ping      →  pong 🏓
-!version   →  sable 0.6 · model gpt-4o-mini
+!version   →  sable 0.7 · model gpt-4o-mini
 ```
 
 To test the webhook path without Nextcloud — this is exactly what Talk does, with the signature
@@ -420,7 +420,7 @@ At `INFO`, sable logs its own lifecycle, its configuration, and every use — an
 the interesting lines are not buried:
 
 ```
-sable 0.6 starting
+sable 0.7 starting
   listening on:   http://0.0.0.0:8080
   webhook URL:    POST /webhook  (give this to occ talk:bot:install)
   nextcloud:      https://cloud.example.org
@@ -441,7 +441,7 @@ sable 0.6 starting
   health check:   GET /healthz (open)
   log level:      INFO
 connected to Nextcloud 31.0.4 at https://cloud.example.org
-sable 0.6 ready
+sable 0.7 ready
 added to conversation abcd1234 ('Team chat') - now receiving its messages
 Alice (users/alice) ran !ping in abcd1234
 Alice (users/alice) asked the model in abcd1234 (22 chars)
@@ -449,8 +449,8 @@ gpt-4o-mini answered in 1.8s (243 chars)
 Alice (users/alice) asked the model about message 12 in abcd1234, written by Bob
 relayed an alert to abcd1234 (alias alerts) as message 4242
 removed from conversation abcd1234 ('Team chat') - no further messages from it
-sable 0.6 stopping
-sable 0.6 stopped
+sable 0.7 stopping
+sable 0.7 stopped
 ```
 
 The startup probe, the line reading `connected to Nextcloud`, calls `status.php`, which needs no

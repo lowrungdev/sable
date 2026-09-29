@@ -10,7 +10,7 @@ is not worth publishing.
 Format: `## <version>`, optionally followed by a date. Anything until the next
 `##` heading is the body.
 
-## Unreleased
+## 0.7
 
 - **Successful health checks no longer fill the log.** The container's
   healthcheck asks `GET /healthz` every thirty seconds and uvicorn logged each

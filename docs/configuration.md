@@ -23,7 +23,7 @@ sable --check
 ```
 
 ```
-sable 0.6 config OK
+sable 0.7 config OK
   bot name:   sable
   nextcloud:  https://cloud.example.org
   prefix:     !
