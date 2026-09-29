@@ -445,9 +445,13 @@ Open WebUI will run the whole loop server-side, and `SABLE_LLM_BACKEND=openwebui
 | `SABLE_LLM_KEEP_CHATS` | `false` | Keep the conversation each question creates. Useful while debugging; it fills the account's chat list otherwise. |
 | `SABLE_LLM_SHOW_SOURCES` | `false` | Append what the answer cited. Worth turning on: it is how you notice an answer came from an encyclopaedia rather than from today's market. |
 
-With this backend `SABLE_LLM_BASE_URL` must end in `/api` — the chat, task and completion
-endpoints all hang off it — and `SABLE_LLM_API_KEY` is required, because **the key is the
-account the tools run as**. Both are checked at startup, as is every feature name.
+With this backend `SABLE_LLM_API_KEY` is required, because **the key is the account the tools
+run as**. That, the backend name and every feature name are checked at startup.
+
+`SABLE_LLM_BASE_URL` should end in `/api`, since the completion, chat and task endpoints all
+hang off it. A URL that does not is a warning rather than an error — a proxy may rewrite the
+path, so the address can be right even when it does not look it — but if no proxy is doing
+that, every question will fail with a 404.
 
 ### What it actually does
 

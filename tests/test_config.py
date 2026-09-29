@@ -461,10 +461,17 @@ def test_the_openwebui_backend_needs_a_key(load: Load) -> None:
         load(**env)
 
 
-def test_a_base_url_without_api_is_refused(load: Load) -> None:
+def test_a_base_url_without_api_is_doubted_but_allowed(load: Load) -> None:
+    # A proxy may rewrite the path, so this address can be right even when it
+    # does not look it. Everything hangs off this URL, though, so a mistake here
+    # 404s every question - worth saying once.
     env = {**OWUI, "SABLE_LLM_BASE_URL": "https://ai.example.org"}
-    with pytest.raises(ConfigError, match="must end in /api"):
-        load(**env)
+    config = load(**env)
+    assert any("does not end in /api" in warning for warning in config.warnings)
+
+
+def test_a_base_url_under_api_says_nothing(load: Load) -> None:
+    assert load(**OWUI).warnings == ()
 
 
 def test_an_unknown_builtin_feature_is_refused(load: Load) -> None:

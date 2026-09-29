@@ -192,6 +192,11 @@ def create_app(config: Config | None = None, bot: Bot | None = None) -> FastAPI:
         )
         log.info("  log level:      %s", config.log_level)
 
+        for warning in config.warnings:
+            # Settings sable cannot rule out but doubts. Said after the block, so
+            # the reader has the resolved configuration in front of them.
+            log.warning("%s", warning)
+
         if config.startup_check:
             await app.state.bot.check_nextcloud()
 

@@ -315,6 +315,12 @@ class Config:
         default_factory=lambda: list(DEFAULT_TRUSTED_PROXIES)
     )
 
+    # --- things that look wrong but might not be ----------------------------
+    #: Settings that are probably a mistake but that sable cannot rule out, so
+    #: they are said once at startup rather than refused. An empty tuple is the
+    #: normal case and prints nothing.
+    warnings: tuple[str, ...] = ()
+
     # --- time ---------------------------------------------------------------
     #: IANA name for the zone the bot answers in, e.g. ``America/New_York``.
     #: Empty follows the host clock. The model is told the date either way: a
@@ -677,6 +683,7 @@ class Config:
                     f"SABLE_TIMEZONE={config.timezone!r} is not an IANA time zone "
                     f"name such as America/New_York or Europe/Berlin ({exc})"
                 ) from exc
+        warnings: list[str] = []
         if config.llm.backend not in LLM_BACKENDS:
             raise ConfigError(
                 f"SABLE_LLM_BACKEND must be one of {', '.join(sorted(LLM_BACKENDS))}, "
@@ -689,10 +696,16 @@ class Config:
                     "key is the account whose permissions the tools run with"
                 )
             if not config.llm.base_url.endswith("/api"):
-                raise ConfigError(
-                    "SABLE_LLM_BASE_URL must end in /api for the openwebui backend "
-                    f"(got {config.llm.base_url!r}): the chat, task and completion "
-                    "endpoints all hang off it, e.g. https://ai.example.org/api"
+                # Not fatal: a proxy may rewrite the path, so this address can
+                # be right even when it does not look it. Everything hangs off
+                # this URL though, so a mistake here 404s every question - worth
+                # saying once at startup rather than leaving to be discovered.
+                warnings.append(
+                    f"SABLE_LLM_BASE_URL is {config.llm.base_url!r}, which does "
+                    "not end in /api. Open WebUI serves the completion, chat and "
+                    "task endpoints under /api, so unless a proxy rewrites the "
+                    "path, every question will fail with a 404. Expected "
+                    "something like https://ai.example.org/api"
                 )
             if config.llm.poll_interval <= 0:
                 raise ConfigError("SABLE_LLM_POLL_INTERVAL must be greater than zero")
@@ -746,4 +759,5 @@ class Config:
         if config.pin_backend and not config.nextcloud_url:
             # Nothing to pin against; fall back to trusting the signed header.
             object.__setattr__(config, "pin_backend", False)
+        object.__setattr__(config, "warnings", tuple(warnings))
         return config
