@@ -11,9 +11,9 @@ makes Compose overrides and a one-off `SABLE_LOG_LEVEL=DEBUG sable` work. `--hos
 on the command line override their variables in turn.
 
 Under Docker Compose, [`compose.yaml`](../compose.yaml) carries the same list in its
-`environment:` block, every variable commented out with its default and only `SABLE_BOT_SECRET`
-active. Those entries override the `.env` file, which is optional there; secrets are written as
-`${VAR}` lookups so their values stay out of the committed file.
+`environment:` block, every variable commented out with its default and only the three required
+Nextcloud account settings active. Those entries override the `.env` file, which is optional
+there; secrets are written as `${VAR}` lookups so their values stay out of the committed file.
 
 Check the result before deploying. This validates everything and exits without starting a
 server:
@@ -24,8 +24,9 @@ sable --check
 
 ```
 sable 0.7 config OK
-  bot name:   sable
   nextcloud:  https://cloud.example.org
+  account:    sable (password set)
+  polling:    30s long polls, rooms rescanned every 60s
   prefix:     !
   model:      gpt-4o-mini @ https://api.openai.com/v1
   ai rooms:   *
@@ -51,46 +52,47 @@ covers, so the running process tells you what it actually believes.
 Values are trimmed and URLs have trailing slashes stripped, so a stray space or slash in a
 `.env` file will not break anything.
 
-## Talk bot identity
+## The Nextcloud account
+
+sable is an ordinary Nextcloud user. It reads chat by long-polling the Talk chat API as that
+user, and posts, reacts and uploads files as the same user. There is no bot to register, no
+webhook for Nextcloud to call and no shared secret: all it needs is an account, an app password,
+and an invitation to the conversations it should be in.
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `SABLE_BOT_SECRET` | **required** | The shared secret, identical to the one given to `occ talk:bot:install`. Must be 40–128 characters — Nextcloud enforces the same range. `openssl rand -hex 32` gives a good 64-char value. |
-| `SABLE_BOT_SECRET_PREVIOUS` | *(empty)* | The secret you are rotating away from, accepted on **incoming** webhooks only. Same 40–128 range, and repeating `SABLE_BOT_SECRET` is a startup error. See [below](#rotating-the-bot-secret). |
-| `SABLE_BOT_NAME` | `sable` | Drives mention detection, and should match the name you installed the bot under. `@sable ...` or `sable: ...` at the start of a message triggers the assistant. |
-| `SABLE_NEXTCLOUD_URL` | *(from the webhook header)* | Your Nextcloud base URL, no trailing slash, e.g. `https://cloud.example.org`. Optional for the webhook path, because each signed event carries the server URL in `X-Nextcloud-Talk-Backend`. **Required** if you enable `/notify`, which has no incoming request to learn it from. |
-| `SABLE_PIN_BACKEND` | `true` | Reject webhooks whose backend header is not `SABLE_NEXTCLOUD_URL`. Automatically disabled when no URL is set. Leave it on unless the header genuinely differs from the URL you configured — see the 403 entry in [deployment.md](deployment.md#troubleshooting). |
+| `SABLE_NEXTCLOUD_URL` | **required** | Your Nextcloud base URL, no trailing slash, e.g. `https://cloud.example.org`. Plain `http://` to a host that is not local is accepted with a startup warning, because the password crosses the network on every request. |
+| `SABLE_NEXTCLOUD_USER` | **required** | The account's user id. It is also the name people `@`-mention to address sable. |
+| `SABLE_NEXTCLOUD_PASSWORD` | **required** | An **app password** for that user, from Settings → Security → Devices & sessions. Not the login password: an app password can be revoked on its own without locking the account. |
+| `SABLE_POLL_TIMEOUT` | `30` | Seconds each long poll for new messages may wait. Talk holds one for at most 60, so a larger value is clamped to 60 with a startup warning. Less than 1 is a startup error. |
+| `SABLE_ROOM_REFRESH` | `60` | Seconds between looks at which conversations the account is in. Less than 5 is a startup error. |
 
-### Rotating the bot secret
+Give it an account of its own that owns nothing else. An app password cannot be scoped to chat:
+it reaches everything that user can, across Files, Contacts and Calendar. [security.md](security.md)
+has the rest.
 
-Talk holds exactly one secret per bot install, and there is no command to change it in place. A
-rotation is therefore three steps — `occ talk:bot:uninstall`, install again with the new value,
-restart sable — and every event that arrives between the first and the last fails its signature
-check. Nextcloud retries, but a message somebody is waiting for is late, and a reaction that gets
-dropped is gone.
+### How chat is received
 
-`SABLE_BOT_SECRET_PREVIOUS` closes that window. Set it to the value you are rotating *away
-from*, put the new value in `SABLE_BOT_SECRET`, and an incoming signature is checked against the
-current secret first and the previous one second:
+Talk has no single feed of new messages across conversations, so sable keeps one long poll open
+per conversation the account is in — `GET /chat/{token}?lookIntoFuture=1` — and hands each new
+message to the same handler every trigger goes through. A poll that finds nothing returns after
+`SABLE_POLL_TIMEOUT` seconds and is asked again.
 
-```ini
-SABLE_BOT_SECRET=<the new value, the one you give occ>
-SABLE_BOT_SECRET_PREVIOUS=<the old value>
-```
+The conversation list is fetched every `SABLE_ROOM_REFRESH` seconds. A conversation the account
+was invited to is followed from its newest message on, so nothing said before sable noticed it is
+replayed; one it left, or that was deleted, is dropped. Expect up to that long between being
+invited and being heard. The "Talk updates" conversation is skipped.
 
-Then do the rotation in whatever order suits you, and **clear
-`SABLE_BOT_SECRET_PREVIOUS` afterwards** — a secret kept past its rotation is one that still
-works, which is the thing rotating was meant to stop.
+**The cost is a held request.** Each long poll occupies a request slot on your Nextcloud server
+for up to `SABLE_POLL_TIMEOUT` seconds, and there is one per conversation. On PHP-FPM that is a
+worker kept busy doing nothing. sable therefore follows at most **50** conversations, the most
+recently active, and logs a warning once when an account is in more. A dedicated account that is
+only in the rooms it needs stays far below that. Raising `SABLE_POLL_TIMEOUT` towards 60 means
+fewer, longer requests; lowering it means more, shorter ones. Neither changes how quickly a
+message is seen, since a poll returns the moment one arrives.
 
-Incoming only. Everything sable *sends* is signed with `SABLE_BOT_SECRET` and never with the
-previous value: by then Nextcloud has been given the new one, so signing an outgoing call with
-the old secret would simply be rejected. That also means the two halves of the window are not
-symmetric — replies fail until Talk and `SABLE_BOT_SECRET` agree, while inbound events keep being
-believed throughout.
-
-Repeating `SABLE_BOT_SECRET` in `SABLE_BOT_SECRET_PREVIOUS` is a startup error. Nothing has been
-rotated, so it can only be a copy-paste, and accepting it would read as a rotation in progress
-that is not.
+What that buys is direction: sable needs to reach Nextcloud, and Nextcloud never needs to reach
+sable.
 
 ## Chat behaviour
 
@@ -100,13 +102,13 @@ that is not.
 | `SABLE_AI_ROOMS` | *(empty)* | Conversations where **every** message goes to the model, no mention needed. Comma-separated conversation **tokens or names**, or `*` for all of them. Empty means mentions and `!ai` only. See [below](#which-identifier-goes-in-sable_ai_rooms). |
 | `SABLE_REPLY_AS_REPLY` | `false` | Post answers as threaded replies to the triggering message instead of plain messages. |
 | `SABLE_THINKING_REACTION` | *(empty)* | A single emoji stuck on the triggering message while the model works, then removed — e.g. `👀`. Empty disables it, which saves two API calls per answer. Failures here are ignored; a reaction is never load-bearing. |
-| `SABLE_ASK_REACTION` | `⁉️` | React to any message with this and the bot sends that message to the model, answering in a reply threaded under it. Empty disables the feature **and** the message cache behind it. Needs `--feature reaction` at install. |
+| `SABLE_ASK_REACTION` | `⁉️` | React to any message with this and the bot sends that message to the model, answering in a reply threaded under it. Empty disables the feature **and** the message cache behind it. |
 | `SABLE_ASK_ADMINS_ONLY` | `false` | Restrict that reaction to `SABLE_ADMIN_USERS`. On with an empty `SABLE_ADMIN_USERS` is a startup error, since nobody could then use it. See [below](#restricting-the-reaction-and-the-rooms-it-caches). |
 | `SABLE_ASK_ROOMS` | *(empty)* | Conversations whose messages are cached for that reaction. Same identifiers as `SABLE_AI_ROOMS`. **Empty means every conversation**, unlike `SABLE_AI_ROOMS` where empty means none — see [below](#restricting-the-reaction-and-the-rooms-it-caches). |
 | `SABLE_MESSAGE_CACHE` | `200` | Recent messages remembered per conversation, so a reaction can name one. Expires with `SABLE_HISTORY_TTL`. |
 | `SABLE_UNKNOWN_COMMAND_HINT` | `true` | Reply "I have no `!foo` command" on an unknown command. Turn off in busy rooms where people use other bots with the same prefix. |
 | `SABLE_REPORT_ERRORS` | `true` | Post failures into the conversation as well as logging them; the reply is prefixed with a warning sign. Off means failures are logged only and the room stays quiet. |
-| `SABLE_STARTUP_CHECK` | `true` | Call Nextcloud's `status.php` at startup and log what answered, so a wrong URL or an untrusted certificate shows up at boot. Never fatal. Needs `SABLE_NEXTCLOUD_URL`. |
+| `SABLE_STARTUP_CHECK` | `true` | Sign in to Nextcloud at startup (`cloud/user`) and log who it says the account is, so a wrong URL, an untrusted certificate or a rejected app password shows up at boot. Never fatal. |
 | `SABLE_IGNORE_USERS` | *(empty)* | Users to ignore completely. Comma-separated; each entry matches a bare user id (`alice`), a full actor id (`users/alice`), or a display name. See [below](#ignoring-people). |
 | `SABLE_ADMIN_COMMANDS` | *(empty)* | Commands only `SABLE_ADMIN_USERS` may run. Comma-separated, or `*` for all of them. Empty means every command is open to everyone. See [below](#who-may-run-which-command). |
 | `SABLE_NORMAL_COMMANDS` | *(empty)* | The exceptions to `SABLE_ADMIN_COMMANDS=*`. Redundant otherwise, since anything not named as an admin command is open already. |
@@ -119,12 +121,13 @@ that is not.
 | The message | Answers? |
 | --- | --- |
 | `!ping` | Command, always |
-| `@sable how are you` / `sable: how are you` | Assistant |
+| `@sable how are you`, picked from Talk's mention list | Assistant. A real mention of the account's user id is what counts |
+| `sable: how are you`, or the id or display name typed at the start | Assistant |
 | `hey @sable look at this` (mention mid-sentence) | Assistant, with the whole message as the prompt |
 | `!ai how are you` | Assistant, no mention needed |
 | `sabletooth tigers` | No — mention matching respects word boundaries |
 | `just chatting` | Only in a conversation listed in `SABLE_AI_ROOMS` |
-| Anything from another bot | Never |
+| Anything from sable itself, or from another bot | Never |
 | A ⁉️ reaction on any message | Assistant, answering that message |
 
 ### Which identifier goes in `SABLE_AI_ROOMS`
@@ -159,11 +162,14 @@ React with `SABLE_ASK_REACTION` (⁉️ by default) and the bot answers the mess
 in a reply threaded under it. It works on anyone's message, the bot's own answers included, which
 makes it a quick way to ask a follow-up.
 
-The catch is that a reaction event carries the message id and not its text, and the bot API
-cannot read a message back — that needs a user account rather than bot credentials. So sable can
-only answer about messages it saw arrive, and keeps the last `SABLE_MESSAGE_CACHE` of them per
-conversation for the purpose. React to something older, or posted before the bot joined, and it
-says so rather than guessing. Nothing is cached at all when `SABLE_ASK_REACTION` is empty.
+The catch is that a reaction arrives as a system message that names the message reacted to by id
+and does not carry its text. sable answers from the messages it saw arrive, keeping the last
+`SABLE_MESSAGE_CACHE` of them per conversation for the purpose. React to something older, or
+posted before sable started following the conversation, and it says so rather than guessing.
+Nothing is cached at all when `SABLE_ASK_REACTION` is empty.
+
+This relies on Talk delivering reaction events through the same chat poll as messages. That has
+not yet been confirmed against a live server; see [future.md](future.md#talk-features-not-yet-used).
 
 ### Restricting the reaction, and the rooms it caches
 
@@ -206,11 +212,11 @@ the feature off, empty `SABLE_ASK_REACTION`, which stops the caching too.
 
 `SABLE_MAX_CONCURRENT_REPLIES` caps how many completions may be in flight together. Each trigger
 — a mention, an AI room, `!ai`, a reaction — is handled in a background task, and those tasks have
-no ceiling of their own, so a busy conversation or a burst of redelivered webhooks produces as
+no ceiling of their own, so a busy conversation or a burst of messages produces as
 many simultaneous model calls as there were events, each holding `SABLE_LLM_TIMEOUT` seconds open.
 
 Nothing upstream applies the brakes. Talk rate-limits the messages sable *sends* with HTTP 429; it
-does not rate-limit the webhooks it sends sable, and there is no rate limiting of our own —
+does not rate-limit the messages sable reads, and there is no rate limiting of our own —
 [accepted risk 9](security.md#accepted-risks). The default of `8` is a ceiling rather than a
 target, and most deployments never reach it.
 
@@ -385,11 +391,11 @@ holding only what a chat room should have: those permissions are enforced there,
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `SABLE_NOTIFY_TOKEN` | *(empty)* | Bearer token for `POST /notify`. **Empty disables the route**, which then answers 404 to everyone. Unrelated to the bot secret — generate a separate value. |
+| `SABLE_NOTIFY_TOKEN` | *(empty)* | Bearer token for `POST /notify`. **Empty disables the route**, which then answers 404 to everyone. Unrelated to the app password — generate a separate value. |
 | `SABLE_NOTIFY_ROOMS` | *(empty)* | Aliases so callers need not know conversation tokens: `alerts=a1b2c3d4,deploys=e5f6g7h8`. An unrecognised name is treated as a raw token and must look like one, otherwise the request is a 400. |
 
-Setting `SABLE_NOTIFY_TOKEN` without `SABLE_NEXTCLOUD_URL` is a startup error: an outbound-only
-message has no incoming webhook to learn the server address from.
+The account has to be in the conversation it posts to: Talk answers a post from anybody else with
+a 404, which `/notify` reports as a 400.
 
 A conversation is named by its *token*, not by its name. The token is the lowercase string at
 the end of the conversation's URL — in `https://cloud.example.org/call/a1b2c3d4` it is
@@ -398,24 +404,18 @@ cannot work, and both `SABLE_NOTIFY_ROOMS` and `SABLE_HOOKS` are checked for it 
 
 ## File attachments
 
-`/notify` can carry a file, but not with the bot secret: the Talk bot API has no upload
-endpoint, and bot signatures are not accepted by the ones that do. Attachments therefore need a
-second credential — an ordinary Nextcloud user — which sable uses **only** on the `/notify` path
-and **only** when a file is actually attached.
+`/notify` can carry a file. It is uploaded over WebDAV as the account above and shared into the
+conversation, so there is no second credential and nothing to switch on: attachments are always
+available.
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `SABLE_NEXTCLOUD_USER` | *(empty)* | A Nextcloud user for the bot. Both this and the password must be set, or neither. |
-| `SABLE_NEXTCLOUD_PASSWORD` | *(empty)* | An **app password** for that user, from Settings → Security. |
-| `SABLE_UPLOAD_PATH` | `/sable` | Folder inside that user's own Files where attachments are put before sharing. Created on first use. |
+| `SABLE_UPLOAD_PATH` | `/sable` | Folder inside the account's own Files where attachments are put before sharing. Created on first use. |
 | `SABLE_MAX_UPLOAD_BYTES` | `26214400` (25 MiB) | Largest attachment `/notify` accepts. Bigger ones get a `413`. |
 
-Give it its own user account. An app password cannot be scoped to files only — it can do
-everything that user can, across Files, Contacts and Calendar. That is a much larger credential
-than the bot secret, which can only post messages, so it should belong to an account that owns
-nothing else. Add that account to `SABLE_IGNORE_USERS` as well, or the chat message its own file
-share produces comes back through the webhook and is treated as somebody talking to the bot.
-[security.md](security.md#accepted-risks) has the rest.
+The share produces a chat message from the account itself. sable ignores its own messages, so it
+does not answer them. [security.md](security.md#accepted-risks) covers what the account's
+credential reaches.
 
 ## Webhooks from other services
 
@@ -487,7 +487,8 @@ everything `/notify` can reach. It is listed among the
 
 ## The HTTP surface itself
 
-Three settings about the service as an HTTP endpoint, rather than about the bot.
+Three settings about the service as an HTTP endpoint, rather than about the account. Chat does not
+come in over it: its only callers are your alerting systems and your health probe.
 
 | Variable | Default | Notes |
 | --- | --- | --- |
@@ -497,10 +498,9 @@ Three settings about the service as an HTTP endpoint, rather than about the bot.
 
 ### The schema and its doc pages
 
-`SABLE_API_DOCS` is off because the webhook has to be reachable from Nextcloud, so whatever your
-proxy exposes is what an unauthenticated caller can read — and the schema describes every
-route, every header and every body shape in one request. Nothing at runtime needs it: Nextcloud
-posts to a URL you configured with `occ`, and your alerting callers were written against
+`SABLE_API_DOCS` is off because whatever your proxy exposes is what an unauthenticated caller can
+read — and the schema describes every route, every header and every body shape in one request.
+Nothing at runtime needs it: your alerting callers were written against
 [deployment.md](deployment.md). Turn it on while writing a caller, then turn it off again.
 
 Off means the routes do not exist. `GET /docs` answers 404, the same as any unrouted path, so
@@ -508,7 +508,7 @@ turning it off does not advertise that there was ever something there.
 
 ### Guarding the health probe
 
-`GET /healthz` answers with the version, the bot name, the configured model, whether alerting is
+`GET /healthz` answers with the version, the account's user id (as `user`), the configured model, whether alerting is
 on, and whether Nextcloud was reachable the last time sable called it — `true`, `false`, or
 `null` before anything has been tried. The status stays `ok` and the code stays 200 even when
 Nextcloud is down: a liveness probe that fails because a dependency failed gets a healthy process
@@ -596,8 +596,9 @@ of `.crt` files trusts nothing while still replacing the store. See
 ### Commands only, no model
 
 ```ini
-SABLE_BOT_SECRET=<64 hex chars>
 SABLE_NEXTCLOUD_URL=https://cloud.example.org
+SABLE_NEXTCLOUD_USER=sable
+SABLE_NEXTCLOUD_PASSWORD=<an app password>
 ```
 
 Nothing else is needed. Mentions are ignored, `!help` works.
@@ -605,8 +606,9 @@ Nothing else is needed. Mentions are ignored, `!help` works.
 ### Assistant on a local model, answering everything in two rooms
 
 ```ini
-SABLE_BOT_SECRET=<64 hex chars>
 SABLE_NEXTCLOUD_URL=https://cloud.example.org
+SABLE_NEXTCLOUD_USER=sable
+SABLE_NEXTCLOUD_PASSWORD=<an app password>
 SABLE_LLM_BASE_URL=http://localhost:11434/v1
 SABLE_LLM_MODEL=llama3.1:8b
 SABLE_LLM_TIMEOUT=300
@@ -620,8 +622,9 @@ can see it is working.
 ### Alerting only
 
 ```ini
-SABLE_BOT_SECRET=<64 hex chars>
 SABLE_NEXTCLOUD_URL=https://cloud.example.org
+SABLE_NEXTCLOUD_USER=sable
+SABLE_NEXTCLOUD_PASSWORD=<an app password>
 SABLE_NOTIFY_TOKEN=<a different random value>
 SABLE_NOTIFY_ROOMS=alerts=a1b2c3d4,deploys=e5f6g7h8
 SABLE_UNKNOWN_COMMAND_HINT=false
@@ -632,9 +635,9 @@ The bot still answers `!ping`, but its job is to relay what CI posts to `/notify
 ### Everything, hosted model, quiet about its own failures
 
 ```ini
-SABLE_BOT_SECRET=<64 hex chars>
 SABLE_NEXTCLOUD_URL=https://cloud.example.org
-SABLE_BOT_NAME=sable
+SABLE_NEXTCLOUD_USER=sable
+SABLE_NEXTCLOUD_PASSWORD=<an app password>
 SABLE_COMMAND_PREFIX=!
 SABLE_LLM_BASE_URL=https://api.openai.com/v1
 SABLE_LLM_API_KEY=sk-...
@@ -655,8 +658,9 @@ Tools run as the Open WebUI account behind the key, and anybody in the room can 
 into calling one. Give it an account of its own.
 
 ```ini
-SABLE_BOT_SECRET=<64 hex chars>
 SABLE_NEXTCLOUD_URL=https://cloud.example.org
+SABLE_NEXTCLOUD_USER=sable
+SABLE_NEXTCLOUD_PASSWORD=<an app password>
 SABLE_LLM_BACKEND=openwebui
 SABLE_LLM_BASE_URL=https://ai.example.org/api
 SABLE_LLM_API_KEY=sk-<the sable account's key>
@@ -674,11 +678,10 @@ SABLE_AI_ROOMS=AI
 
 | Message | Fix |
 | --- | --- |
-| `SABLE_BOT_SECRET is required` | Set it to the value you gave `occ talk:bot:install`. |
-| `SABLE_BOT_SECRET must be 40-128 characters` | Nextcloud's own limit. `openssl rand -hex 32`. |
-| `SABLE_BOT_SECRET_PREVIOUS must be 40-128 characters` | The same limit, for the secret being rotated away from. |
-| `SABLE_BOT_SECRET_PREVIOUS is the same value as SABLE_BOT_SECRET` | Nothing has been rotated. Set it to the *old* value, or unset it — see [rotating the bot secret](#rotating-the-bot-secret). |
-| `SABLE_NEXTCLOUD_URL is required when SABLE_NOTIFY_TOKEN is set` | Set the URL, or drop the notify token. |
+| `… required: sable signs in to Nextcloud as an ordinary user` | One or more of `SABLE_NEXTCLOUD_URL`, `SABLE_NEXTCLOUD_USER`, `SABLE_NEXTCLOUD_PASSWORD` is missing; the message names which. Create a user, give it an app password, and set all three. |
+| `SABLE_NEXTCLOUD_URL must start with http:// or https://` | The URL has no scheme, or is not a URL. |
+| `SABLE_POLL_TIMEOUT must be at least 1 second` | Use a positive number of seconds; values over 60 are clamped rather than refused. |
+| `SABLE_ROOM_REFRESH must be at least 5 seconds` | It is how often the conversation list is fetched. |
 | `… must be a boolean` / `… must be an integer` / `… must be a number` | A typo in the value; see [value formats](#value-formats). |
 | `… is not valid JSON` / `must be a JSON object` | `SABLE_LLM_EXTRA_BODY` needs an object: `{"top_k": 40}`. Quote it in a shell. |
 | `… entries must look like alias=token` | `SABLE_NOTIFY_ROOMS` wants `name=token` pairs or a JSON object. |
@@ -693,8 +696,6 @@ SABLE_AI_ROOMS=AI
 | `SABLE_NORMAL_COMMANDS cannot be '*'` | Everything not named as an admin command is open already; use the list for the exceptions to `SABLE_ADMIN_COMMANDS=*`. |
 | `is not an IP address or a CIDR range` | A `SABLE_TRUSTED_PROXIES` entry is a hostname, a typo, or a range with host bits set (`172.17.0.0/16`, not `172.17.0.5/16`). |
 | `SABLE_TRUSTED_PROXIES lists '*' alongside other entries` | `*` already means every client. Keep one or the other. |
-| `SABLE_NEXTCLOUD_USER and SABLE_NEXTCLOUD_PASSWORD go together` | Set both to enable attachments, or neither. |
-| `SABLE_NEXTCLOUD_URL is required for file attachments` | Uploads need the server address up front; there is no incoming request to learn it from. |
 | `SABLE_LLM_BACKEND must be one of` | Only `openai` and `openwebui` exist. |
 | `SABLE_LLM_API_KEY is required for the openwebui backend` | The key is the account whose tools the model runs. |
 | `SABLE_LLM_FEATURES may name` | One of `web_search`, `code_interpreter`, `image_generation`, `memory`, and only with `SABLE_LLM_BACKEND=openwebui`. |

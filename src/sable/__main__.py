@@ -68,8 +68,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.check:
         print(
             f"sable {__version__} config OK\n"
-            f"  bot name:   {config.bot_name}\n"
-            f"  nextcloud:  {config.nextcloud_url or '(from webhook header)'}\n"
+            f"  nextcloud:  {config.nextcloud_url}\n"
+            f"  account:    {config.nextcloud_user} (password set)\n"
+            f"  polling:    {config.poll_timeout}s long polls, rooms rescanned every {config.room_refresh}s\n"
             f"  prefix:     {config.command_prefix}\n"
             f"  model:      {config.llm.model or '(disabled)'} @ {config.llm.base_url}\n"
             f"  ai rooms:   {', '.join(config.ai_rooms) or '(mentions only)'}\n"

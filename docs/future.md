@@ -17,14 +17,13 @@ swap the class for one backed by Redis or SQLite; it has three methods and `Bot`
 constructor argument, so nothing else changes. Worth doing when people start noticing that a
 deploy loses context mid-conversation.
 
-**One process only.** History, the message cache, the redelivery cache and the replay cache all
-live in memory, so running two workers would split them: replies would forget context depending
-on which worker answered, and a redelivered webhook could be handled twice. The replay cache is
-the one that costs more than context — a webhook whose random one worker has already refused
-is new to the other, so the 401 becomes a coin toss and the protection is only as good as the
-load balancer's stickiness. Moving that state into a shared store makes horizontal scaling real.
-For a bot handling a few webhooks a minute that is a long way off, so the constraint is
-documented rather than treated as a bug. It is also the reason not to reach for two workers as a
+**One process only.** History, the message cache, the redelivery cache and the position in each
+conversation all live in memory, so running two workers would split them: replies would forget
+context depending on which worker answered. Two processes signed in as the same account are
+worse, since each long-polls every conversation and answers every message, so a question gets two
+replies. Moving that state into a shared store, and deciding which worker owns which
+conversation, makes horizontal scaling real. For a chat assistant that is a long way off, so the
+constraint is documented rather than treated as a bug. It is also the reason not to reach for two workers as a
 throughput fix: `SABLE_MAX_CONCURRENT_REPLIES` raises the ceiling within one process without
 splitting anything.
 
@@ -45,25 +44,46 @@ names. Revisit when the first per-room rule is actually wanted.
 
 ## Talk features not yet used
 
+**Reactions rely on an assumption that has not been checked.** The ⁉️ feature works only if Talk
+delivers reactions as `reaction` system messages through the same chat poll that delivers
+everything else, with the reacted-to message in `parent`. That is how the code reads them, and
+the tests feed it exactly that shape, but it has **not been verified against a live Nextcloud**.
+Until it has, treat the reaction as unproven: if it does nothing, `SABLE_LOG_LEVEL=DEBUG` will show
+no `received Like` line, and the fix is in `parse_message` in
+[`events.py`](../src/sable/events.py) or in how the poller asks for messages. Checking it is the
+first thing to do against a real server.
+
 Reactions are handled for one emoji: ⁉️ sends the message it is attached to to the model. Any
 other reaction is parsed and ignored, so a second behaviour — an approval flow where a thumbs-up
 from the right person does something — is a branch in `Bot.handle` next to the existing one.
-Joining and leaving a conversation are parsed and only logged; a greeting when the bot is
-enabled would go in the same place.
+Joining and leaving a conversation are not parsed at all; a greeting when sable is invited would
+hang off `Poller.scan`, which is where it learns of a new conversation.
 
-The bot API's `sendMessage` accepts `threadTitle` and `threadId`, which
-[`talk.py`](../src/sable/talk.py) does not pass. Replying in a thread rather than inline would
-suit the assistant in busy rooms, and the parameters are already there.
+The chat API's message posting accepts a thread id, which [`talk.py`](../src/sable/talk.py) does
+not pass. Replying in a thread rather than inline would suit the assistant in busy rooms.
 
 The message cache is the weak point of the ⁉️ feature. It is in memory, bounded by
 `SABLE_MESSAGE_CACHE` and expiring with `SABLE_HISTORY_TTL`, so reacting to anything older gets
-"I do not have that message". Making it reliable means persistence, which is the same question
-as durable history above.
+"I do not have that message". Now that sable is a user it could fetch the message by id instead,
+which would make the cache unnecessary, and that is the obvious fix. It is not done because the
+cache also bounds what chat content sits in memory, and because fetching needs a call per
+reaction.
 
-File attachments are done, in a hybrid shape: the webhook bot still receives, and a separate
-Nextcloud user account uploads over WebDAV and shares into the conversation, on the `/notify`
-path only. The other direction is not done — sable cannot read a file somebody posts, which
-would need that same account to fetch it, and nothing has asked for it yet.
+File attachments are done, as the same account that posts: it uploads over WebDAV and shares into
+the conversation, on the `/notify` path. The other direction is not done — sable cannot read a
+file somebody posts, which the account could now do, and nothing has asked for it yet.
+
+**Messages sent while sable is down are not answered.** Positions in each conversation are kept in
+memory, and a conversation is followed from its newest message when sable starts, so anything
+said during a restart or an outage is skipped rather than caught up on. Persisting the last
+message id per conversation would close it, at the price of a state file and of deciding how old
+a missed question may be before answering it would be strange.
+
+**Long-poll load on Nextcloud.** One held request per conversation, up to 50 of them, is the cost of
+the user-account model, and it is the thing to watch on a small server. If it hurts, the options
+are a longer `SABLE_POLL_TIMEOUT`, fewer conversations, or a different shape: Talk can push to
+a bot over a webhook, which costs an idle server nothing, at the price of everything the
+[user-account model](purpose.md#what-it-deliberately-doesnt-do) was chosen to avoid.
 
 ## Assistant features
 
@@ -139,10 +159,10 @@ throwaway instance would catch API drift that mocks cannot.
 
 Logs are the only audit trail; see [security.md](security.md#accepted-risks).
 
-`sable --check` prints less than the startup block does, and the gap keeps widening: seven
-settings against the block's nineteen. It has never named attachments, hooks or the ignore list,
+`sable --check` prints less than the startup block does, and the gap keeps widening: eight
+settings against the block's eighteen. It has never named attachments, hooks or the ignore list,
 and now also misses the concurrency ceiling, the cached rooms, the API docs, the health check,
-the proxy trust, the backend pin, the time zone and every tool the model can reach — most of
+the proxy trust, the time zone and every tool the model can reach — most of
 what somebody runs `--check` to confirm before deploying. Either it grows to match the block or
 it stops claiming to show the resolved configuration; feeding both from the same summary helpers
 would keep them from drifting again, and `tests/test_docs.py` already pins the block's shape.

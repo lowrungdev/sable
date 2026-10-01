@@ -60,9 +60,9 @@ class MessageCache:
     """Recent messages per conversation, keyed by message id.
 
     A reaction event names the message it is attached to by id and nothing more:
-    Talk does not include the text, and the bot API has no way to read a message
-    back - that needs a user account, not bot credentials. So the only way to act
-    on "the message someone reacted to" is to have kept it when it went past.
+    Talk does not include the text, and sable does not go back and fetch it. So
+    the only way to act on "the message someone reacted to" is to have kept it
+    when it went past.
 
     Bounded and expiring, like :class:`History`, and populated only while a
     feature needs it. Reacting to a message older than the cache is a miss, which

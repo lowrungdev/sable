@@ -1,11 +1,12 @@
-"""The HTTP surface: the Talk webhook, two ways in for alerts, and a health check.
+"""The HTTP surface: two ways in for alerts, and a health check.
+
+Chat is not received here. sable reads Talk by long-polling as a user account
+(see :mod:`sable.poller`), which this app starts and stops with its lifespan;
+every event that poll finds is handled in the background under a ceiling on how
+many model calls run at once.
 
 Routes
 ------
-``POST /webhook``     Nextcloud Talk posts events here. Signature-verified and
-                      refused if its random has been seen before, then handled in
-                      the background - under a ceiling on how many of those run at
-                      once - so we answer well inside Talk's request timeout.
 ``POST /notify``      Inbound alerting: other systems post JSON here with a
                       bearer token and we relay it into a conversation.
 ``POST /hook/{name}`` The same, for services that cannot speak that shape. Each
@@ -28,7 +29,6 @@ import binascii
 import hmac
 import json
 import logging
-from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Annotated, AsyncIterator
@@ -43,22 +43,15 @@ from starlette.datastructures import UploadFile
 from . import __version__
 from .bot import Bot
 from .config import TOKEN_HINT, TOKEN_RE, Config
-from .events import EventError, parse_event
 from .files import FilesError
 from .hooks import render, render_with_template
-from .signing import HEADER_BACKEND, HEADER_RANDOM, HEADER_SIGNATURE, verify_any
+from .poller import Poller
 from .talk import TalkError
 
 log = logging.getLogger(__name__)
 
 #: How long shutdown waits for in-flight replies to finish.
 DRAIN_TIMEOUT = 30.0
-
-#: How many recently accepted ``X-Nextcloud-Talk-Random`` values to remember, so
-#: a captured webhook cannot simply be sent again. Talk mints 32 bytes per
-#: request, so collisions between genuine ones are not a thing worth planning
-#: for; the size only decides how far back a replay has to reach to work.
-SEEN_RANDOMS = 4096
 
 #: Guards GET /healthz when SABLE_HEALTH_TOKEN is set. A header rather than a
 #: query parameter, so the value stays out of proxy and access logs.
@@ -88,24 +81,33 @@ class NotifyRequest(BaseModel):
     model_config = {"populate_by_name": True}
 
 
-def create_app(config: Config | None = None, bot: Bot | None = None) -> FastAPI:
-    """Build the ASGI app. Pass ``config``/``bot`` in tests; otherwise read the env."""
+def create_app(
+    config: Config | None = None,
+    bot: Bot | None = None,
+    *,
+    receive: bool | None = None,
+) -> FastAPI:
+    """Build the ASGI app. Pass ``config``/``bot`` in tests; otherwise read the env.
+
+    ``receive`` says whether the lifespan starts reading chat. It defaults to on
+    when this function builds the Bot itself and off when it is handed one, so a
+    test that supplies a Bot with a fake transport never finds a poller running
+    behind its back.
+    """
     config = config or (bot.config if bot else Config.from_env())
+    receiving = (bot is None) if receive is None else receive
     tasks: set[asyncio.Task[None]] = set()
     #: The ceiling on concurrent replies, built in the lifespan below: a
     #: Semaphore binds to the loop it was created on, and create_app runs before
     #: there is one (uvicorn calls it as a factory, tests build the app and drive
     #: it later). None means no ceiling at all.
     slots: asyncio.Semaphore | None = None
-    #: Randoms from webhooks that verified, newest last, with a set beside the
-    #: deque for the lookup - the pairing Bot._seen uses for the same job.
-    randoms: deque[str] = deque(maxlen=SEEN_RANDOMS)
-    random_set: set[str] = set()
-
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         nonlocal slots
         app.state.bot = bot or Bot(config)
+        poller = Poller(app.state.bot, spawn)
+        app.state.poller = poller
         slots = (
             asyncio.Semaphore(config.max_concurrent_replies)
             if config.max_concurrent_replies
@@ -117,16 +119,13 @@ def create_app(config: Config | None = None, bot: Bot | None = None) -> FastAPI:
         # configured the way they meant.
         log.info("sable %s starting", __version__)
         log.info("  listening on:   http://%s:%s", config.host, config.port)
-        log.info("  webhook URL:    POST /webhook  (give this to occ talk:bot:install)")
+        log.info("  nextcloud:      %s as %s", config.nextcloud_url, config.nextcloud_user)
         log.info(
-            "  nextcloud:      %s",
-            config.nextcloud_url or "(taken from each signed webhook)",
+            "  receiving:      long polls of up to %ss, conversations rescanned every %ss",
+            config.poll_timeout,
+            config.room_refresh,
         )
-        log.info(
-            "  bot name:       %r   command prefix: %r",
-            config.bot_name,
-            config.command_prefix,
-        )
+        log.info("  command prefix: %r", config.command_prefix)
         log.info(
             "  model:          %s",
             f"{config.llm.model} at {config.llm.base_url}" if config.llm.enabled else "disabled",
@@ -148,11 +147,9 @@ def create_app(config: Config | None = None, bot: Bot | None = None) -> FastAPI:
             else ("enabled" if config.notify_enabled else "disabled (/notify answers 404)"),
         )
         log.info(
-            "  attachments:    %s",
-            f"as {config.nextcloud_user} into {config.upload_path}, "
-            f"up to {megabytes(config.max_upload_bytes)}"
-            if config.uploads_enabled
-            else "disabled (set SABLE_NEXTCLOUD_USER and SABLE_NEXTCLOUD_PASSWORD)",
+            "  attachments:    into %s, up to %s",
+            config.upload_path,
+            megabytes(config.max_upload_bytes),
         )
         log.info(
             "  hooks:          %s",
@@ -176,7 +173,6 @@ def create_app(config: Config | None = None, bot: Bot | None = None) -> FastAPI:
                 "and their ignore then quietly lapses. Prefer the user id.",
                 ", ".join(repr(entry) for entry in config.fragile_ignore_users),
             )
-        log.info("  backend pin:    %s", backend_pin_summary(config))
         log.info("  proxy trust:    %s", proxy_trust_summary(config))
         log.info(
             "  api docs:       %s",
@@ -199,12 +195,16 @@ def create_app(config: Config | None = None, bot: Bot | None = None) -> FastAPI:
 
         if config.startup_check:
             await app.state.bot.check_nextcloud()
+        if receiving:
+            poller.start()
 
         log.info("sable %s ready", __version__)
         try:
             yield
         finally:
             log.info("sable %s stopping", __version__)
+            # First, so nothing new is promised a reply while the rest drains.
+            await poller.stop()
             if tasks:
                 # In flight or still waiting for a slot: both are tasks that were
                 # promised a 200, so both are worth draining.
@@ -221,8 +221,7 @@ def create_app(config: Config | None = None, bot: Bot | None = None) -> FastAPI:
         lifespan=lifespan,
         # None removes the route entirely rather than hiding it. The schema
         # describes every endpoint and body shape to whoever can reach the
-        # service, and the webhook has to be reachable, so this is off unless
-        # asked for.
+        # service, so this is off unless asked for.
         docs_url="/docs" if config.api_docs else None,
         redoc_url="/redoc" if config.api_docs else None,
         openapi_url="/openapi.json" if config.api_docs else None,
@@ -232,9 +231,8 @@ def create_app(config: Config | None = None, bot: Bot | None = None) -> FastAPI:
         """Wait for a free slot, then run the handler.
 
         The waiting happens here, inside the background task, and never in the
-        webhook handler: Talk gives up on us long before a model call comes back,
-        so answering 200 cannot be made to depend on a slot. What the ceiling
-        delays is the work, not the answer.
+        poll loop: a loop that stopped reading while it waited would fall behind
+        the conversation. What the ceiling delays is the reply.
         """
         if slots is None:
             await coro
@@ -249,36 +247,11 @@ def create_app(config: Config | None = None, bot: Bot | None = None) -> FastAPI:
             await coro
 
     def spawn(coro) -> None:
-        """Run a handler detached from the request, keeping a strong reference."""
+        """Run a handler detached from the poll loop, keeping a strong reference."""
         task = asyncio.create_task(under_the_ceiling(coro))
         tasks.add(task)
         task.add_done_callback(tasks.discard)
         task.add_done_callback(_log_task_failure)
-
-    def replayed(random: str) -> bool:
-        """Remember this webhook's random, and say whether it has been seen before.
-
-        Only ever called *after* the signature verifies. The other order would let
-        anybody who can reach the port fill this cache with randoms of their own
-        invention and have the genuine webhooks carrying them refused.
-
-        What it does not do: the cache lives in this process, so a restart forgets
-        every random it held and a patient replay is accepted again. Talk sends no
-        timestamp either, so there is no age to check and no window to enforce -
-        a random is remembered until SEEN_RANDOMS newer ones have pushed it out.
-        This raises the cost of replaying a captured request; keeping the request
-        from being captured is still TLS's job, and nothing here substitutes for
-        it.
-        """
-        nonlocal random_set
-        if random in random_set:
-            return True
-        randoms.append(random)
-        random_set.add(random)
-        if len(random_set) > len(randoms):
-            # A deque eviction dropped one; rebuild the membership set.
-            random_set = set(randoms)
-        return False
 
     def current_bot(request: Request) -> Bot:
         """The Bot built during startup. Read from app.state rather than through
@@ -314,91 +287,11 @@ def create_app(config: Config | None = None, bot: Bot | None = None) -> FastAPI:
         return {
             "status": "ok",
             "version": __version__,
-            "bot": config.bot_name,
+            "user": current_bot(request).user_id,
             "llm": config.llm.model or None,
             "notify": config.notify_enabled,
             "nextcloud": current_bot(request).nextcloud.up,
         }
-
-    @app.post("/webhook", status_code=status.HTTP_200_OK, tags=["talk"])
-    async def webhook(
-        request: Request,
-        signature: Annotated[str, Header(alias=HEADER_SIGNATURE)] = "",
-        random: Annotated[str, Header(alias=HEADER_RANDOM)] = "",
-        backend: Annotated[str, Header(alias=HEADER_BACKEND)] = "",
-    ) -> dict[str, str]:
-        body = await request.body()
-
-        # Any of the inbound secrets: one normally, two while SABLE_BOT_SECRET is
-        # being rotated and events signed with the old one are still arriving.
-        if not verify_any(random, signature, body, config.inbound_secrets):
-            log.warning("rejected a webhook with a bad signature from %s", backend or "?")
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid signature")
-
-        # Second, and never first: see replayed(). A 401 rather than something
-        # more descriptive, because whoever sent this either already had a
-        # reply to it or is replaying somebody else's request.
-        if replayed(random):
-            log.warning(
-                "rejected a webhook reusing random %s... from %s; it has been "
-                "delivered already",
-                random[:8],
-                backend or "?",
-            )
-            raise HTTPException(
-                status.HTTP_401_UNAUTHORIZED, "this webhook was already delivered"
-            )
-
-        backend = backend.rstrip("/")
-        if config.pin_backend and backend != config.nextcloud_url:
-            log.error(
-                "rejected a webhook claiming backend %r; expected %r",
-                backend,
-                config.nextcloud_url,
-            )
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "unexpected backend")
-
-        try:
-            payload = json.loads(body)
-        except json.JSONDecodeError as exc:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"invalid JSON: {exc}") from exc
-
-        try:
-            event = parse_event(payload, backend=backend)
-        except EventError as exc:
-            log.warning("unparseable event: %s", exc)
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
-
-        # The token goes into the path of every call we make back - talk.py builds
-        # /bot/{token}/message - and httpx resolves ``..`` segments before sending,
-        # so a token that is not one could move the request off the bot API's own
-        # base path. Getting a webhook this far takes the bot secret or a
-        # compromised Nextcloud, so this is depth rather than the first line.
-        #
-        # Checked here and not in parse_event: the handler can say which token and
-        # why, where a refusal inside the parser reads as "unparseable event",
-        # which is a different and misleading thing to put in front of an operator.
-        if not TOKEN_RE.match(event.room_token):
-            log.error(
-                "refusing a webhook for conversation %r: %s",
-                event.room_token,
-                TOKEN_HINT,
-            )
-            raise HTTPException(
-                status.HTTP_400_BAD_REQUEST,
-                f"{event.room_token!r} is not a conversation token: {TOKEN_HINT}",
-            )
-
-        log.debug(
-            "accepted %s from %s in %s (message %s)",
-            event.type,
-            event.actor.id or "?",
-            event.room_token,
-            event.message_id or "-",
-        )
-        # Answer now, work later: a model call can take longer than Talk waits.
-        spawn(current_bot(request).handle(event))
-        return {"status": "accepted"}
 
     @app.post("/notify", status_code=status.HTTP_201_CREATED, tags=["alerting"])
     async def notify(
@@ -553,26 +446,6 @@ def create_app(config: Config | None = None, bot: Bot | None = None) -> FastAPI:
         return Response(f"sable {__version__}\n", media_type="text/plain")
 
     return app
-
-
-def backend_pin_summary(config: Config) -> str:
-    """The backend pin line in the startup block.
-
-    Spelled out rather than "off", because off is the interesting state: the
-    backend header sits outside the signature, so with nothing to pin against, a
-    replayed webhook chooses where the replies to it go.
-    """
-    if config.pin_backend:
-        return f"on, replies only to {config.nextcloud_url}"
-    reason = (
-        "no SABLE_NEXTCLOUD_URL"
-        if not config.nextcloud_url
-        else "SABLE_PIN_BACKEND is off"
-    )
-    return (
-        f"OFF ({reason}) - the unsigned backend header on each webhook decides "
-        f"where replies to it go"
-    )
 
 
 #: Who the trusted-proxy list is actually a setting on. __main__ hands it to
@@ -775,14 +648,6 @@ async def _relay_file(
 ) -> dict[str, object]:
     """Upload the attachment and share it into the conversation."""
     talk_bot = request.app.state.bot
-    config = talk_bot.config
-    if not config.uploads_enabled:
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            "file attachments are not configured: set SABLE_NEXTCLOUD_USER and "
-            "SABLE_NEXTCLOUD_PASSWORD to enable them",
-        )
-
     files = talk_bot.files()
     try:
         shared = await files.send_file(

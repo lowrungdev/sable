@@ -10,6 +10,64 @@ is not worth publishing.
 Format: `## <version>`, optionally followed by a date. Anything until the next
 `##` heading is the body.
 
+## Unreleased
+
+- **BREAKING: sable now runs as an ordinary Nextcloud user, not as a Talk bot.**
+  It used to be a webhook bot on Talk's Bot API: Nextcloud called `/webhook`,
+  every event was HMAC-signed, and replies were signed back with a shared
+  secret. That is gone. sable signs in as a user with an app password and
+  long-polls the chat API for the conversations that user is in, then posts,
+  reacts and uploads as the same user. The webhook, the signing code
+  (`signing.py`), the replay cache and the backend pin are removed, and so is
+  the requirement that Nextcloud be able to reach sable over HTTPS: sable only
+  needs outbound access to Nextcloud now, and its own port is for `/notify`,
+  `/hook/{name}` and `/healthz` alone.
+  Why: a user can read a message back and upload a file, which a bot cannot, and
+  nothing has to be installed in Nextcloud or reachable from it. What it costs is
+  in [purpose.md](purpose.md) and [security.md](security.md) - chiefly that the
+  credential is a user's app password, which cannot be scoped and reaches that
+  user's Files, Contacts and Calendar, so give sable an account that owns nothing
+  else; and that every long poll holds a request slot on Nextcloud for up to
+  `SABLE_POLL_TIMEOUT` seconds, which is why at most 50 conversations are
+  followed (the most recently active).
+  **Migrating:** (1) create a Nextcloud user for sable and an app password for it
+  under Settings > Security > Devices & sessions; (2) invite that user to each
+  conversation it should be in - a normal invitation, there is no bot switch;
+  (3) delete the old bot with `occ talk:bot:uninstall --id <id>` (`occ
+  talk:bot:list` shows the id); (4) set `SABLE_NEXTCLOUD_URL`,
+  `SABLE_NEXTCLOUD_USER` and `SABLE_NEXTCLOUD_PASSWORD`, all now required; and
+  (5) remove `SABLE_BOT_SECRET`, `SABLE_BOT_SECRET_PREVIOUS`, `SABLE_BOT_NAME`
+  and `SABLE_PIN_BACKEND`, which no longer exist. `SABLE_NEXTCLOUD_USER` and
+  `SABLE_NEXTCLOUD_PASSWORD` were the optional upload account before; the same
+  account now does everything, and `/notify` attachments are always available.
+  `SABLE_UPLOAD_PATH` and `SABLE_MAX_UPLOAD_BYTES` are unchanged. The old
+  upload account can be reused as the new one or retired; listing it in
+  `SABLE_IGNORE_USERS` is no longer needed, because sable ignores its own
+  messages.
+  Also different: people now address sable by @-mentioning its user id (picked
+  from Talk's list, or typed at the start of a message) rather than a configured
+  name, and one-to-one conversations have no special case. A conversation joined
+  after sable started is followed from its newest message at the next scan, so
+  nothing said before is replayed, and neither is anything said while sable was
+  down. `/healthz` reports `user` where it reported `bot`.
+- **New settings for reading chat.** `SABLE_POLL_TIMEOUT` (default 30) is how
+  many seconds each long poll may wait, clamped to Talk's maximum of 60 and an
+  error below 1. `SABLE_ROOM_REFRESH` (default 60) is how often the conversation
+  list is rescanned for rooms sable was added to or removed from, an error below
+  5. The startup banner gains a `receiving` line and loses `webhook URL`, `bot
+  name` and `backend pin`; it now reads `nextcloud: <url> as <user>`, and logs
+  `signed in to <url> as <id> (<display name>)` once the credentials are
+  confirmed.
+- **`SABLE_STARTUP_CHECK` now verifies the credentials.** It asks Nextcloud who
+  the account is (`cloud/user`) instead of fetching `status.php`, so a wrong URL,
+  an untrusted certificate or a rejected app password all show up at boot. A
+  plain `http://` URL to a host that is not local gets a warning, since the
+  password crosses the network unencrypted.
+- **The ⁉️ reaction is unverified against a live server.** It depends on Talk
+  delivering reactions as system messages through the chat poll, which the code
+  and tests assume but which has not yet been confirmed; see
+  [future.md](future.md#talk-features-not-yet-used).
+
 ## 0.7
 
 - **Successful health checks no longer fill the log.** The container's

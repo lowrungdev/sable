@@ -13,6 +13,8 @@ from conftest import (
     ACTOR_SHAPES,
     BACKEND,
     ROOM,
+    TALK,
+    USER,
     VALID_TOKENS,
     ActorShape,
     FakeLLM,
@@ -26,14 +28,13 @@ from sable.bot import Bot, now
 from sable.commands import Context
 from sable.config import LLMConfig
 from sable.llm import LLMError
-from sable.talk import API_BASE
 
-MESSAGE_URL = f"{BACKEND}{API_BASE}/bot/{ROOM}/message"
-REACTION_URL = f"{BACKEND}{API_BASE}/bot/{ROOM}/reaction/100"
+MESSAGE_URL = f"{TALK}/chat/{ROOM}"
+REACTION_URL = f"{TALK}/reaction/{ROOM}/100"
 
 
 def message_route(room: str = ROOM):
-    return respx.post(f"{BACKEND}{API_BASE}/bot/{room}/message").mock(
+    return respx.post(f"{TALK}/chat/{room}").mock(
         return_value=httpx.Response(201, json={"ocs": {"data": {"id": 1}}})
     )
 
@@ -95,7 +96,7 @@ async def test_unknown_command_can_stay_silent(llm: FakeLLM) -> None:
 async def test_messages_from_bots_are_ignored(bot: Bot) -> None:
     route = message_route()
     await bot.handle(
-        event("!ping", actor_id="bots/bot-abc", actor_type="Application")
+        event("!ping", actor_id="bots/bot-abc", actor_type="bots")
     )
     assert not route.called
 
@@ -107,20 +108,6 @@ async def test_a_redelivered_event_is_handled_once(bot: Bot) -> None:
     await bot.handle(incoming)
     await bot.handle(incoming)
     assert len(route.calls) == 1
-
-
-@respx.mock
-async def test_join_and_leave_are_noted_without_replying(bot: Bot) -> None:
-    route = message_route()
-    join = {
-        "type": "Join",
-        "actor": {"type": "Person", "id": "users/alice", "name": "Alice"},
-        "object": {"type": "Collection", "id": ROOM, "name": "Team chat"},
-    }
-    from sable.events import parse_event
-
-    await bot.handle(parse_event(join))
-    assert not route.called
 
 
 @respx.mock
@@ -484,7 +471,7 @@ async def test_the_ask_emoji_works_on_the_bots_own_answer(bot: Bot, llm: FakeLLM
     message_route()
     # A bot message is cached but never acted on, so a follow-up question works.
     await bot.handle(
-        event("42 is the answer", message_id=100, actor_id="bots/bot-abc", actor_type="Application")
+        event("42 is the answer", message_id=100, actor_id="bots/bot-abc", actor_type="bots")
     )
     await bot.handle(reaction_event(ASK, message_id=100))
     assert llm.calls
@@ -537,47 +524,72 @@ async def test_a_model_failure_on_an_ask_is_reported(llm: FakeLLM) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# The startup reachability probe
+# The credentials check
 # --------------------------------------------------------------------------- #
 
-STATUS_URL = f"{BACKEND}/status.php"
+USER_URL = f"{BACKEND}/ocs/v2.php/cloud/user"
 
 
-def status_body(**overrides) -> dict:
-    body = {
-        "installed": True,
-        "maintenance": False,
-        "version": "31.0.4.1",
-        "versionstring": "31.0.4",
-        "productname": "Nextcloud",
-    }
-    body.update(overrides)
-    return body
+def whoami_body(user: str = "sable", name: str = "Sable Bot") -> dict:
+    return {"ocs": {"meta": {"status": "ok"}, "data": {"id": user, "displayname": name}}}
 
 
 @respx.mock
-async def test_the_startup_probe_reports_a_reachable_nextcloud(bot: Bot, caplog) -> None:
-    route = respx.get(STATUS_URL).mock(return_value=httpx.Response(200, json=status_body()))
+async def test_the_check_signs_in_and_learns_who_we_are(bot: Bot, caplog) -> None:
+    route = respx.get(USER_URL).mock(return_value=httpx.Response(200, json=whoami_body()))
     with caplog.at_level(logging.INFO):
         assert await bot.check_nextcloud() is True
     assert route.called
-    assert "connected to Nextcloud 31.0.4" in caplog.text
-    assert BACKEND in caplog.text
+    assert route.calls.last.request.headers["authorization"].startswith("Basic ")
+    assert f"signed in to {BACKEND} as sable (Sable Bot)" in caplog.text
+    assert bot.display_name == "Sable Bot"
 
 
 @respx.mock
-async def test_the_startup_probe_notes_maintenance_mode(bot: Bot, caplog) -> None:
-    respx.get(STATUS_URL).mock(
-        return_value=httpx.Response(200, json=status_body(maintenance=True))
-    )
+async def test_the_check_never_logs_the_password(bot: Bot, caplog) -> None:
+    from conftest import PASSWORD
+
+    respx.get(USER_URL).mock(return_value=httpx.Response(200, json=whoami_body()))
+    with caplog.at_level(logging.DEBUG):
+        await bot.check_nextcloud()
+    assert PASSWORD not in caplog.text
+    assert PASSWORD not in repr(bot.config)
+
+
+@respx.mock
+async def test_the_canonical_user_id_replaces_the_login_name(llm: FakeLLM) -> None:
+    """Nextcloud accepts a login name or an email address that is not the user id,
+    and it is the id that appears as actorId on everything we post."""
+    bot = Bot(make_config(nextcloud_user="sable@example.org"), llm=llm)  # type: ignore[arg-type]
+    try:
+        assert bot.user_id == "sable@example.org"
+        respx.get(USER_URL).mock(return_value=httpx.Response(200, json=whoami_body("sable")))
+        await bot.check_nextcloud()
+        assert bot.user_id == "sable"
+        assert bot.is_self(event("hi", actor_id="users/sable"))
+        assert not bot.is_self(event("hi", actor_id="users/sable@example.org"))
+    finally:
+        await bot.aclose()
+
+
+@respx.mock
+async def test_rejected_credentials_are_an_error_that_names_the_settings(
+    bot: Bot, caplog
+) -> None:
+    respx.get(USER_URL).mock(return_value=httpx.Response(401, text="not logged in"))
     with caplog.at_level(logging.INFO):
-        assert await bot.check_nextcloud() is True
-    assert "MAINTENANCE MODE" in caplog.text
+        assert await bot.check_nextcloud() is False
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert errors
+    assert "SABLE_NEXTCLOUD_PASSWORD" in errors[0].getMessage()
+    assert "app password" in errors[0].getMessage()
+    # It answered, so it is reachable.
+    assert bot.nextcloud.up is True
 
 
 @respx.mock
 async def test_an_unreachable_nextcloud_warns_and_does_not_raise(bot: Bot, caplog) -> None:
-    respx.get(STATUS_URL).mock(side_effect=httpx.ConnectError("no route to host"))
+    respx.get(USER_URL).mock(side_effect=httpx.ConnectError("no route to host"))
     with caplog.at_level(logging.INFO):
         assert await bot.check_nextcloud() is False
     assert "could not reach Nextcloud" in caplog.text
@@ -587,31 +599,20 @@ async def test_an_unreachable_nextcloud_warns_and_does_not_raise(bot: Bot, caplo
 
 
 @respx.mock
-async def test_an_http_error_from_status_php_is_reported(bot: Bot, caplog) -> None:
-    respx.get(STATUS_URL).mock(return_value=httpx.Response(503, text="down"))
+async def test_an_unhealthy_nextcloud_is_reported(bot: Bot, caplog) -> None:
+    respx.get(USER_URL).mock(return_value=httpx.Response(503, text="down"))
     with caplog.at_level(logging.INFO):
         assert await bot.check_nextcloud() is False
     assert "answered HTTP 503" in caplog.text
-    # It answered, so it is reachable even though it is unhealthy.
     assert bot.nextcloud.up is True
 
 
 @respx.mock
 async def test_something_that_is_not_a_nextcloud(bot: Bot, caplog) -> None:
-    respx.get(STATUS_URL).mock(return_value=httpx.Response(200, text="<html>hello</html>"))
+    respx.get(USER_URL).mock(return_value=httpx.Response(200, text="<html>hello</html>"))
     with caplog.at_level(logging.INFO):
         assert await bot.check_nextcloud() is False
-    assert "really a Nextcloud" in caplog.text
-
-
-async def test_the_probe_is_skipped_without_a_configured_url(llm: FakeLLM, caplog) -> None:
-    bot = Bot(make_config(nextcloud_url="", pin_backend=False), llm=llm)  # type: ignore[arg-type]
-    try:
-        with caplog.at_level(logging.INFO):
-            assert await bot.check_nextcloud() is False
-    finally:
-        await bot.aclose()
-    assert "taken from each signed webhook" in caplog.text
+    assert "answered HTTP 200" in caplog.text
 
 
 @respx.mock
@@ -675,20 +676,123 @@ async def test_the_ask_reaction_logs_who_asked_and_the_author(bot: Bot, caplog) 
     assert "the deploy failed" not in caplog.text
 
 
-async def test_joining_and_leaving_a_conversation_are_logged(bot: Bot, caplog) -> None:
-    from sable.events import parse_event
+@respx.mock
+async def test_our_own_messages_are_never_answered(bot: Bot) -> None:
+    """Everything we post comes back down the poll, from our own user id."""
+    route = message_route()
+    await bot.handle(event("!ping", actor_id=f"users/{USER}", actor_name="Sable Bot"))
+    await bot.handle(event("@sable hello", actor_id=f"users/{USER}", message_id=2))
+    assert not route.called
 
-    join = {
-        "type": "Join",
-        "actor": {"type": "Person", "id": "users/alice", "name": "Alice"},
-        "object": {"type": "Collection", "id": ROOM, "name": "Team chat"},
-    }
-    leave = dict(join, type="Leave")
-    with caplog.at_level(logging.INFO):
-        await bot.handle(parse_event(join))
-        await bot.handle(parse_event(leave))
-    assert "added to conversation abcd1234 ('Team chat')" in caplog.text
-    assert "removed from conversation abcd1234 ('Team chat')" in caplog.text
+
+@respx.mock
+async def test_our_own_reactions_are_never_answered(bot: Bot, llm: FakeLLM) -> None:
+    """The thinking reaction is ours, and arrives as a system message like any other."""
+    from conftest import reaction_event
+
+    route = message_route()
+    await bot.handle(event("the deploy failed", message_id=100, actor_name="Bob"))
+    await bot.handle(reaction_event("⁉️", message_id=100, actor_id=f"users/{USER}"))
+    assert not llm.calls
+    assert not route.called
+
+
+@respx.mock
+async def test_our_own_messages_are_still_remembered_for_the_reaction(
+    bot: Bot, llm: FakeLLM
+) -> None:
+    from conftest import reaction_event
+
+    message_route()
+    await bot.handle(event("42 is the answer", message_id=100, actor_id=f"users/{USER}"))
+    await bot.handle(reaction_event("⁉️", message_id=100))
+    assert "42 is the answer" in llm.last_prompt
+
+
+@respx.mock
+async def test_a_real_mention_goes_to_the_model_and_is_stripped(
+    bot: Bot, llm: FakeLLM
+) -> None:
+    from conftest import mention
+
+    route = message_route()
+    await bot.handle(
+        event(
+            "{mention-user1} how are you?",
+            parameters=mention("mention-user1", user=USER, name="Sable Bot"),
+        )
+    )
+    assert sent(route)[0]["message"] == "mock answer"
+    assert llm.last_prompt == "Alice: how are you?"
+
+
+@respx.mock
+async def test_a_mention_mid_sentence_is_kept_in_the_prompt(bot: Bot, llm: FakeLLM) -> None:
+    from conftest import mention
+
+    message_route()
+    await bot.handle(
+        event(
+            "what does {mention-user1} think?",
+            parameters=mention("mention-user1", user=USER, name="Sable Bot"),
+        )
+    )
+    assert llm.last_prompt == "Alice: what does @Sable Bot think?"
+
+
+@respx.mock
+async def test_a_mention_of_somebody_else_is_not_for_us(bot: Bot, llm: FakeLLM) -> None:
+    from conftest import mention
+
+    route = message_route()
+    await bot.handle(
+        event(
+            "{mention-user1} lunch?",
+            parameters=mention("mention-user1", user="bob", name="Bob"),
+        )
+    )
+    assert not llm.calls
+    assert not route.called
+
+
+@respx.mock
+async def test_a_mention_by_a_guest_or_group_with_our_id_does_not_count(
+    bot: Bot, llm: FakeLLM
+) -> None:
+    route = message_route()
+    await bot.handle(
+        event(
+            "{mention-group1} hello",
+            parameters={"mention-group1": {"type": "user-group", "id": USER, "name": "staff"}},
+        )
+    )
+    assert not llm.calls
+    assert not route.called
+
+
+@respx.mock
+async def test_a_command_after_a_mention_still_runs(bot: Bot) -> None:
+    from conftest import mention
+
+    route = message_route()
+    await bot.handle(
+        event("{mention-user1} !ping", parameters=mention("mention-user1", user=USER))
+    )
+    assert sent(route)[0]["message"] == "pong 🏓"
+
+
+@respx.mock
+async def test_a_thinking_reaction_is_added_and_taken_back(llm: FakeLLM) -> None:
+    message_route()
+    added = respx.post(f"{TALK}/reaction/{ROOM}/100").mock(return_value=httpx.Response(201, json={}))
+    removed = respx.delete(f"{TALK}/reaction/{ROOM}/100").mock(return_value=httpx.Response(200, json={}))
+    bot = Bot(make_config(thinking_reaction="🤔"), llm=llm)  # type: ignore[arg-type]
+    try:
+        await bot.handle(event("@sable hi", message_id=100))
+    finally:
+        await bot.aclose()
+    assert json.loads(added.calls.last.request.content) == {"reaction": "🤔"}
+    assert removed.calls.last.request.url.params["reaction"] == "🤔"
 
 
 # --------------------------------------------------------------------------- #
@@ -1127,7 +1231,7 @@ async def test_an_application_actor_is_ignored_even_with_an_admin_user_id(
                 "!reset",
                 actor_id=f"users/{ADMIN}",
                 actor_name=ADMIN,
-                actor_type="Application",
+                actor_type="bots",
             )
         )
     finally:
@@ -1517,7 +1621,7 @@ async def test_the_bots_own_message_is_still_remembered_in_a_listed_conversation
                 "42 is the answer",
                 message_id=100,
                 actor_id="bots/bot-abc",
-                actor_type="Application",
+                actor_type="bots",
             )
         )
         await bot.handle(reaction_event(ASK, message_id=100))
@@ -1571,7 +1675,7 @@ def application_admin_event(text: str = "!reset"):
     """A bot identity posting under the administrator's user id - is_bot and an
     admin user id at once, which is the whole difficulty."""
     return event(
-        text, actor_id=f"users/{ADMIN}", actor_name=ADMIN, actor_type="Application"
+        text, actor_id=f"users/{ADMIN}", actor_name=ADMIN, actor_type="bots"
     )
 
 
@@ -1633,7 +1737,7 @@ async def test_a_restricted_reaction_reached_past_the_bot_check_is_still_refused
                 message_id=100,
                 actor_id=f"users/{ADMIN}",
                 actor_name=ADMIN,
-                actor_type="Application",
+                actor_type="bots",
             )
         )
     finally:
@@ -1651,7 +1755,7 @@ async def test_ctx_is_admin_refuses_a_bot_actor_wearing_an_admin_user_id(llm: Fa
     try:
         human = event("!help", actor_id="users/maser", actor_name="maser")
         robot = event(
-            "!help", actor_id="users/maser", actor_name="maser", actor_type="Application"
+            "!help", actor_id="users/maser", actor_name="maser", actor_type="bots"
         )
         # The config alone would have said yes to both: same user id.
         assert bot.config.is_admin_user("maser") is True

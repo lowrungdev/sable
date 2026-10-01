@@ -20,7 +20,7 @@ from .commands import (
     split_command,
 )
 from .config import Config, LLMConfig
-from .events import TalkEvent
+from .events import TalkEvent, clean_name, mention_keys, render_message
 from .files import FilesClient
 from .history import History, MessageCache
 from .llm import LLMClient, LLMError
@@ -53,8 +53,8 @@ def now(timezone: str = "") -> str:
     label = timezone or moment.tzname() or "local time"
     return f"{moment:%A %d %B %Y, %H:%M} ({label})"
 
-#: How many recently handled events to remember, so a redelivered webhook does
-#: not produce a second reply.
+#: How many recently handled events to remember, so a message delivered twice
+#: does not produce a second reply.
 SEEN_CACHE = 512
 
 #: (conversation, event type, message id, actor, reaction) - see Bot.seen.
@@ -92,11 +92,33 @@ class Bot:
         self._llm = llm if llm is not None else llm_client(config.llm, self._http)
         self._seen: deque[SeenKey] = deque(maxlen=SEEN_CACHE)
         self._seen_set: set[SeenKey] = set()
+        #: The one account sable is. Everything posted under its id is ours.
+        self.talk = TalkClient(
+            config.nextcloud_url,
+            config.nextcloud_user,
+            config.nextcloud_password,
+            client=self._http,
+            max_message_chars=config.max_message_chars,
+            state=self.nextcloud,
+        )
+        self._files: FilesClient | None = None
+        self.user_id = config.nextcloud_user
+        self.display_name = ""
+        self._set_identity(config.nextcloud_user, "")
+
+    def _set_identity(self, user_id: str, display_name: str) -> None:
+        """Learn who we are, and rebuild what recognises a mention of us."""
+        self.user_id = user_id
+        self.display_name = clean_name(display_name)
+        names = sorted(
+            {n for n in (self.user_id, self.display_name) if n}, key=len, reverse=True
+        )
+        alternatives = "|".join(re.escape(n) for n in names)
         self._mention_re = re.compile(
-            rf"^@?{re.escape(config.bot_name)}\b[,:;]?\s*", re.IGNORECASE
+            rf"^@?(?:{alternatives})\b[,:;]?\s*", re.IGNORECASE
         )
         self._mention_anywhere_re = re.compile(
-            rf"(?<!\w)@{re.escape(config.bot_name)}\b", re.IGNORECASE
+            rf"(?<!\w)@(?:{alternatives})\b", re.IGNORECASE
         )
 
     async def aclose(self) -> None:
@@ -146,95 +168,76 @@ class Bot:
     def is_ask_reaction(self, reaction: str) -> bool:
         return bool(self._ask_key) and emoji_key(reaction) == self._ask_key
 
-    def talk(self, backend: str) -> TalkClient:
-        """A client for the server that sent us this event."""
-        base = self.config.nextcloud_url or backend
-        if not base:
-            raise ValueError("no Nextcloud URL: set SABLE_NEXTCLOUD_URL")
-        return TalkClient(
-            base,
-            self.config.bot_secret,
-            client=self._http,
-            max_message_chars=self.config.max_message_chars,
-            state=self.nextcloud,
-        )
-
     async def check_nextcloud(self) -> bool:
-        """Probe Nextcloud's public status endpoint and log what came back.
+        """Sign in and log who we are, or why we could not.
 
-        Only meaningful when SABLE_NEXTCLOUD_URL is configured; the webhook path
-        otherwise learns the URL from each signed event. Failure is not fatal:
-        Nextcloud may simply not be up yet, and the bot has nothing to do until a
-        webhook arrives anyway.
+        Not fatal when it fails: Nextcloud may simply not be up yet, and the
+        receive loop keeps retrying with backoff either way. A rejected password
+        is different - nothing will work until someone changes it - and says so
+        in words that point at the setting.
         """
-        if not self.config.nextcloud_url:
-            log.info(
-                "no SABLE_NEXTCLOUD_URL configured; the server URL will be taken "
-                "from each signed webhook"
-            )
-            return False
-
-        url = f"{self.config.nextcloud_url}/status.php"
         try:
-            response = await self._http.get(url, timeout=10.0)
+            user_id, display_name = await self.talk.whoami()
         except httpx.HTTPError as exc:
-            self.nextcloud.record_failure(exc)
             log.warning(
-                "could not reach Nextcloud at %s: %s. Replies will fail until this "
-                "works - check the URL, DNS, and whether the certificate is trusted "
-                "(see docs/deployment.md on internal CAs)",
+                "could not reach Nextcloud at %s: %s. Nothing will be received or "
+                "sent until this works - check the URL, DNS, and whether the "
+                "certificate is trusted (see docs/deployment.md on internal CAs)",
                 self.config.nextcloud_url,
                 exc,
             )
             return False
-
-        self.nextcloud.record_success()
-        if response.status_code >= 400:
-            log.warning(
-                "Nextcloud at %s answered HTTP %s on status.php; it is reachable but "
-                "may not be healthy",
-                self.config.nextcloud_url,
-                response.status_code,
-            )
+        except TalkError as exc:
+            if exc.status in (401, 403):
+                log.error(
+                    "Nextcloud at %s refused the credentials for %r (HTTP %s). Check "
+                    "SABLE_NEXTCLOUD_USER and SABLE_NEXTCLOUD_PASSWORD - the password "
+                    "should be an app password, and it stops working when revoked.",
+                    self.config.nextcloud_url,
+                    self.config.nextcloud_user,
+                    exc.status,
+                )
+            else:
+                log.warning(
+                    "Nextcloud at %s answered HTTP %s when asked who %r is; it is "
+                    "reachable but may not be healthy: %s",
+                    self.config.nextcloud_url,
+                    exc.status,
+                    self.config.nextcloud_user,
+                    exc.body[:200],
+                )
             return False
-        try:
-            status = response.json()
-        except ValueError:
-            log.warning(
-                "%s answered, but not with JSON - is %s really a Nextcloud?",
-                url,
-                self.config.nextcloud_url,
-            )
-            return False
 
+        self._set_identity(user_id, display_name)
         log.info(
-            "connected to %s %s at %s%s",
-            status.get("productname") or "Nextcloud",
-            status.get("versionstring") or "(unknown version)",
+            "signed in to %s as %s%s",
             self.config.nextcloud_url,
-            " [MAINTENANCE MODE]" if status.get("maintenance") else "",
+            user_id,
+            f" ({self.display_name})" if self.display_name else "",
         )
         return True
 
     def files(self) -> FilesClient:
-        """A client for the user account that uploads and shares attachments.
-
-        Separate from :meth:`talk` on purpose: this one carries a credential
-        that can read and write that user's files, so it is built only when an
-        attachment is actually being sent.
-        """
-        if not self.config.uploads_enabled:
-            raise ValueError(
-                "file attachments are not configured (set SABLE_NEXTCLOUD_USER "
-                "and SABLE_NEXTCLOUD_PASSWORD)"
+        """The upload client, as the same account. Built once: it remembers that
+        the upload folder exists."""
+        if self._files is None:
+            self._files = FilesClient(
+                self.config.nextcloud_url,
+                self.config.nextcloud_user,
+                self.config.nextcloud_password,
+                upload_path=self.config.upload_path,
+                client=self._http,
+                state=self.nextcloud,
             )
-        return FilesClient(
-            self.config.nextcloud_url,
-            self.config.nextcloud_user,
-            self.config.nextcloud_password,
-            upload_path=self.config.upload_path,
-            client=self._http,
-            state=self.nextcloud,
+        return self._files
+
+    def is_self(self, event: TalkEvent) -> bool:
+        """Did we write this ourselves? Acting on it would mean answering ourselves."""
+        mine = self.user_id.casefold()
+        return (
+            bool(mine)
+            and event.actor.type == "users"
+            and event.actor.user_id.casefold() == mine
         )
 
     def seen(self, event: TalkEvent) -> bool:
@@ -264,8 +267,26 @@ class Bot:
 
     # -- routing ----------------------------------------------------------- #
 
-    def strip_mention(self, text: str) -> tuple[bool, str]:
-        """Detect a mention of this bot and return the text without it."""
+    def strip_mention(self, event: TalkEvent) -> tuple[bool, str]:
+        """Detect a mention of this account and return the text without it.
+
+        A real Talk mention arrives as a ``user`` parameter carrying our id, and
+        that is what counts. Failing that, the account's id or display name typed
+        out - at the start of the message, or as ``@name`` anywhere in it.
+        """
+        if self.user_id in event.mentions:
+            ours = mention_keys(event.parameters, self.user_id)
+            raw, end = event.raw_message, 0
+            lead_re = re.compile(r"\s*\{([a-zA-Z0-9_-]+)\}[,:;]?\s*")
+            while True:
+                lead = lead_re.match(raw, end)
+                if lead is None or lead.group(1) not in ours:
+                    break
+                end = lead.end()
+            if end:
+                return True, render_message(raw[end:], event.parameters).strip()
+            return True, event.message
+        text = event.message
         match = self._mention_re.match(text)
         if match:
             return True, text[match.end() :].strip()
@@ -274,7 +295,7 @@ class Bot:
         return False, text
 
     async def handle(self, event: TalkEvent) -> None:
-        """Entry point for a verified webhook event."""
+        """Entry point for an event read from a conversation."""
         if self.config.is_ignored(event.actor.id, event.actor.name):
             # Before the message cache too: their words never reach the model,
             # not even by somebody else reacting to them.
@@ -300,6 +321,10 @@ class Bot:
                 event.message.strip(),
             )
 
+        if self.is_self(event):
+            # Our own replies and reactions come back down the same poll.
+            log.debug("ignoring %s from myself", event.type)
+            return
         if event.actor.is_bot:
             log.debug("ignoring %s from bot %s", event.type, event.actor.id)
             return
@@ -313,20 +338,6 @@ class Bot:
             await self._run_reaction_query(event)
             return
 
-        if event.type == "Join":
-            log.info(
-                "added to conversation %s (%r) - now receiving its messages",
-                event.room_token,
-                event.room_name,
-            )
-            return
-        if event.type == "Leave":
-            log.info(
-                "removed from conversation %s (%r) - no further messages from it",
-                event.room_token,
-                event.room_name,
-            )
-            return
         if not event.is_message:
             log.debug("no handler for %s events", event.type)
             return
@@ -335,7 +346,7 @@ class Bot:
         if not text:
             return
 
-        mentioned, remainder = self.strip_mention(text)
+        mentioned, remainder = self.strip_mention(event)
         command = split_command(remainder, self.config.command_prefix)
 
         if command is not None:
@@ -524,7 +535,7 @@ class Bot:
         messages.append({"role": "user", "content": turn})
 
         reaction = self.config.thinking_reaction
-        client = self.talk(event.backend)
+        client = self.talk
         reacted = await client.try_react(room, event.message_id, reaction)
         try:
             answer = await self._llm.complete(messages)
@@ -567,7 +578,7 @@ class Bot:
         reply_to overrides the SABLE_REPLY_AS_REPLY default, for answers that
         make no sense floating free of the message they are about.
         """
-        client = self.talk(event.backend)
+        client = self.talk
         if reply_to is None:
             reply_to = event.message_id if self.config.reply_as_reply else 0
         return await client.send_message(
@@ -578,8 +589,7 @@ class Bot:
         self, room_token: str, message: str, *, silent: bool = False, reply_to: int = 0
     ) -> int:
         """Post into a conversation without an incoming event (alerting path)."""
-        client = self.talk("")
-        return await client.send_message(
+        return await self.talk.send_message(
             room_token, message, silent=silent, reply_to=reply_to
         )
 
@@ -589,8 +599,7 @@ class Bot:
         """Reply, treating a failed post as a log line rather than a crash.
 
         Nextcloud being unreachable is not this handler's problem to solve, and
-        an exception here would only surface as a stray traceback: the webhook
-        request has long since been answered.
+        an exception here would only surface as a stray traceback.
         """
         try:
             await self.reply(event, message, reply_to=reply_to)

@@ -177,7 +177,7 @@ async def help_command(ctx: Context) -> str:
         # A mention reaches the model whatever SABLE_ADMIN_COMMANDS says: only
         # the command is gated, so only the command is conditional here.
         ai = ctx.bot.registry.get("ai")
-        ways = f"Mention me (`@{ctx.bot.config.bot_name}`)"
+        ways = f"Mention me (`@{ctx.bot.user_id}`)"
         if ai is not None and can_run(ai):
             ways += f" or use `{prefix}ai <question>`"
         body += f"\n\n{ways} to talk to the model."

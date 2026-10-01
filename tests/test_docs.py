@@ -82,7 +82,7 @@ def test_the_pattern_does_not_invent_a_variable_out_of_a_constant() -> None:
     # app.py names status.HTTP_422_UNPROCESSABLE_CONTENT eleven times. The whole
     # reason for the lookbehind, and the reason not to keep an exclusion list.
     assert variables("status.HTTP_422_UNPROCESSABLE_CONTENT") == set()
-    assert variables("SABLE_BOT_SECRET") == {"SABLE_BOT_SECRET"}
+    assert variables("SABLE_NEXTCLOUD_USER") == {"SABLE_NEXTCLOUD_USER"}
 
 
 @pytest.mark.parametrize("path", OPERATOR_FILES, ids=lambda path: path.name)
@@ -114,8 +114,8 @@ def test_no_file_documents_a_variable_the_code_never_reads(path: Path) -> None:
 #: that default lands in. Not every documented variable: a required one, a
 #: secret, and anything documented as *(unset)* have nothing to compare.
 DOCUMENTED_DEFAULTS = {
-    "SABLE_BOT_NAME": "bot_name",
-    "SABLE_PIN_BACKEND": "pin_backend",
+    "SABLE_POLL_TIMEOUT": "poll_timeout",
+    "SABLE_ROOM_REFRESH": "room_refresh",
     "SABLE_COMMAND_PREFIX": "command_prefix",
     "SABLE_ASK_REACTION": "ask_reaction",
     "SABLE_MESSAGE_CACHE": "message_cache",
@@ -189,19 +189,13 @@ def written_as(value: object) -> str:
 
 @pytest.fixture
 def default_config(monkeypatch: pytest.MonkeyPatch) -> Config:
-    """What an operator gets having set only the one required variable.
-
-    SABLE_NEXTCLOUD_URL is set too, although no default under test is read from
-    it: pin_backend is documented `true`, and from_env turns it off when there is
-    no URL to pin against - which configuration.md says on the same line
-    ("Automatically disabled when no URL is set"). Without a URL the check would
-    fail on the documented behaviour instead of on a stale default.
-    """
+    """What an operator gets having set only the three required variables."""
     for key in list(os.environ):
         if key.startswith("SABLE_"):
             monkeypatch.delenv(key, raising=False)
-    monkeypatch.setenv("SABLE_BOT_SECRET", "s" * 40)
     monkeypatch.setenv("SABLE_NEXTCLOUD_URL", "https://cloud.example.org")
+    monkeypatch.setenv("SABLE_NEXTCLOUD_USER", "sable")
+    monkeypatch.setenv("SABLE_NEXTCLOUD_PASSWORD", "app-password-1234")
     return Config.from_env()
 
 
@@ -263,7 +257,8 @@ def sample_block() -> list[str]:
 async def test_the_logged_startup_banner_is_the_one_deployment_md_shows(caplog) -> None:
     # Labels only. The values are whatever the deployment is configured with, and
     # the sample is deliberately somebody else's configuration.
-    app = create_app(make_config())
+    # receive=False: the lifespan must not start polling a server that is not there.
+    app = create_app(make_config(), receive=False)
     with caplog.at_level(logging.INFO):
         async with app.router.lifespan_context(app):
             pass

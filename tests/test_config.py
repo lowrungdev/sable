@@ -13,7 +13,8 @@ import pytest
 
 from sable.config import TOKEN_RE, Config, ConfigError
 
-SECRET = "s" * 40
+URL = "https://cloud.example.org"
+PASSWORD = "app-password-1234"
 ROOM = "abcd1234"
 
 Load = Callable[..., Config]
@@ -26,10 +27,10 @@ def load(monkeypatch: pytest.MonkeyPatch) -> Load:
         if key.startswith("SABLE_"):
             monkeypatch.delenv(key, raising=False)
 
-    def _load(*, nextcloud: bool = True, **env: str) -> Config:
-        monkeypatch.setenv("SABLE_BOT_SECRET", SECRET)
-        if nextcloud:
-            monkeypatch.setenv("SABLE_NEXTCLOUD_URL", "https://cloud.example.org")
+    def _load(**env: str) -> Config:
+        monkeypatch.setenv("SABLE_NEXTCLOUD_URL", URL)
+        monkeypatch.setenv("SABLE_NEXTCLOUD_USER", "sable")
+        monkeypatch.setenv("SABLE_NEXTCLOUD_PASSWORD", PASSWORD)
         for key, value in env.items():
             monkeypatch.setenv(key, value)
         return Config.from_env()
@@ -37,12 +38,100 @@ def load(monkeypatch: pytest.MonkeyPatch) -> Load:
     return _load
 
 
-def test_the_minimum_is_a_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_minimum_is_a_url_a_user_and_an_app_password(load: Load) -> None:
+    config = load()
+    assert config.nextcloud_url == URL
+    assert config.nextcloud_user == "sable"
+    assert config.nextcloud_password == PASSWORD
+
+
+@pytest.mark.parametrize(
+    "missing",
+    ["SABLE_NEXTCLOUD_URL", "SABLE_NEXTCLOUD_USER", "SABLE_NEXTCLOUD_PASSWORD"],
+)
+def test_each_of_the_three_account_settings_is_required(
+    load: Load, monkeypatch: pytest.MonkeyPatch, missing: str
+) -> None:
+    load()
+    monkeypatch.delenv(missing)
+    with pytest.raises(ConfigError, match=f"{missing} required"):
+        Config.from_env()
+
+
+def test_nothing_set_names_all_three(monkeypatch: pytest.MonkeyPatch, load: Load) -> None:
     for key in list(os.environ):
         if key.startswith("SABLE_"):
             monkeypatch.delenv(key, raising=False)
-    with pytest.raises(ConfigError, match="SABLE_BOT_SECRET is required"):
+    with pytest.raises(ConfigError) as excinfo:
         Config.from_env()
+    for name in ("SABLE_NEXTCLOUD_URL", "SABLE_NEXTCLOUD_USER", "SABLE_NEXTCLOUD_PASSWORD"):
+        assert name in str(excinfo.value)
+
+
+def test_a_blank_value_counts_as_missing(load: Load) -> None:
+    with pytest.raises(ConfigError, match="SABLE_NEXTCLOUD_PASSWORD required"):
+        load(SABLE_NEXTCLOUD_PASSWORD="   ")
+
+
+def test_the_url_needs_a_scheme(load: Load) -> None:
+    with pytest.raises(ConfigError, match="must start with http"):
+        load(SABLE_NEXTCLOUD_URL="cloud.example.org")
+
+
+def test_a_trailing_slash_on_the_url_is_dropped(load: Load) -> None:
+    assert load(SABLE_NEXTCLOUD_URL=URL + "/").nextcloud_url == URL
+
+
+def test_the_password_is_not_in_the_repr(load: Load) -> None:
+    assert PASSWORD not in repr(load())
+
+
+def test_plain_http_to_another_host_is_doubted(load: Load) -> None:
+    config = load(SABLE_NEXTCLOUD_URL="http://nextcloud.internal")
+    assert any("plain http://" in w for w in config.warnings)
+    assert not any("plain http://" in w for w in load().warnings)
+    assert not load(SABLE_NEXTCLOUD_URL="http://localhost:8080").warnings
+
+
+# --------------------------------------------------------------------------- #
+# Reading chat by long polling
+# --------------------------------------------------------------------------- #
+
+
+def test_the_poll_defaults(load: Load) -> None:
+    config = load()
+    assert config.poll_timeout == 30
+    assert config.room_refresh == 60
+
+
+def test_the_poll_timeout_is_clamped_to_what_talk_allows(load: Load) -> None:
+    config = load(SABLE_POLL_TIMEOUT="300")
+    assert config.poll_timeout == 60
+    assert any("SABLE_POLL_TIMEOUT" in w for w in config.warnings)
+    assert load(SABLE_POLL_TIMEOUT="60").poll_timeout == 60
+    assert load(SABLE_POLL_TIMEOUT="10").poll_timeout == 10
+
+
+def test_a_poll_timeout_below_one_is_refused(load: Load) -> None:
+    with pytest.raises(ConfigError, match="SABLE_POLL_TIMEOUT must be at least 1"):
+        load(SABLE_POLL_TIMEOUT="0")
+
+
+def test_a_poll_timeout_must_be_a_number(load: Load) -> None:
+    with pytest.raises(ConfigError, match="SABLE_POLL_TIMEOUT must be an integer"):
+        load(SABLE_POLL_TIMEOUT="soon")
+
+
+def test_the_room_refresh_is_configurable_but_not_a_hot_loop(load: Load) -> None:
+    assert load(SABLE_ROOM_REFRESH="5").room_refresh == 5
+    with pytest.raises(ConfigError, match="SABLE_ROOM_REFRESH must be at least 5"):
+        load(SABLE_ROOM_REFRESH="1")
+
+
+def test_the_retired_bot_api_settings_are_simply_ignored(load: Load) -> None:
+    """Nothing reads them any more, so a leftover in an .env file is harmless."""
+    config = load(SABLE_BOT_SECRET="s" * 40, SABLE_PIN_BACKEND="true", SABLE_BOT_NAME="x")
+    assert config.nextcloud_user == "sable"
 
 
 # --------------------------------------------------------------------------- #
@@ -116,15 +205,6 @@ def test_a_token_without_a_hook_is_refused(load: Load) -> None:
 def test_a_template_without_a_hook_is_refused(load: Load) -> None:
     with pytest.raises(ConfigError, match="SABLE_HOOK_TEMPLATE_KOMODO"):
         load(SABLE_HOOK_TEMPLATE_KOMODO="{level}")
-
-
-def test_hooks_need_somewhere_to_post_to(load: Load) -> None:
-    with pytest.raises(ConfigError, match="SABLE_NEXTCLOUD_URL is required"):
-        load(
-            nextcloud=False,
-            SABLE_HOOKS=f"komodo={ROOM}",
-            SABLE_HOOK_TOKEN_KOMODO="t",
-        )
 
 
 def test_hook_names_are_case_insensitive(load: Load) -> None:
@@ -281,35 +361,18 @@ def test_admins_without_admin_commands_are_allowed(load: Load) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Rotating the bot secret without a window of 401s
+# Hooks and alerting no longer need a separate URL
 # --------------------------------------------------------------------------- #
 
 
-def test_there_is_only_one_secret_to_try_by_default(load: Load) -> None:
-    config = load()
-    assert config.bot_secret_previous == ""
-    assert config.inbound_secrets == (SECRET,)
-
-
-def test_a_rotation_offers_the_current_secret_first(load: Load) -> None:
-    """Order is the point: the old secret is a fallback for events signed before
-    the reinstall, not something to check first once the new one is live."""
-    old = "o" * 40
-    config = load(SABLE_BOT_SECRET_PREVIOUS=old)
-    assert config.bot_secret_previous == old
-    assert config.inbound_secrets == (SECRET, old)
-
-
-def test_the_previous_secret_is_held_to_the_same_length_rule(load: Load) -> None:
-    with pytest.raises(ConfigError, match="SABLE_BOT_SECRET_PREVIOUS must be 40-128"):
-        load(SABLE_BOT_SECRET_PREVIOUS="short")
-
-
-def test_the_previous_secret_repeating_the_current_one_is_refused(load: Load) -> None:
-    """Nothing has been rotated, so it can only be a copy-paste of the value above
-    it - and accepting it would read as a rotation in progress that is not."""
-    with pytest.raises(ConfigError, match="same value as SABLE_BOT_SECRET"):
-        load(SABLE_BOT_SECRET_PREVIOUS=SECRET)
+def test_alerting_and_hooks_need_nothing_beyond_the_account(load: Load) -> None:
+    config = load(
+        SABLE_NOTIFY_TOKEN="t",
+        SABLE_HOOKS=f"komodo={ROOM}",
+        SABLE_HOOK_TOKEN_KOMODO="k",
+    )
+    assert config.notify_enabled
+    assert config.hook_room("komodo") == ROOM
 
 
 # --------------------------------------------------------------------------- #

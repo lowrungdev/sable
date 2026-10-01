@@ -12,24 +12,22 @@ import pytest
 import respx
 from conftest import (
     BACKEND,
-    REJECTED_TOKENS,
+    PASSWORD,
     ROOM,
-    SECRET,
-    VALID_TOKENS,
+    TALK,
+    USER,
     FakeLLM,
     make_config,
     message_payload,
-    signed_headers,
 )
 
 from sable.app import create_app, megabytes
 from sable.bot import Bot
-from sable.config import TOKEN_HINT, Config
+from sable.config import Config
 from sable.llm import Message
-from sable.signing import HEADER_BOT_RANDOM, HEADER_BOT_SIGNATURE, digest, verify
-from sable.talk import API_BASE
 
-MESSAGE_URL = f"{BACKEND}{API_BASE}/bot/{ROOM}/message"
+MESSAGE_URL = f"{TALK}/chat/{ROOM}"
+USER_URL = f"{BACKEND}/ocs/v2.php/cloud/user"
 
 
 def sent(route) -> list[dict]:
@@ -53,6 +51,8 @@ async def client_for(config: Config, llm: FakeLLM | None = None) -> AsyncIterato
             async with httpx.AsyncClient(
                 transport=transport, base_url="http://sable.test"
             ) as client:
+                # So a test can feed the poller's dispatch without a Talk server.
+                client.app = app  # type: ignore[attr-defined]
                 yield client
     finally:
         await bot.aclose()
@@ -71,26 +71,6 @@ async def wait_for(route, tries: int = 50) -> None:
             return
         await asyncio.sleep(0)
     raise AssertionError("the bot never called Talk")
-
-
-def post_body(payload: dict) -> bytes:
-    return json.dumps(payload).encode()
-
-
-def signed(
-    body: bytes, *, random: str = "r" * 64, secret: str = SECRET, backend: str = BACKEND
-) -> dict[str, str]:
-    """Like conftest's signed_headers, with the random spelled out.
-
-    Which random a request carries decides whether it is a replay, so every test
-    that sends more than one webhook has to choose them itself.
-    """
-    return {
-        "X-Nextcloud-Talk-Random": random,
-        "X-Nextcloud-Talk-Signature": digest(random, body, secret),
-        "X-Nextcloud-Talk-Backend": backend,
-        "Content-Type": "application/json",
-    }
 
 
 async def settle(times: int = 50) -> None:
@@ -113,7 +93,7 @@ async def test_healthz(app_client: httpx.AsyncClient) -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "ok"
-    assert body["bot"] == "sable"
+    assert body["user"] == "sable"
     assert body["llm"] == "some-model"
 
 
@@ -123,93 +103,26 @@ async def test_root_is_a_plain_banner(app_client: httpx.AsyncClient) -> None:
     assert response.text.startswith("sable ")
 
 
-@respx.mock
-async def test_a_signed_webhook_is_accepted_and_answered() -> None:
-    route = message_route()
-    body = post_body(message_payload("!ping"))
-    async for client in client_for(make_config()):
-        response = await client.post("/webhook", content=body, headers=signed_headers(body))
-        assert response.status_code == 200
-        assert response.json() == {"status": "accepted"}
-        await wait_for(route)
-    assert json.loads(route.calls.last.request.content)["message"] == "pong 🏓"
+async def test_there_is_no_webhook_route(app_client: httpx.AsyncClient) -> None:
+    """Chat is read by polling, so nothing is posted to us by Talk."""
+    assert (await app_client.post("/webhook", json={"type": "Create"})).status_code == 404
 
 
 @respx.mock
-async def test_the_llm_path_works_end_to_end() -> None:
+async def test_a_dispatched_message_reaches_the_bot_and_is_answered() -> None:
     route = message_route()
     llm = FakeLLM(reply="42")
-    body = post_body(message_payload("@sable what is 6*7"))
     async for client in client_for(make_config(), llm=llm):
-        await client.post("/webhook", content=body, headers=signed_headers(body))
+        client.app.state.poller._dispatch(ROOM, message_payload("@sable what is 6*7"))
         await wait_for(route)
     assert json.loads(route.calls.last.request.content)["message"] == "42"
     assert llm.last_prompt == "Alice: what is 6*7"
 
 
 @respx.mock
-async def test_a_bad_signature_is_rejected() -> None:
-    route = message_route()
-    body = post_body(message_payload("!ping"))
-    headers = signed_headers(body)
-    headers["X-Nextcloud-Talk-Signature"] = "0" * 64
+async def test_a_poller_is_not_started_for_a_bot_handed_in_by_a_test() -> None:
     async for client in client_for(make_config()):
-        response = await client.post("/webhook", content=body, headers=headers)
-    assert response.status_code == 401
-    assert not route.called
-
-
-@respx.mock
-async def test_a_body_rewritten_after_signing_is_rejected() -> None:
-    body = post_body(message_payload("!ping"))
-    headers = signed_headers(body)
-    async for client in client_for(make_config()):
-        response = await client.post(
-            "/webhook", content=post_body(message_payload("!echo pwned")), headers=headers
-        )
-    assert response.status_code == 401
-
-
-async def test_missing_signature_headers_are_rejected() -> None:
-    async for client in client_for(make_config()):
-        response = await client.post("/webhook", json={"type": "Create"})
-    assert response.status_code == 401
-
-
-async def test_an_unexpected_backend_is_rejected() -> None:
-    body = post_body(message_payload("!ping"))
-    headers = signed_headers(body, backend="https://evil.example.org")
-    async for client in client_for(make_config()):
-        response = await client.post("/webhook", content=body, headers=headers)
-    assert response.status_code == 403
-
-
-@respx.mock
-async def test_the_backend_header_is_trusted_when_pinning_is_off() -> None:
-    other = "https://other.example.org"
-    route = respx.post(f"{other}{API_BASE}/bot/{ROOM}/message").mock(
-        return_value=httpx.Response(201, json={"ocs": {"data": {"id": 1}}})
-    )
-    body = post_body(message_payload("!ping"))
-    headers = signed_headers(body, backend=other)
-    async for client in client_for(make_config(pin_backend=False, nextcloud_url="")):
-        response = await client.post("/webhook", content=body, headers=headers)
-        assert response.status_code == 200
-        await wait_for(route)
-
-
-async def test_invalid_json_is_a_400() -> None:
-    body = b"{not json"
-    async for client in client_for(make_config()):
-        response = await client.post("/webhook", content=body, headers=signed_headers(body))
-    assert response.status_code == 400
-
-
-async def test_an_unparseable_event_is_a_400() -> None:
-    body = post_body({"type": "Create", "object": {}, "target": {}})
-    async for client in client_for(make_config()):
-        response = await client.post("/webhook", content=body, headers=signed_headers(body))
-    assert response.status_code == 400
+        assert client.app.state.poller.following == []
 
 
 # --------------------------------------------------------------------------- #
@@ -376,11 +289,14 @@ async def test_startup_and_shutdown_are_logged_with_the_configuration(caplog) ->
     assert "starting" in text and "ready" in text
     assert "stopping" in text and "stopped" in text
     assert "listening on:   http://0.0.0.0:8080" in text
-    assert "POST /webhook" in text
-    assert f"nextcloud:      {BACKEND}" in text
+    assert "/webhook" not in text
+    assert f"nextcloud:      {BACKEND} as sable" in text
+    assert "receiving:      long polls of up to 30s, conversations rescanned every 60s" in text
+    assert "command prefix: '!'" in text
     assert "some-model at https://api.openai.com/v1" in text
     assert "alerting:       enabled, aliases: alerts" in text
-    assert f"backend pin:    on, replies only to {BACKEND}" in text
+    assert "backend pin" not in text
+    assert PASSWORD not in text
     assert "admin commands: (none" in text
     assert "api docs:       disabled" in text
     assert "health check:   GET /healthz (open)" in text
@@ -410,24 +326,6 @@ async def test_the_guarded_surface_is_named_at_startup(caplog) -> None:
     assert "health check:   GET /healthz (X-Health-Token required)" in caplog.text
 
 
-async def test_an_unpinned_backend_says_so_at_startup(caplog) -> None:
-    """Off is the state worth spelling out: with nothing to pin against, the
-    unsigned backend header on a replayed webhook chooses where replies go."""
-    config = make_config(nextcloud_url="", pin_backend=False)
-    with caplog.at_level(logging.INFO):
-        async for _client in client_for(config):
-            pass
-    assert "backend pin:    OFF (no SABLE_NEXTCLOUD_URL)" in caplog.text
-
-
-async def test_turning_the_pin_off_by_hand_says_which_it_was(caplog) -> None:
-    config = make_config(pin_backend=False)
-    with caplog.at_level(logging.INFO):
-        async for _client in client_for(config):
-            pass
-    assert "backend pin:    OFF (SABLE_PIN_BACKEND is off)" in caplog.text
-
-
 async def test_the_admin_commands_are_named_at_startup(caplog) -> None:
     config = make_config(
         admin_commands=["*"], normal_commands=["help", "ping"], admin_users=["maser"]
@@ -439,20 +337,34 @@ async def test_the_admin_commands_are_named_at_startup(caplog) -> None:
 
 
 @respx.mock
-async def test_the_startup_probe_runs_when_enabled(caplog) -> None:
-    route = respx.get(f"{BACKEND}/status.php").mock(
+async def test_the_startup_check_signs_in_when_enabled(caplog) -> None:
+    route = respx.get(USER_URL).mock(
         return_value=httpx.Response(
-            200, json={"installed": True, "maintenance": False, "versionstring": "31.0.4"}
+            200, json={"ocs": {"meta": {}, "data": {"id": "sable", "displayname": "Sable"}}}
         )
     )
     with caplog.at_level(logging.INFO):
         async for _client in client_for(make_config(startup_check=True)):
             pass
     assert route.called
-    assert "connected to Nextcloud 31.0.4" in caplog.text
+    assert f"signed in to {BACKEND} as sable (Sable)" in caplog.text
 
 
-async def test_the_startup_probe_can_be_turned_off() -> None:
+@respx.mock
+async def test_a_refused_password_is_logged_as_an_error_at_startup(caplog) -> None:
+    respx.get(USER_URL).mock(return_value=httpx.Response(401, text="no"))
+    with caplog.at_level(logging.INFO):
+        async for client in client_for(make_config(startup_check=True)):
+            # Not fatal: the process stays up and says so on /healthz.
+            assert (await client.get("/healthz")).status_code == 200
+    assert any(
+        r.levelno == logging.ERROR and "SABLE_NEXTCLOUD_PASSWORD" in r.getMessage()
+        for r in caplog.records
+    )
+    assert PASSWORD not in caplog.text
+
+
+async def test_the_startup_check_can_be_turned_off() -> None:
     # No respx mock at all: if it tried to call out, this would raise.
     async for client in client_for(make_config(startup_check=False)):
         assert (await client.get("/healthz")).status_code == 200
@@ -477,14 +389,8 @@ async def test_a_relayed_alert_is_logged(caplog) -> None:
 # /notify with an attachment: one URL, JSON base64 or multipart
 # --------------------------------------------------------------------------- #
 
-USER = "sable-bot"
 DAV = f"{BACKEND}/remote.php/dav/files/{USER}"
-UPLOADS = dict(
-    notify_token="alert-token",
-    notify_rooms={"alerts": ROOM},
-    nextcloud_user=USER,
-    nextcloud_password="app-password",
-)
+UPLOADS = dict(notify_token="alert-token", notify_rooms={"alerts": ROOM})
 
 
 def share_fields(route) -> dict[str, str]:
@@ -576,8 +482,11 @@ async def test_neither_message_nor_file_is_rejected() -> None:
     assert "message, a file, or both" in response.json()["detail"]
 
 
-async def test_an_attachment_without_the_user_account_is_503() -> None:
-    # notify is on, but no SABLE_NEXTCLOUD_USER: text still works, files cannot.
+@respx.mock
+async def test_an_attachment_is_uploaded_and_shared_as_the_chat_account() -> None:
+    """One credential throughout: the account that reads and posts chat is the one
+    that owns the upload and makes the share, with nothing extra to configure."""
+    put, share = upload_routes()
     async for client in client_for(
         make_config(notify_token="alert-token", notify_rooms={"alerts": ROOM})
     ):
@@ -589,8 +498,11 @@ async def test_an_attachment_without_the_user_account_is_503() -> None:
             },
             headers={"Authorization": "Bearer alert-token"},
         )
-    assert response.status_code == 503
-    assert "SABLE_NEXTCLOUD_USER" in response.json()["detail"]
+    assert response.status_code == 201
+    assert put.calls.last.request.url.path.startswith(f"/remote.php/dav/files/{USER}/sable/")
+    expected = base64.b64encode(f"{USER}:{PASSWORD}".encode()).decode()
+    assert put.calls.last.request.headers["authorization"] == f"Basic {expected}"
+    assert share.calls.last.request.headers["authorization"] == f"Basic {expected}"
 
 
 async def test_content_that_is_not_base64_is_rejected() -> None:
@@ -677,14 +589,7 @@ async def test_startup_names_the_upload_user_folder_and_limit(caplog) -> None:
     with caplog.at_level(logging.INFO):
         async for _client in client_for(config):
             pass
-    assert "attachments:    as sable-bot into /sable, up to 100 MB" in caplog.text
-
-
-async def test_startup_says_when_attachments_are_off(caplog) -> None:
-    with caplog.at_level(logging.INFO):
-        async for _client in client_for(make_config(notify_token="t")):
-            pass
-    assert "attachments:    disabled (set SABLE_NEXTCLOUD_USER" in caplog.text
+    assert "attachments:    into /sable, up to 100 MB" in caplog.text
 
 
 async def test_startup_lists_ignored_users(caplog) -> None:
@@ -854,15 +759,11 @@ class GatedLLM(FakeLLM):
 
 
 async def ask_twice(client: httpx.AsyncClient) -> None:
-    """Two mentions, two message ids, two randoms - two replies to run."""
-    for message_id, random in ((101, "a" * 64), (102, "b" * 64)):
-        body = post_body(message_payload("@sable hello", message_id=message_id))
-        response = await client.post(
-            "/webhook", content=body, headers=signed(body, random=random)
+    """Two mentions, two message ids - two replies to run."""
+    for message_id in (101, 102):
+        client.app.state.poller._dispatch(  # type: ignore[attr-defined]
+            ROOM, message_payload("@sable hello", message_id=message_id)
         )
-        # The 200 never waits for a slot: Talk times out long before a model call
-        # comes back, so only the work behind it is allowed to queue.
-        assert response.status_code == 200
 
 
 @respx.mock
@@ -895,7 +796,7 @@ async def test_lifting_the_ceiling_lets_both_model_calls_run_at_once() -> None:
 @respx.mock
 async def test_a_reply_still_queued_for_a_slot_is_drained_at_shutdown() -> None:
     """The drain covers the ones that never started, not just the ones in flight:
-    each of them was promised a 200 before it was queued."""
+    each of them was already read from the conversation before it was queued."""
     route = message_route()
     llm = GatedLLM()
     async for client in client_for(make_config(max_concurrent_replies=1), llm=llm):
@@ -938,167 +839,11 @@ async def test_having_no_reply_ceiling_says_so_at_startup(caplog) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Replayed webhooks
-# --------------------------------------------------------------------------- #
-
-
-@respx.mock
-async def test_a_webhook_replayed_with_the_same_random_is_refused() -> None:
-    route = message_route()
-    body = post_body(message_payload("!ping"))
-    headers = signed(body, random="c" * 64)
-    async for client in client_for(make_config()):
-        first = await client.post("/webhook", content=body, headers=headers)
-        second = await client.post("/webhook", content=body, headers=headers)
-        assert first.status_code == 200
-        assert second.status_code == 401
-        assert "already delivered" in second.json()["detail"]
-        await wait_for(route)
-        await settle()
-    assert len(route.calls) == 1, "the replay must not produce a second reply"
-
-
-@respx.mock
-async def test_the_same_body_signed_again_with_a_fresh_random_is_not_a_replay() -> None:
-    """A new random is a new request. Talk's own redeliveries are caught further
-    in, by Bot.seen on the message id, which is why only the random is checked
-    here."""
-    route = message_route()
-    body = post_body(message_payload("!ping"))
-    async for client in client_for(make_config()):
-        for random in ("d" * 64, "e" * 64):
-            response = await client.post(
-                "/webhook", content=body, headers=signed(body, random=random)
-            )
-            assert response.status_code == 200
-        await wait_for(route)
-        await settle()
-    assert len(route.calls) == 1, "Bot.seen should still refuse to answer twice"
-
-
-@respx.mock
-async def test_a_rejected_signature_does_not_reserve_the_random_it_carried() -> None:
-    """The cache is written only after the signature verifies. The other order
-    would let anybody who can reach the port spend the randoms Talk is about to
-    use, and have the genuine webhooks carrying them refused."""
-    message_route()
-    body = post_body(message_payload("!ping"))
-    random = "f" * 64
-    async for client in client_for(make_config()):
-        forged = await client.post(
-            "/webhook", content=body, headers=signed(body, random=random, secret="x" * 40)
-        )
-        genuine = await client.post(
-            "/webhook", content=body, headers=signed(body, random=random)
-        )
-    assert forged.status_code == 401
-    assert genuine.status_code == 200
-
-
-@respx.mock
-async def test_the_random_cache_is_bounded_and_forgets_the_oldest(monkeypatch) -> None:
-    """Honest about what it is: the last SEEN_RANDOMS values, not all of them.
-    Nothing expires on age - Talk sends no timestamp to age anything against."""
-    monkeypatch.setattr("sable.app.SEEN_RANDOMS", 2)
-    message_route()
-    body = post_body(message_payload("!ping"))
-    first = signed(body, random="1" * 64)
-
-    async def post(headers: dict[str, str]) -> int:
-        return (await client.post("/webhook", content=body, headers=headers)).status_code
-
-    async for client in client_for(make_config()):
-        assert await post(first) == 200
-        assert await post(first) == 401
-        for random in ("2" * 64, "3" * 64):
-            assert await post(signed(body, random=random)) == 200
-        # Two newer randoms have pushed the first one out of the deque.
-        assert await post(first) == 200
-
-
-@respx.mock
-async def test_a_replayed_webhook_is_logged_with_the_random_it_reused(caplog) -> None:
-    message_route()
-    body = post_body(message_payload("!ping"))
-    headers = signed(body, random="9" * 64)
-    async for client in client_for(make_config()):
-        await client.post("/webhook", content=body, headers=headers)
-        with caplog.at_level(logging.WARNING):
-            await client.post("/webhook", content=body, headers=headers)
-    assert "reusing random 99999999" in caplog.text
-
-
-# --------------------------------------------------------------------------- #
-# Rotating SABLE_BOT_SECRET
-# --------------------------------------------------------------------------- #
-
-CURRENT = "n" * 40
-PREVIOUS = "o" * 40
-ROTATING = dict(bot_secret=CURRENT, bot_secret_previous=PREVIOUS)
-
-
-@respx.mock
-async def test_a_webhook_signed_with_the_previous_secret_is_still_accepted() -> None:
-    """The window this exists for: Talk holds one secret per install, so changing
-    it means a reinstall, and events signed with the old value keep arriving."""
-    route = message_route()
-    body = post_body(message_payload("!ping"))
-    async for client in client_for(make_config(**ROTATING)):
-        response = await client.post(
-            "/webhook", content=body, headers=signed(body, random="g" * 64, secret=PREVIOUS)
-        )
-        assert response.status_code == 200
-        await wait_for(route)
-
-
-@respx.mock
-async def test_the_current_secret_is_accepted_while_a_rotation_is_in_progress() -> None:
-    route = message_route()
-    body = post_body(message_payload("!ping"))
-    async for client in client_for(make_config(**ROTATING)):
-        response = await client.post(
-            "/webhook", content=body, headers=signed(body, random="h" * 64, secret=CURRENT)
-        )
-        assert response.status_code == 200
-        await wait_for(route)
-
-
-@respx.mock
-async def test_replies_are_signed_with_the_current_secret_and_never_the_previous() -> None:
-    """Outgoing calls keep signing with SABLE_BOT_SECRET alone: Talk has been
-    given the new value by the time the old one is in SABLE_BOT_SECRET_PREVIOUS,
-    so a call signed with the old one would be refused."""
-    route = message_route()
-    body = post_body(message_payload("!ping"))
-    async for client in client_for(make_config(**ROTATING)):
-        await client.post(
-            "/webhook", content=body, headers=signed(body, random="i" * 64, secret=PREVIOUS)
-        )
-        await wait_for(route)
-    request = route.calls.last.request
-    # The bot API signs over the message text, not the serialised body.
-    signed_value = json.loads(request.content)["message"].encode()
-    random = request.headers[HEADER_BOT_RANDOM]
-    signature = request.headers[HEADER_BOT_SIGNATURE]
-    assert verify(random, signature, signed_value, CURRENT)
-    assert not verify(random, signature, signed_value, PREVIOUS)
-
-
-async def test_the_previous_secret_stops_working_once_the_variable_is_cleared() -> None:
-    body = post_body(message_payload("!ping"))
-    async for client in client_for(make_config(bot_secret=CURRENT)):
-        response = await client.post(
-            "/webhook", content=body, headers=signed(body, random="j" * 64, secret=PREVIOUS)
-        )
-    assert response.status_code == 401
-
-
-# --------------------------------------------------------------------------- #
 # Nextcloud reachability on /healthz
 # --------------------------------------------------------------------------- #
 
-STATUS_PHP = f"{BACKEND}/status.php"
-STATUS_BODY = {"installed": True, "maintenance": False, "versionstring": "31.0.4"}
+STATUS_PHP = USER_URL
+STATUS_BODY = {"ocs": {"meta": {}, "data": {"id": "sable", "displayname": "Sable"}}}
 
 
 async def test_healthz_says_nextcloud_is_unknown_before_anything_has_been_tried() -> None:
@@ -1137,60 +882,6 @@ async def test_a_guarded_healthz_still_reports_reachability() -> None:
     async for client in client_for(config):
         response = await client.get("/healthz", headers={"X-Health-Token": "h" * 20})
     assert response.json()["nextcloud"] is True
-
-
-# --------------------------------------------------------------------------- #
-# The conversation token on the webhook path
-# --------------------------------------------------------------------------- #
-
-#: Everything TOKEN_RE refuses, minus the empty string: an event with no
-#: conversation at all never reaches this check, because parse_event has already
-#: refused it for having no token to read.
-NOT_TOKENS = [(label, token) for label, token in REJECTED_TOKENS if token]
-
-
-@pytest.mark.parametrize(
-    "token", [token for _, token in NOT_TOKENS], ids=[label for label, _ in NOT_TOKENS]
-)
-async def test_a_webhook_naming_something_that_is_not_a_conversation_token_is_a_400(
-    token: str,
-) -> None:
-    """It would otherwise go straight into the path of every reply we send, and
-    httpx resolves `..` before the request leaves."""
-    body = post_body(message_payload("hello", room=token))
-    async for client in client_for(make_config()):
-        response = await client.post("/webhook", content=body, headers=signed(body))
-    assert response.status_code == 400
-    detail = response.json()["detail"]
-    assert TOKEN_HINT in detail
-    assert repr(token) in detail
-
-
-async def test_an_unusable_token_is_not_reported_as_an_unparseable_event(caplog) -> None:
-    """Where the check lives shows up here: parse_event still accepts the event,
-    so the log and the 400 can both name the token instead of blaming the JSON."""
-    body = post_body(message_payload("hello", room="../evil"))
-    with caplog.at_level(logging.INFO):
-        async for client in client_for(make_config()):
-            response = await client.post("/webhook", content=body, headers=signed(body))
-    assert response.status_code == 400
-    assert "refusing a webhook for conversation '../evil'" in caplog.text
-    assert "unparseable event" not in caplog.text
-
-
-@pytest.mark.parametrize(
-    "token",
-    [token for _, token in VALID_TOKENS],
-    ids=[label for label, _ in VALID_TOKENS],
-)
-async def test_every_token_the_regex_accepts_still_reaches_the_bot(token: str) -> None:
-    # Plain text, no mention, not an AI room: accepted and handled, and nothing
-    # is sent anywhere, so no respx mock is needed to prove the token got through.
-    body = post_body(message_payload("hello", room=token))
-    async for client in client_for(make_config()):
-        response = await client.post("/webhook", content=body, headers=signed(body))
-        assert response.status_code == 200
-        await settle()
 
 
 # --------------------------------------------------------------------------- #

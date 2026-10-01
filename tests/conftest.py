@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import json
-import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, AsyncIterator
 
 import httpx
@@ -10,13 +8,18 @@ import pytest
 
 from sable.bot import Bot
 from sable.config import Config, LLMConfig
-from sable.events import parse_event
+from sable.events import parse_message
 from sable.llm import Message
-from sable.signing import digest
+from sable.talk import API_BASE
 
-SECRET = "s" * 40
 BACKEND = "https://cloud.example.org"
+USER = "sable"
+PASSWORD = "app-password-1234"
 ROOM = "abcd1234"
+ROOM_NAME = "Team chat"
+
+#: The base every Talk call is made under, for building mock routes.
+TALK = f"{BACKEND}{API_BASE}"
 
 
 @pytest.fixture
@@ -26,12 +29,11 @@ def config() -> Config:
 
 def make_config(**overrides: Any) -> Config:
     defaults: dict[str, Any] = {
-        "bot_secret": SECRET,
-        "bot_name": "sable",
         "nextcloud_url": BACKEND,
-        "pin_backend": True,
-        # Off by default: no test should reach the network implicitly. The probe
-        # has its own tests.
+        "nextcloud_user": USER,
+        "nextcloud_password": PASSWORD,
+        # Off by default: no test should reach the network implicitly. The
+        # credentials check has its own tests.
         "startup_check": False,
         "llm": LLMConfig(model="some-model", api_key="sk-test"),
     }
@@ -82,56 +84,66 @@ def bot(config: Config, llm: FakeLLM, http_client: httpx.AsyncClient) -> Bot:
 # --------------------------------------------------------------------------- #
 
 
+def split_actor(actor_id: str) -> tuple[str, str]:
+    """``users/alice`` as Talk sends it: actorType ``users``, actorId ``alice``."""
+    kind, slash, ident = actor_id.partition("/")
+    return (kind, ident) if slash else ("", actor_id)
+
+
 def message_payload(
     text: str = "hello",
     *,
     message_id: int = 100,
     room: str = ROOM,
-    room_name: str = "Team chat",
     actor_id: str = "users/alice",
     actor_name: str = "Alice",
-    actor_type: str = "Person",
     parameters: dict | None = None,
     in_reply_to: int = 0,
 ) -> dict:
-    content: dict[str, Any] = {"message": text, "parameters": parameters or {}}
-    obj: dict[str, Any] = {
-        "type": "Note",
-        "id": str(message_id),
-        "name": "message",
-        "content": json.dumps(content),
-        "mediaType": "text/markdown",
+    """A chat message as the chat API returns it."""
+    kind, ident = split_actor(actor_id)
+    payload: dict[str, Any] = {
+        "id": message_id,
+        "token": room,
+        "actorType": kind,
+        "actorId": ident,
+        "actorDisplayName": actor_name,
+        "timestamp": 1700000000,
+        "message": text,
+        "messageParameters": parameters or {},
+        "messageType": "comment",
+        "systemMessage": "",
+        "reactions": {},
     }
     if in_reply_to:
-        obj["inReplyTo"] = {"type": "Note", "id": str(in_reply_to), "name": "message"}
-    return {
-        "type": "Create",
-        "actor": {
-            "type": actor_type,
-            "id": actor_id,
-            "name": actor_name,
-            "talkParticipantType": "OWNER",
-        },
-        "object": obj,
-        "target": {"type": "Collection", "id": room, "name": room_name},
-    }
+        payload["parent"] = {"id": in_reply_to, "messageType": "comment", "message": "earlier"}
+    return payload
 
 
-def event(text: str = "hello", **kwargs: Any):
-    return parse_event(message_payload(text, **kwargs), backend=BACKEND)
+def mention(key: str = "mention-user1", user: str = USER, name: str = "sable") -> dict:
+    """One ``messageParameters`` entry for a Talk mention of a user."""
+    return {key: {"type": "user", "id": user, "name": name}}
 
 
-def signed_headers(body: bytes, secret: str = SECRET, backend: str = BACKEND) -> dict[str, str]:
-    # Fresh every call. The webhook refuses a random it has already seen, so a
-    # fixed one here would 401 the second request any test sent to one app - and
-    # a test that wants to replay one should pin it itself, as test_app.py does.
-    random = secrets.token_hex(32)
-    return {
-        "X-Nextcloud-Talk-Random": random,
-        "X-Nextcloud-Talk-Signature": digest(random, body, secret),
-        "X-Nextcloud-Talk-Backend": backend,
-        "Content-Type": "application/json",
-    }
+def as_bot(parsed):
+    """The same event with its actor typed ``bots`` but keeping the id it had.
+
+    Talk never sends that - a bot's id carries its own ``bots/`` prefix - but the
+    decisions that refuse a bot are written not to lean on the id, and this is how
+    a test reaches them: a bot actor whose id still reads as an administrator's.
+    """
+    return replace(parsed, actor=replace(parsed.actor, type="bots"))
+
+
+def event(
+    text: str = "hello",
+    *,
+    room_name: str = ROOM_NAME,
+    actor_type: str = "",
+    **kwargs: Any,
+):
+    parsed = parse_message(message_payload(text, **kwargs), room_name=room_name)
+    return as_bot(parsed) if actor_type == "bots" else parsed
 
 
 def reaction_payload(
@@ -141,25 +153,28 @@ def reaction_payload(
     room: str = ROOM,
     actor_id: str = "users/alice",
     actor_name: str = "Alice",
-    actor_type: str = "Person",
     undo: bool = False,
+    system_id: int = 5000,
 ) -> dict:
-    """A Like (reaction added) or Undo (reaction removed) event."""
-    actor = {"type": actor_type, "id": actor_id, "name": actor_name}
-    note = {"type": "Note", "id": str(message_id), "name": "message"}
-    target = {"type": "Collection", "id": room, "name": "Team chat"}
-    if undo:
-        return {
-            "type": "Undo",
-            "actor": actor,
-            "object": {"type": "Like", "actor": actor, "object": note, "content": reaction},
-            "target": target,
-        }
-    return {"type": "Like", "actor": actor, "object": note, "target": target, "content": reaction}
+    """The system message Talk posts when somebody reacts, or takes one back."""
+    kind, ident = split_actor(actor_id)
+    return {
+        "id": system_id,
+        "token": room,
+        "actorType": kind,
+        "actorId": ident,
+        "actorDisplayName": actor_name,
+        "message": "" if undo else reaction,
+        "messageParameters": {},
+        "messageType": "system",
+        "systemMessage": "reaction_revoked" if undo else "reaction",
+        "parent": {"id": message_id, "messageType": "comment", "message": "the original"},
+    }
 
 
-def reaction_event(reaction: str = "👍", **kwargs: Any):
-    return parse_event(reaction_payload(reaction, **kwargs), backend=BACKEND)
+def reaction_event(reaction: str = "👍", *, actor_type: str = "", **kwargs: Any):
+    parsed = parse_message(reaction_payload(reaction, **kwargs), room_name=ROOM_NAME)
+    return as_bot(parsed) if actor_type == "bots" else parsed
 
 
 # --------------------------------------------------------------------------- #
@@ -184,16 +199,11 @@ class ActorShape:
     user_id: str = ""
     is_guest: bool = False
     is_bot: bool = False
-    actor_type: str = "Person"
 
     @property
     def payload_kwargs(self) -> dict[str, str]:
         """Keyword arguments for :func:`message_payload` / :func:`reaction_payload`."""
-        return {
-            "actor_id": self.actor_id,
-            "actor_name": self.actor_name,
-            "actor_type": self.actor_type,
-        }
+        return {"actor_id": self.actor_id, "actor_name": self.actor_name}
 
     @property
     def bare_id(self) -> str:
@@ -214,23 +224,7 @@ ACTOR_SHAPES: tuple[ActorShape, ...] = (
     # A real person, on somebody else's server: not a guest and not a bot, yet
     # with no user id here either.
     ActorShape("a_federated_user", "federated_users/karl@cloud.example.net", "Karl"),
-    ActorShape(
-        "a_bot_talk_typed_as_an_application",
-        "bots/bot-abc123",
-        "sable",
-        is_bot=True,
-        actor_type="Application",
-    ),
-    # Either half of the is_bot check is enough on its own, so each is a shape.
-    ActorShape("a_bots_prefix_typed_as_a_person", "bots/relay", "Relay", is_bot=True),
-    ActorShape(
-        "an_application_posting_under_a_user_id",
-        "users/sable",
-        "sable",
-        user_id="sable",
-        is_bot=True,
-        actor_type="Application",
-    ),
+    ActorShape("a_bot", "bots/relay", "Relay", is_bot=True),
 )
 
 

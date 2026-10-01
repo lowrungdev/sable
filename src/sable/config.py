@@ -27,6 +27,9 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 #: so the /notify caller was told 500 where the same value uppercased got 400.
 TOKEN_RE = re.compile(r"^[a-z0-9]{4,64}\Z")
 
+#: The longest a Talk long poll can be asked to wait (Talk clamps to this).
+MAX_POLL_TIMEOUT = 60
+
 #: How sable talks to a model backend.
 LLM_BACKENDS = frozenset({"openai", "openwebui"})
 
@@ -207,16 +210,17 @@ class LLMConfig:
 
 @dataclass(frozen=True)
 class Config:
-    # --- Talk bot identity -------------------------------------------------
-    bot_secret: str
-    #: The secret being rotated away from, accepted on incoming webhooks only.
-    #: Talk holds one secret per bot install, so changing it means uninstalling
-    #: and reinstalling the bot, and every event that arrives in between fails
-    #: its signature check. Keeping the old value here covers that window.
-    bot_secret_previous: str = ""
-    bot_name: str = "sable"
-    nextcloud_url: str = ""
-    pin_backend: bool = True
+    # --- the Nextcloud account sable is -------------------------------------
+    nextcloud_url: str
+    #: A regular Nextcloud user. sable reads chat as this user, posts as it, and
+    #: uploads files into its Files. An app password, not the login password.
+    nextcloud_user: str
+    #: Never in the repr: a Config reaches logs and tracebacks.
+    nextcloud_password: str = field(repr=False)
+    #: Seconds each long poll for new messages may wait. Talk allows up to 60.
+    poll_timeout: int = 30
+    #: Seconds between looks at which conversations the account is in.
+    room_refresh: int = 60
 
     # --- chat behaviour ----------------------------------------------------
     command_prefix: str = "!"
@@ -244,9 +248,9 @@ class Config:
     max_message_chars: int = 30000
     #: Model calls allowed to be in flight at once; 0 lifts the ceiling. Every
     #: trigger becomes a background task with no limit of its own, so a busy room
-    #: or a burst of redeliveries means that many completions open together, each
+    #: or a burst of messages means that many completions open together, each
     #: holding the llm.timeout open. Talk rate-limits the replies we send, not
-    #: the events it sends us, so nothing upstream applies the brakes either.
+    #: the messages we read, so nothing upstream applies the brakes either.
     max_concurrent_replies: int = 8
 
     # --- conversation memory ----------------------------------------------
@@ -289,12 +293,7 @@ class Config:
     max_hook_bytes: int = 256 * 1024
 
     # --- file attachments -------------------------------------------------
-    #: A Nextcloud *user* account, used only to upload and share files. The bot
-    #: API cannot attach anything to a message, so this is the second, larger
-    #: credential that buys attachments. Leave empty and /notify stays text-only.
-    nextcloud_user: str = ""
-    nextcloud_password: str = ""
-    #: Folder inside that user's own Files where attachments are put.
+    #: Folder inside the account's own Files where attachments are put.
     upload_path: str = "/sable"
     #: Largest attachment /notify will accept, in bytes.
     max_upload_bytes: int = 25 * 1024 * 1024
@@ -343,23 +342,6 @@ class Config:
         return bool(self.notify_token)
 
     @property
-    def inbound_secrets(self) -> tuple[str, ...]:
-        """The secrets an incoming signature may have been made with, current first.
-
-        One entry normally, two while a rotation is in progress. Try them in this
-        order and stop at the first that verifies.
-
-        Incoming verification only. Everything sable *sends* - the bot API calls
-        in bot.py - is signed with ``bot_secret`` and never with the previous one:
-        Talk has already been given the new value by then, so signing with the old
-        one would be rejected. The previous secret exists to keep believing events
-        that were signed before the reinstall, nothing more.
-        """
-        if self.bot_secret_previous:
-            return (self.bot_secret, self.bot_secret_previous)
-        return (self.bot_secret,)
-
-    @property
     def health_guarded(self) -> bool:
         """Does GET /healthz need a token?"""
         return bool(self.health_token)
@@ -375,11 +357,6 @@ class Config:
 
     def hook_token(self, name: str) -> str:
         return self.hook_tokens.get(name.strip().lower(), "")
-
-    @property
-    def uploads_enabled(self) -> bool:
-        """Can /notify accept a file? Needs the user account as well as the URL."""
-        return bool(self.nextcloud_user and self.nextcloud_password and self.nextcloud_url)
 
     def is_ignored(self, actor_id: str, name: str = "") -> bool:
         """Should everything from this actor be dropped?
@@ -495,28 +472,40 @@ class Config:
 
     @classmethod
     def from_env(cls) -> Config:
-        secret = _str("SABLE_BOT_SECRET")
-        if not secret:
-            raise ConfigError(
-                "SABLE_BOT_SECRET is required; it is the secret you passed to "
-                "`occ talk:bot:install`."
+        url = _str("SABLE_NEXTCLOUD_URL").rstrip("/")
+        user = _str("SABLE_NEXTCLOUD_USER")
+        password = _str("SABLE_NEXTCLOUD_PASSWORD")
+        missing_account = [
+            name
+            for name, value in (
+                ("SABLE_NEXTCLOUD_URL", url),
+                ("SABLE_NEXTCLOUD_USER", user),
+                ("SABLE_NEXTCLOUD_PASSWORD", password),
             )
-        if not 40 <= len(secret) <= 128:
+            if not value
+        ]
+        if missing_account:
             raise ConfigError(
-                "SABLE_BOT_SECRET must be 40-128 characters, matching what Nextcloud "
-                f"accepts for a bot secret (got {len(secret)})."
+                f"{', '.join(missing_account)} required: sable signs in to Nextcloud "
+                "as an ordinary user. Create one for it, give it an app password "
+                "(Settings > Security > Devices & sessions), and set all three of "
+                "SABLE_NEXTCLOUD_URL, SABLE_NEXTCLOUD_USER and "
+                "SABLE_NEXTCLOUD_PASSWORD."
             )
-        previous = _str("SABLE_BOT_SECRET_PREVIOUS")
-        if previous and not 40 <= len(previous) <= 128:
+        if not re.match(r"^https?://[^/\s]+", url):
             raise ConfigError(
-                "SABLE_BOT_SECRET_PREVIOUS must be 40-128 characters, the same range "
-                f"Nextcloud accepts for the secret it replaces (got {len(previous)})."
+                f"SABLE_NEXTCLOUD_URL must start with http:// or https://, got {url!r}"
             )
-        if previous and previous == secret:
+        poll_timeout = _int("SABLE_POLL_TIMEOUT", 30)
+        if poll_timeout < 1:
             raise ConfigError(
-                "SABLE_BOT_SECRET_PREVIOUS is the same value as SABLE_BOT_SECRET, so "
-                "nothing has been rotated. It is there to hold the secret you are "
-                "rotating away from; set it to the old value, or unset it."
+                f"SABLE_POLL_TIMEOUT must be at least 1 second (got {poll_timeout})"
+            )
+        room_refresh = _int("SABLE_ROOM_REFRESH", 60)
+        if room_refresh < 5:
+            raise ConfigError(
+                "SABLE_ROOM_REFRESH must be at least 5 seconds: it is how often "
+                f"the conversation list is fetched (got {room_refresh})"
             )
 
         llm = LLMConfig(
@@ -541,11 +530,11 @@ class Config:
         )
 
         config = cls(
-            bot_secret=secret,
-            bot_secret_previous=previous,
-            bot_name=_str("SABLE_BOT_NAME", "sable"),
-            nextcloud_url=_str("SABLE_NEXTCLOUD_URL").rstrip("/"),
-            pin_backend=_bool("SABLE_PIN_BACKEND", True),
+            nextcloud_url=url,
+            nextcloud_user=user,
+            nextcloud_password=password,
+            poll_timeout=min(poll_timeout, MAX_POLL_TIMEOUT),
+            room_refresh=room_refresh,
             command_prefix=_str("SABLE_COMMAND_PREFIX", "!") or "!",
             ai_rooms=_csv("SABLE_AI_ROOMS"),
             reply_as_reply=_bool("SABLE_REPLY_AS_REPLY", False),
@@ -574,8 +563,6 @@ class Config:
             hook_tokens=_prefixed("SABLE_HOOK_TOKEN_"),
             hook_templates=_prefixed("SABLE_HOOK_TEMPLATE_"),
             max_hook_bytes=_int("SABLE_MAX_HOOK_BYTES", 256 * 1024),
-            nextcloud_user=_str("SABLE_NEXTCLOUD_USER"),
-            nextcloud_password=_str("SABLE_NEXTCLOUD_PASSWORD"),
             upload_path="/" + _str("SABLE_UPLOAD_PATH", "/sable").strip("/"),
             max_upload_bytes=_int("SABLE_MAX_UPLOAD_BYTES", 25 * 1024 * 1024),
             api_docs=_bool("SABLE_API_DOCS", False),
@@ -676,11 +663,6 @@ class Config:
                     f"SABLE_NOTIFY_ROOMS entry {alias}={room!r} is not a "
                     f"conversation token: {TOKEN_HINT}."
                 )
-        if config.hooks and not config.nextcloud_url:
-            raise ConfigError(
-                "SABLE_NEXTCLOUD_URL is required when SABLE_HOOKS is set: a webhook "
-                "from another service carries no Nextcloud address to reply to."
-            )
         if config.timezone:
             try:
                 ZoneInfo(config.timezone)
@@ -690,6 +672,19 @@ class Config:
                     f"name such as America/New_York or Europe/Berlin ({exc})"
                 ) from exc
         warnings: list[str] = []
+        if poll_timeout > MAX_POLL_TIMEOUT:
+            warnings.append(
+                f"SABLE_POLL_TIMEOUT is {poll_timeout}, but Talk holds a long poll "
+                f"for at most {MAX_POLL_TIMEOUT} seconds; using {MAX_POLL_TIMEOUT}."
+            )
+        if config.nextcloud_url.startswith("http://") and not re.match(
+            r"^http://(localhost|127\.|\[::1\])", config.nextcloud_url
+        ):
+            warnings.append(
+                "SABLE_NEXTCLOUD_URL is plain http://, so the account's password "
+                "crosses the network unencrypted on every request. Use https:// "
+                "unless this is a private network you trust."
+            )
         if config.llm.backend not in LLM_BACKENDS:
             raise ConfigError(
                 f"SABLE_LLM_BACKEND must be one of {', '.join(sorted(LLM_BACKENDS))}, "
@@ -743,27 +738,7 @@ class Config:
             )
         if config.max_hook_bytes <= 0:
             raise ConfigError("SABLE_MAX_HOOK_BYTES must be greater than zero")
-        if bool(config.nextcloud_user) != bool(config.nextcloud_password):
-            raise ConfigError(
-                "SABLE_NEXTCLOUD_USER and SABLE_NEXTCLOUD_PASSWORD go together: "
-                "set both to enable file attachments, or neither to keep /notify "
-                "text-only."
-            )
-        if config.nextcloud_user and not config.nextcloud_url:
-            raise ConfigError(
-                "SABLE_NEXTCLOUD_URL is required for file attachments: there is no "
-                "incoming request to learn the server address from when uploading."
-            )
         if config.max_upload_bytes <= 0:
             raise ConfigError("SABLE_MAX_UPLOAD_BYTES must be greater than zero")
-        if config.notify_enabled and not config.nextcloud_url:
-            raise ConfigError(
-                "SABLE_NEXTCLOUD_URL is required when SABLE_NOTIFY_TOKEN is set: "
-                "outbound-only messages have no incoming request to learn the "
-                "server URL from."
-            )
-        if config.pin_backend and not config.nextcloud_url:
-            # Nothing to pin against; fall back to trusting the signed header.
-            object.__setattr__(config, "pin_backend", False)
         object.__setattr__(config, "warnings", tuple(warnings))
         return config

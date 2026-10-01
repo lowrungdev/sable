@@ -1,4 +1,5 @@
-# sable — a Nextcloud Talk bot.  Full reference: docs/configuration.md
+# sable — a Nextcloud Talk assistant that runs as an ordinary user account.
+# Full reference: docs/configuration.md
 #
 # There are two places to put settings, and they stack:
 #
@@ -6,8 +7,9 @@
 #      for secrets, since this file is meant to be committed;
 #   2. the environment: block below, which OVERRIDES anything from .env.
 #
-# Only SABLE_BOT_SECRET is required. Every other variable is listed, commented
-# out, showing its default — uncomment to change it.
+# Only the three Nextcloud account settings (URL, USER, PASSWORD) are required.
+# Every other variable is listed, commented out, showing its default —
+# uncomment to change it.
 #
 # Quote every value. Compose coerces plain scalars to strings, but YAML itself
 # would read {} as an empty mapping and treat a leading ! as a type tag — which
@@ -55,33 +57,33 @@ services:
       SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
 
       # ===================== REQUIRED =====================================
-      # The shared secret, identical to the one given to
-      # `occ talk:bot:install`. 40–128 characters: openssl rand -hex 32
-      # Read from .env or the shell, so the value stays out of this file.
-      SABLE_BOT_SECRET: "${SABLE_BOT_SECRET:?required — put it in .env (see docs/deployment.md)}"
+      # sable is an ordinary Nextcloud user: it reads chat, posts, reacts and
+      # uploads files as that account. Create one for it, invite it to the
+      # conversations it should be in, and give it an app password (Settings >
+      # Security > Devices & sessions). All three are read from .env or the
+      # shell, so the values stay out of this file.
+      #
+      # Your Nextcloud base URL, no trailing slash. Plain http:// to a host that
+      # is not local gets a startup warning.
+      SABLE_NEXTCLOUD_URL: "${SABLE_NEXTCLOUD_URL:?required — put it in .env (see docs/deployment.md)}"
 
-      # ===================== Talk bot identity ============================
-      # The secret being rotated away from — accepted on incoming webhooks and
-      # never used to sign what sable sends. Talk holds one secret per install,
-      # so a rotation is uninstall, install with the new value, restart, and
-      # every event in that window would 401 without this. Same 40–128 range,
-      # and it may not repeat the value above. Keep it in .env; clear it when
-      # the rotation is done.
-      # SABLE_BOT_SECRET_PREVIOUS: "${SABLE_BOT_SECRET_PREVIOUS:-}"
+      # The account's user id; it is also the name people @-mention.
+      SABLE_NEXTCLOUD_USER: "${SABLE_NEXTCLOUD_USER:?required — put it in .env (see docs/deployment.md)}"
 
-      # Your Nextcloud base URL, no trailing slash. Optional for the webhook
-      # path — each signed event carries the server URL in a header — but
-      # required for /notify, and without it backend pinning cannot run.
-      # Strongly recommended.
-      # SABLE_NEXTCLOUD_URL: "https://cloud.example.org"
+      # The app password, never the login password. It cannot be scoped: it
+      # reaches everything that user can, so use an account that owns nothing
+      # else.
+      SABLE_NEXTCLOUD_PASSWORD: "${SABLE_NEXTCLOUD_PASSWORD:?required — put it in .env (see docs/deployment.md)}"
 
-      # Name mention detection matches on; keep it in step with the name you
-      # installed the bot under.
-      # SABLE_BOT_NAME: "sable"
+      # ===================== Reading chat =================================
+      # Seconds each long poll may wait; 30 by default, clamped to Talk's 60,
+      # and under 1 is an error. Every poll holds a request slot on Nextcloud
+      # for up to this long, per conversation followed.
+      # SABLE_POLL_TIMEOUT: "30"
 
-      # Reject webhooks whose backend header is not SABLE_NEXTCLOUD_URL.
-      # Ignored when no URL is set.
-      # SABLE_PIN_BACKEND: "true"
+      # Seconds between looks at which conversations the account is in; under 5
+      # is an error.
+      # SABLE_ROOM_REFRESH: "60"
 
       # ===================== Chat behaviour ===============================
       # SABLE_COMMAND_PREFIX: "!"
@@ -100,7 +102,7 @@ services:
 
       # React to any message with this and the bot answers that message, in a
       # reply threaded under it. Empty disables the feature and its message
-      # cache. Needs --feature reaction on the bot install.
+      # cache.
       # SABLE_ASK_REACTION: "⁉️"
 
       # Let only SABLE_ADMIN_USERS use that reaction. Otherwise anyone in the
@@ -128,8 +130,9 @@ services:
       # Post failures into the conversation as well as logging them.
       # SABLE_REPORT_ERRORS: "true"
 
-      # Call Nextcloud's status.php at startup and log what answered, so a wrong
-      # URL or an untrusted certificate shows up at boot. Never fatal.
+      # Sign in at startup and log who Nextcloud says we are, so a wrong URL, an
+      # untrusted certificate or a bad app password shows up at boot. Never
+      # fatal.
       # SABLE_STARTUP_CHECK: "true"
 
       # Replies longer than this are clipped; Talk's own ceiling is 32000.
@@ -137,10 +140,10 @@ services:
 
       # Model calls allowed in flight at once; "0" means no ceiling. Each
       # trigger is a background task with no limit of its own, so a busy room or
-      # a burst of redelivered webhooks means that many completions open
-      # together, each holding SABLE_LLM_TIMEOUT. Talk rate-limits the replies
-      # sable sends, not the events it sends sable. Lower it for a local model
-      # that serves one request at a time.
+      # a burst of messages means that many completions open together, each
+      # holding SABLE_LLM_TIMEOUT. Talk rate-limits the replies sable sends, not
+      # the messages it reads. Lower it for a local model that serves one
+      # request at a time.
       # SABLE_MAX_CONCURRENT_REPLIES: "8"
 
       # Users to ignore completely - nothing they say or react to is acted on.
@@ -223,7 +226,7 @@ services:
 
       # ===================== Alerting endpoint ============================
       # Bearer token for POST /notify. EMPTY DISABLES THE ROUTE (404).
-      # Unrelated to the bot secret — generate a separate value, in .env.
+      # Unrelated to the app password — generate a separate value, in .env.
       # SABLE_NOTIFY_TOKEN: "${SABLE_NOTIFY_TOKEN:-}"
 
       # Aliases so callers never need conversation tokens.
@@ -246,13 +249,9 @@ services:
       # SABLE_MAX_HOOK_BYTES: "262144"
 
       # ===================== File attachments =============================
-      # The bot API cannot attach files, so /notify uploads them as an ordinary
-      # Nextcloud user instead. Both empty = /notify stays text-only. This
-      # account can read and write its own Files, so give it its own user and
-      # keep the password in .env.
-      # SABLE_NEXTCLOUD_USER: "sable-bot"
-      # SABLE_NEXTCLOUD_PASSWORD: "${SABLE_NEXTCLOUD_PASSWORD:-}"
-
+      # /notify can carry a file, uploaded as the account set above - nothing
+      # more to configure but where it goes and how big it may be.
+      #
       # Folder in that user's Files where attachments land before sharing.
       # SABLE_UPLOAD_PATH: "/sable"
 
@@ -310,9 +309,10 @@ services:
       # SABLE_TIMEZONE: "America/New_York"
 
     ports:
-      # Published to localhost only: put a TLS-terminating reverse proxy in
-      # front of this. Nextcloud will not send webhooks to plain HTTP unless an
-      # admin has allowed local/insecure remotes. See docs/deployment.md.
+      # Published to localhost only. Nextcloud never calls sable - it reads chat
+      # by making outbound requests - so this port serves only /notify, /hook
+      # and /healthz. Put a TLS-terminating reverse proxy in front of it if
+      # anything outside this host calls those. See docs/deployment.md.
       #
       # If the proxy also runs in Docker, delete this block, share a network and
       # let it reach sable:8080 directly.
