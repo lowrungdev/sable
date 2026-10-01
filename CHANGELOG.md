@@ -12,6 +12,13 @@ Format: `## <version>`, optionally followed by a date. Anything until the next
 
 ## Unreleased
 
+- **One CI check script for every workflow.** `.forgejo/ci.sh` installs the
+  pinned uv and the locked dependencies, then runs ruff, ruff format --check,
+  mypy and pytest; `test.yml`, `build.yml` and `release.yml` all call it, so a
+  build or a release now also needs lint and types to pass, and the install
+  steps are no longer copied three times. `test.yml` no longer triggers on
+  pushes to `release`, so a release push runs the checks once, inside
+  `release.yml`, instead of twice in parallel.
 - **`README.md`, `LICENSE` and `CHANGELOG.md` moved to the repository root**,
   where contributors and tooling look for them. Everything that read the old
   `docs/` paths follows: `pyproject.toml`, the Dockerfile, the release

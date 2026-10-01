@@ -145,18 +145,9 @@ jobs:
             echo "create_release=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Run the test suite
+      - name: Run the checks
         if: steps.gate.outputs.publish == 'true'
-        run: |
-          set -eu
-          python3 --version
-          python3 -m venv /tmp/uv
-          /tmp/uv/bin/pip install --quiet uv==0.12.19
-          /tmp/uv/bin/uv --version
-          # --locked installs exactly what uv.lock pins, and fails if the lock
-          # no longer matches pyproject.toml.
-          /tmp/uv/bin/uv sync --locked --extra dev
-          /tmp/uv/bin/uv run --locked pytest -q
+        run: sh .forgejo/ci.sh
 
       - name: Log in to Forgejo Registry
         if: steps.gate.outputs.publish == 'true'

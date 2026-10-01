@@ -103,13 +103,15 @@ runner.
 
 | Workflow | Runs on | Does |
 | --- | --- | --- |
-| [`test.yml`](../.forgejo/workflows/test.yml) | Pushes to `dev`, `main`, `release`; PRs into `dev` or `main` | Runs ruff (lint and format check), mypy, then pytest |
-| [`build.yml`](../.forgejo/workflows/build.yml) | **Button only** (`workflow_dispatch`) | Tests, then pushes `sable:dev` and `sable:<commit>` |
-| [`release.yml`](../.forgejo/workflows/release.yml) | Pushes to `release`, **plus a button** | Tests, pushes the versioned image, creates the Forgejo Release |
+| [`test.yml`](../.forgejo/workflows/test.yml) | Pushes to `dev` and `main`; PRs into `dev` or `main` | Runs the checks |
+| [`build.yml`](../.forgejo/workflows/build.yml) | **Button only** (`workflow_dispatch`) | Runs the checks, then pushes `sable:dev` and `sable:<commit>` |
+| [`release.yml`](../.forgejo/workflows/release.yml) | Pushes to `release`, **plus a button** | Runs the checks, pushes the versioned image, creates the Forgejo Release |
 
-Every workflow that builds an image runs the suite first, from the lock file (`uv sync --locked
---extra dev`, then `uv run --locked pytest -q`), so a dependency change without a re-lock cannot
-slip through. `test.yml` also runs ruff and mypy first; running the same commands locally is in
+"The checks" are one script, [`.forgejo/ci.sh`](../.forgejo/ci.sh), that every workflow calls right
+after checkout, so the three cannot drift apart and nothing is built or published unless they
+pass. It installs the pinned uv and the locked dependencies (`uv sync --locked --extra dev`, so a
+dependency change without a re-lock cannot slip through), then runs ruff, ruff format --check,
+mypy and pytest. It is for CI only; running the same commands locally is in
 [CONTRIBUTING.md](../CONTRIBUTING.md#getting-started-in-5-minutes). The
 [`Dockerfile`](../Dockerfile) is one stage that installs sable from `uv.lock`, and `docker build .`
 builds exactly the image that ships.
