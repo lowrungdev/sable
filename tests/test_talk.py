@@ -6,8 +6,8 @@ import json
 import httpx
 import pytest
 import respx
-from conftest import BACKEND, PASSWORD, ROOM, TALK, USER
 
+from conftest import BACKEND, PASSWORD, ROOM, TALK, USER
 from sable.state import ConnectionState
 from sable.talk import API_BASE, ROOMS_API_BASE, TalkClient, TalkError
 
@@ -90,7 +90,7 @@ async def test_send_message_truncates() -> None:
 async def test_send_message_refuses_empty_text() -> None:
     client = make()
     try:
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="empty"):
             await client.send_message(ROOM, "   ")
     finally:
         await client.aclose()
@@ -161,9 +161,7 @@ async def test_try_react_swallows_failures() -> None:
 
 @respx.mock
 async def test_whoami_returns_the_user_id_and_display_name() -> None:
-    route = respx.get(USER_URL).mock(
-        return_value=ocs({"id": "sable", "displayname": "Sable Bot"})
-    )
+    route = respx.get(USER_URL).mock(return_value=ocs({"id": "sable", "displayname": "Sable Bot"}))
     client = make()
     try:
         assert await client.whoami() == ("sable", "Sable Bot")

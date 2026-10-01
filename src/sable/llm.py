@@ -33,9 +33,7 @@ class LLMError(RuntimeError):
 
 
 class LLMClient:
-    def __init__(
-        self, config: LLMConfig, *, client: httpx.AsyncClient | None = None
-    ) -> None:
+    def __init__(self, config: LLMConfig, *, client: httpx.AsyncClient | None = None) -> None:
         self.config = config
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(timeout=config.timeout)
@@ -82,9 +80,7 @@ class LLMClient:
             )
         except httpx.TimeoutException as exc:
             self._state.record_failure(exc)
-            log.warning(
-                "%s did not answer within %ss", url, self.config.timeout
-            )
+            log.warning("%s did not answer within %ss", url, self.config.timeout)
             raise LLMError(f"the model did not answer within {self.config.timeout}s") from exc
         except httpx.HTTPError as exc:
             self._state.record_failure(exc)
@@ -101,9 +97,7 @@ class LLMClient:
                 elapsed,
                 response.text[:200],
             )
-            raise LLMError(
-                f"{url} returned HTTP {response.status_code}: {response.text[:400]}"
-            )
+            raise LLMError(f"{url} returned HTTP {response.status_code}: {response.text[:400]}")
 
         try:
             payload = response.json()
@@ -112,9 +106,7 @@ class LLMClient:
             raise LLMError("response was not JSON") from exc
 
         text = _extract_text(payload)
-        log.info(
-            "%s answered in %.1fs (%d chars)", used_model or "the model", elapsed, len(text)
-        )
+        log.info("%s answered in %.1fs (%d chars)", used_model or "the model", elapsed, len(text))
         return text
 
 
@@ -122,7 +114,7 @@ def _extract_text(payload: Any) -> str:
     """Pull the assistant text out of a chat-completions response."""
     if not isinstance(payload, dict):
         raise LLMError("response was not a JSON object")
-    if "error" in payload and payload["error"]:
+    if payload.get("error"):
         raise LLMError(f"backend error: {str(payload['error'])[:400]}")
 
     choices = payload.get("choices")
@@ -137,9 +129,7 @@ def _extract_text(payload: Any) -> str:
     content = message.get("content")
     if isinstance(content, list):
         # Some gateways return content parts instead of a plain string.
-        content = "".join(
-            str(part.get("text", "")) for part in content if isinstance(part, dict)
-        )
+        content = "".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
     text = (content or "").strip()
 
     calls = _tool_calls(message)
@@ -148,8 +138,7 @@ def _extract_text(payload: Any) -> str:
         # post. Say which tool: the fix is almost always at the backend, and the
         # name is what tells you where to look.
         raise LLMError(
-            f"the model called {', '.join(calls)} and nothing executed it "
-            f"(finish_reason={finish})"
+            f"the model called {', '.join(calls)} and nothing executed it (finish_reason={finish})"
         )
 
     if not text:
@@ -168,8 +157,7 @@ def _extract_text(payload: Any) -> str:
         # Not an answer, and posting it teaches the model to keep doing it, since
         # replies go back into the conversation history.
         raise LLMError(
-            "the model wrote a tool call as text instead of calling one; "
-            "nothing executed it"
+            "the model wrote a tool call as text instead of calling one; nothing executed it"
         )
     return text
 

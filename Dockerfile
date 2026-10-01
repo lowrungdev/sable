@@ -19,10 +19,10 @@ RUN useradd --create-home --uid 10001 sable
 
 WORKDIR /app
 
-# uv.lock pins everything; pyproject.toml points at the two docs files, so the
+# uv.lock pins everything; pyproject.toml points at README.md and LICENSE, so the
 # project install needs them present.
 COPY pyproject.toml uv.lock ./
-COPY docs/README.md docs/LICENSE ./docs/
+COPY README.md LICENSE ./
 COPY src ./src
 
 # --locked asserts uv.lock still matches pyproject.toml: if it does not, the

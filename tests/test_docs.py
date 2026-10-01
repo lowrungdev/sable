@@ -20,13 +20,17 @@ import re
 from pathlib import Path
 
 import pytest
-from conftest import make_config
 
+from conftest import make_config
 from sable.app import create_app, tools_summary
 from sable.config import Config, LLMConfig
 
 ROOT = Path(__file__).resolve().parent.parent
 DOCS = ROOT / "docs"
+README = ROOT / "README.md"
+CHANGELOG = ROOT / "CHANGELOG.md"
+#: The root-level guides written for contributors and agents rather than operators.
+GUIDES = [ROOT / name for name in ("CONTRIBUTING.md", "CLAUDE.md", "AGENTS.md", "SECURITY.md")]
 ENV_EXAMPLE = ROOT / ".env.example"
 COMPOSE = ROOT / "compose.yaml"
 CONFIGURATION = DOCS / "configuration.md"
@@ -220,7 +224,7 @@ def test_every_setting_with_a_documented_default_still_has_one() -> None:
     )
 
 
-@pytest.mark.parametrize("variable,attribute", sorted(DOCUMENTED_DEFAULTS.items()))
+@pytest.mark.parametrize(("variable", "attribute"), sorted(DOCUMENTED_DEFAULTS.items()))
 def test_the_documented_default_is_the_one_the_code_uses(
     variable: str, attribute: str, default_config: Config
 ) -> None:
@@ -288,7 +292,7 @@ def sample_tools_line() -> str:
 
 
 def test_the_tools_line_in_deployment_md_is_the_one_the_code_builds() -> None:
-    # The values are the ones the sample's own .ini block above it configures, so a
+    # The values are those of the example in configuration.md's worked examples, so a
     # change to the wording or order of tools_summary shows up here.
     config = make_config(
         llm=LLMConfig(
@@ -308,7 +312,7 @@ def test_the_removed_echo_command_is_not_documented() -> None:
     # The `!echo` command is gone: nothing an operator reads should still offer it.
     # (The changelog is history and may name it; the removed settings are covered by
     # test_no_file_documents_a_variable_the_code_never_reads.)
-    for path in [ENV_EXAMPLE, COMPOSE, *sorted(DOCS.glob("*.md"))]:
+    for path in [ENV_EXAMPLE, COMPOSE, README, *GUIDES, *sorted(DOCS.glob("*.md"))]:
         if path.name == "CHANGELOG.md":
             continue
         assert "!echo" not in read(path), f"{path.name} still mentions the removed !echo command"
@@ -327,7 +331,7 @@ OBSOLETE = re.compile(
 
 
 def test_no_doc_describes_the_old_bot_design() -> None:
-    files = [ENV_EXAMPLE, COMPOSE, ROOT / "Dockerfile", *sorted(DOCS.glob("*.md"))]
+    files = [ENV_EXAMPLE, COMPOSE, ROOT / "Dockerfile", README, *GUIDES, *sorted(DOCS.glob("*.md"))]
     files += sorted((ROOT / "Agents").rglob("*.md"))
     for path in files:
         if path.name == "CHANGELOG.md":
@@ -348,7 +352,7 @@ LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 HEADING = re.compile(r"^#{1,6}\s+(.*)$")
 FENCE = re.compile(r"^\s*```")
 
-LINKED_FILES = sorted(DOCS.glob("*.md")) + [ENV_EXAMPLE, COMPOSE]
+LINKED_FILES = [*sorted(DOCS.glob("*.md")), README, *GUIDES, CHANGELOG, ENV_EXAMPLE, COMPOSE]
 
 
 def slug(heading: str) -> str:
@@ -392,7 +396,7 @@ def test_every_internal_link_resolves(path: Path) -> None:
             )
 
 
-@pytest.mark.parametrize("variable,attribute", sorted(DOCUMENTED_LLM_DEFAULTS.items()))
+@pytest.mark.parametrize(("variable", "attribute"), sorted(DOCUMENTED_LLM_DEFAULTS.items()))
 def test_the_documented_model_default_is_the_one_the_code_uses(
     variable: str, attribute: str, default_config: Config
 ) -> None:

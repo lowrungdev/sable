@@ -36,7 +36,9 @@ def load_dotenv(path: Path) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="sable", description="A Nextcloud Talk assistant that runs as a user account.")
+    parser = argparse.ArgumentParser(
+        prog="sable", description="A Nextcloud Talk assistant that runs as a user account."
+    )
     parser.add_argument("--env-file", default=".env", type=Path, help="defaults to ./.env")
     parser.add_argument("--host", help="overrides SABLE_HOST")
     parser.add_argument("--port", type=int, help="overrides SABLE_PORT")
@@ -70,7 +72,8 @@ def main(argv: list[str] | None = None) -> int:
             f"sable {__version__} config OK\n"
             f"  nextcloud:  {config.nextcloud_url}\n"
             f"  account:    {config.nextcloud_user} (password set)\n"
-            f"  polling:    {config.poll_timeout}s long polls, rooms rescanned every {config.room_refresh}s\n"
+            f"  polling:    {config.poll_timeout}s long polls, "
+            f"rooms rescanned every {config.room_refresh}s\n"
             f"  prefix:     {config.command_prefix}\n"
             f"  model:      {config.llm.model or '(disabled)'} @ {config.llm.base_url}\n"
             f"  ai rooms:   {', '.join(config.ai_rooms) or '(mentions only)'}\n"

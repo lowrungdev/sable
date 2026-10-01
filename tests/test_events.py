@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+
 from conftest import (
     ACTOR_SHAPES,
     NON_USER_IDS,
@@ -12,7 +13,6 @@ from conftest import (
     message_payload,
     reaction_payload,
 )
-
 from sable.config import TOKEN_RE
 from sable.events import NAME_LIMIT, EventError, parse_message, render_message
 
@@ -21,7 +21,8 @@ SHAPE_IDS = [shape.label for shape in ACTOR_SHAPES]
 
 def test_parses_a_chat_message() -> None:
     event = parse_message(message_payload("!ping", message_id=42), room_name="Team chat")
-    assert event is not None and event.is_message
+    assert event is not None
+    assert event.is_message
     assert event.type == "message"
     assert event.message == "!ping"
     assert event.message_id == 42
@@ -132,7 +133,7 @@ def test_a_deleted_message_is_not_an_event() -> None:
 
 def test_rejects_unusable_payloads() -> None:
     with pytest.raises(EventError):
-        parse_message("nope")  # type: ignore[arg-type]
+        parse_message("nope")
     with pytest.raises(EventError):
         parse_message({"messageType": "comment", "id": 1})
 
@@ -224,9 +225,7 @@ def test_an_id_that_is_not_a_users_id_yields_no_user_id(label: str, actor_id: st
 def test_a_federated_user_is_neither_guest_nor_bot_yet_has_no_user_id() -> None:
     """The shape that fits none of the categories: a real person, on another
     server, with no local account to be an administrator of."""
-    actor = parse_message(
-        message_payload(actor_id="federated_users/karl@cloud.example.net")
-    ).actor
+    actor = parse_message(message_payload(actor_id="federated_users/karl@cloud.example.net")).actor
     assert not actor.is_guest
     assert not actor.is_bot
     assert actor.user_id == ""
@@ -237,9 +236,7 @@ def test_a_federated_user_is_neither_guest_nor_bot_yet_has_no_user_id() -> None:
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize(
-    ("label", "token"), VALID_TOKENS, ids=[label for label, _ in VALID_TOKENS]
-)
+@pytest.mark.parametrize(("label", "token"), VALID_TOKENS, ids=[label for label, _ in VALID_TOKENS])
 def test_a_conversation_token_of_any_accepted_shape_survives_parsing(
     label: str, token: str
 ) -> None:

@@ -8,6 +8,7 @@ enough to hide anything that matters between them.
 from __future__ import annotations
 
 import logging
+from typing import cast
 
 #: uvicorn's access records carry the request as arguments rather than as
 #: formatted text: (client, method, full path, http version, status).
@@ -33,7 +34,7 @@ class HealthCheckFilter(logging.Filter):
             # letting a line through is the safe direction to be wrong in.
             return True
         try:
-            status = int(args[_STATUS])  # type: ignore[arg-type]
+            status = int(cast("str | int", args[_STATUS]))
         except (TypeError, ValueError):
             return True
         path = str(args[_PATH]).split("?", 1)[0]

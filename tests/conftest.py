@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
-from typing import Any, AsyncIterator
+from typing import Any
 
 import httpx
 import pytest
@@ -82,7 +83,7 @@ async def http_client() -> AsyncIterator[httpx.AsyncClient]:
 
 @pytest.fixture
 def bot(config: Config, llm: FakeLLM, http_client: httpx.AsyncClient) -> Bot:
-    return Bot(config, http_client=http_client, llm=llm)  # type: ignore[arg-type]
+    return Bot(config, http_client=http_client, llm=llm)
 
 
 # --------------------------------------------------------------------------- #

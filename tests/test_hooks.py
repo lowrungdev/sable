@@ -40,7 +40,10 @@ ALERTMANAGER = {
         {
             "status": "firing",
             "labels": {"alertname": "DiskFull", "severity": "critical", "instance": "db01"},
-            "annotations": {"summary": "Disk almost full on db01", "description": "98% of /var used"},
+            "annotations": {
+                "summary": "Disk almost full on db01",
+                "description": "98% of /var used",
+            },
             "startsAt": "2026-09-27T10:00:00Z",
             "fingerprint": "abc123",
         }
@@ -69,7 +72,7 @@ def test_a_bare_scalar_flattens_to_itself() -> None:
 
 
 @pytest.mark.parametrize(
-    "name, expected",
+    ("name", "expected"),
     [
         ("startsAt", ["starts", "At"]),
         ("starts_at", ["starts", "at"]),
@@ -111,10 +114,12 @@ def test_komodo_renders_without_any_configuration() -> None:
     assert text.startswith("**CRITICAL**")
     assert "sable" in text
     assert "prod-1" in text
-    assert "Running" in text and "Unhealthy" in text
+    assert "Running" in text
+    assert "Unhealthy" in text
     assert "StackStateChange" in text
     # Identifiers and timestamps are left out.
-    assert "66f1a2b3" not in text and "1727441234000" not in text
+    assert "66f1a2b3" not in text
+    assert "1727441234000" not in text
 
 
 def test_alertmanager_leads_with_its_summary_and_description() -> None:
@@ -124,7 +129,8 @@ def test_alertmanager_leads_with_its_summary_and_description() -> None:
     assert lines[1] == "98% of /var used"
     # alertname and severity each appear three times in the payload, once here.
     assert text.count("DiskFull") == 1
-    assert "fingerprint" not in text and "startsAt" not in text
+    assert "fingerprint" not in text
+    assert "startsAt" not in text
 
 
 def test_a_plain_message_is_left_alone() -> None:
@@ -139,12 +145,14 @@ def test_a_severity_leads_the_headline() -> None:
 def test_list_indices_keep_their_context() -> None:
     # "0: 1" says nothing on its own.
     text = render({"foo": {"bar": [1, 2]}})
-    assert "bar.0: 1" in text and "bar.1: 2" in text
+    assert "bar.0: 1" in text
+    assert "bar.1: 2" in text
 
 
 def test_a_long_payload_is_capped_and_says_so() -> None:
     text = render({f"field{i}": f"value{i}" for i in range(20)})
-    assert "(+" in text and "more)" in text
+    assert "(+" in text
+    assert "more)" in text
 
 
 def test_a_payload_with_nothing_usable_falls_back_to_json() -> None:

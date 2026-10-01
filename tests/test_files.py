@@ -9,8 +9,8 @@ from urllib.parse import parse_qs
 import httpx
 import pytest
 import respx
-from conftest import BACKEND, ROOM
 
+from conftest import BACKEND, ROOM
 from sable.files import SHARES_API, FilesClient, FilesError, safe_filename
 
 USER = "sable-bot"
@@ -37,7 +37,7 @@ def share_form(route) -> dict[str, str]:
 
 
 @pytest.mark.parametrize(
-    "given, must_contain",
+    ("given", "must_contain"),
     [
         ("report.pdf", "report.pdf"),
         ("../../etc/passwd", "passwd"),
@@ -52,7 +52,9 @@ def test_filenames_are_sanitised(given: str, must_contain: str) -> None:
     result = safe_filename(given)
     assert must_contain in result
     # Nothing that could climb out of the upload folder.
-    assert "/" not in result and "\\" not in result and ".." not in result
+    assert "/" not in result
+    assert "\\" not in result
+    assert ".." not in result
 
 
 def test_filenames_are_made_unique() -> None:
@@ -76,9 +78,7 @@ async def test_send_file_uploads_then_shares(respx_mock) -> None:
     mkcol = respx_mock.request("MKCOL", f"{DAV}/sable").mock(
         return_value=httpx.Response(405)  # already exists
     )
-    put = respx_mock.put(url__startswith=f"{DAV}/sable/").mock(
-        return_value=httpx.Response(201)
-    )
+    put = respx_mock.put(url__startswith=f"{DAV}/sable/").mock(return_value=httpx.Response(201))
     share = respx_mock.post(f"{BACKEND}{SHARES_API}").mock(return_value=ocs({"id": 77}))
 
     files = client()
@@ -89,7 +89,9 @@ async def test_send_file_uploads_then_shares(respx_mock) -> None:
     finally:
         await files.aclose()
 
-    assert mkcol.called and put.called and share.called
+    assert mkcol.called
+    assert put.called
+    assert share.called
     assert result.share_id == 77
     assert result.size == len(b"%PDF-1.7 data")
     assert result.name.endswith("-report.pdf")
@@ -129,9 +131,7 @@ async def test_silent_and_reply_to_ride_along_in_the_metadata(respx_mock) -> Non
 
 @respx.mock(assert_all_called=False)
 async def test_the_folder_is_created_when_missing(respx_mock, caplog) -> None:
-    mkcol = respx_mock.request("MKCOL", f"{DAV}/sable").mock(
-        return_value=httpx.Response(201)
-    )
+    mkcol = respx_mock.request("MKCOL", f"{DAV}/sable").mock(return_value=httpx.Response(201))
     respx_mock.put(url__startswith=f"{DAV}/sable/").mock(return_value=httpx.Response(201))
     respx_mock.post(f"{BACKEND}{SHARES_API}").mock(return_value=ocs({"id": 1}))
 
@@ -163,7 +163,8 @@ async def test_a_custom_upload_folder_is_used(respx_mock) -> None:
         result = await files.send_file(ROOM, "a.txt", b"x")
     finally:
         await files.aclose()
-    assert mkcol.called and put.called
+    assert mkcol.called
+    assert put.called
     assert result.path.startswith("/alerts/incoming/")
 
 
@@ -180,9 +181,8 @@ async def test_a_failed_share_cleans_up_the_orphaned_upload(respx_mock, caplog) 
 
     files = client()
     try:
-        with caplog.at_level(logging.INFO):
-            with pytest.raises(FilesError) as excinfo:
-                await files.send_file(ROOM, "report.pdf", b"data")
+        with caplog.at_level(logging.INFO), pytest.raises(FilesError) as excinfo:
+            await files.send_file(ROOM, "report.pdf", b"data")
     finally:
         await files.aclose()
 
@@ -210,9 +210,7 @@ async def test_a_failed_upload_is_reported_with_its_status(respx_mock) -> None:
 
 @respx.mock(assert_all_called=False)
 async def test_an_unreachable_nextcloud_is_a_files_error(respx_mock) -> None:
-    respx_mock.request("MKCOL", f"{DAV}/sable").mock(
-        side_effect=httpx.ConnectError("refused")
-    )
+    respx_mock.request("MKCOL", f"{DAV}/sable").mock(side_effect=httpx.ConnectError("refused"))
     files = client()
     try:
         with pytest.raises(FilesError, match="could not reach"):

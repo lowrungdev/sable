@@ -29,17 +29,8 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Run the test suite
-        run: |
-          set -eu
-          python3 --version
-          python3 -m venv /tmp/uv
-          /tmp/uv/bin/pip install --quiet uv==0.12.19
-          /tmp/uv/bin/uv --version
-          # --locked installs exactly what uv.lock pins, and fails if the lock
-          # no longer matches pyproject.toml.
-          /tmp/uv/bin/uv sync --locked --extra dev
-          /tmp/uv/bin/uv run --locked pytest -q
+      - name: Run the checks
+        run: sh .forgejo/ci.sh
 
       - name: Log in to Forgejo Registry
         uses: docker/login-action@v3

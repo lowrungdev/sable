@@ -20,8 +20,7 @@ def project_version() -> str:
 def test_pyproject_version_is_major_minor() -> None:
     declared = project_version()
     assert MAJOR_MINOR.fullmatch(declared), (
-        f"the version must be MAJOR.MINOR, e.g. 1.1 (see docs/releasing.md); "
-        f"got {declared!r}"
+        f"the version must be MAJOR.MINOR, e.g. 1.1 (see docs/releasing.md); got {declared!r}"
     )
 
 
@@ -30,8 +29,7 @@ def test_the_package_reports_a_real_version() -> None:
     # so an installed copy cannot disagree with it. A bare "0+unknown" means
     # the package is not installed at all.
     assert MAJOR_MINOR.fullmatch(sable.__version__), (
-        f"sable.__version__ is {sable.__version__!r}; install the package "
-        f"(pip install -e '.[dev]')"
+        f"sable.__version__ is {sable.__version__!r}; install the package (pip install -e '.[dev]')"
     )
 
 
@@ -44,7 +42,7 @@ def test_pyproject_does_not_derive_the_version_from_elsewhere() -> None:
     assert "version" not in config.get("tool", {}).get("hatch", {})
 
 
-CHANGELOG = Path(__file__).resolve().parent.parent / "docs" / "CHANGELOG.md"
+CHANGELOG = Path(__file__).resolve().parent.parent / "CHANGELOG.md"
 
 
 def changelog_section(version: str) -> str:
@@ -71,7 +69,7 @@ def test_the_changelog_documents_the_current_version() -> None:
     version = project_version()
     notes = changelog_section(version)
     assert notes, (
-        f"docs/CHANGELOG.md has no notes under '## {version}'. Write them before "
+        f"CHANGELOG.md has no notes under '## {version}'. Write them before "
         f"releasing - CI turns that section into the release body, and refuses to "
         f"publish without it."
     )

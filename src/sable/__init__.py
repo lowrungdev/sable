@@ -1,6 +1,7 @@
 """sable - a Nextcloud Talk assistant that runs as an ordinary user account."""
 
-from importlib.metadata import PackageNotFoundError, version as _distribution_version
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _distribution_version
 
 __all__ = ["__version__"]
 

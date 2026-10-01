@@ -17,7 +17,8 @@ import logging
 import re
 import secrets
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from typing import Any
 from urllib.parse import quote
 
 import httpx
@@ -65,7 +66,7 @@ def safe_filename(name: str) -> str:
             cleaned = stem[: MAX_NAME_LENGTH - len(suffix) - 1] + "." + suffix
         else:
             cleaned = cleaned[:MAX_NAME_LENGTH]
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     return f"{stamp}-{secrets.token_hex(3)}-{cleaned}"
 
 
@@ -113,7 +114,7 @@ class FilesClient:
         quoted = quote(path.lstrip("/"), safe="/")
         return f"{self.base_url}/remote.php/dav/files/{quote(self.user)}/{quoted}"
 
-    async def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
+    async def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         try:
             response = await self._client.request(
                 method, url, auth=self._auth, timeout=self._timeout, **kwargs
@@ -156,8 +157,7 @@ class FilesClient:
         )
         if response.status_code not in (200, 201, 204):
             raise FilesError(
-                f"uploading {path} failed: HTTP {response.status_code} "
-                f"{response.text[:200]}",
+                f"uploading {path} failed: HTTP {response.status_code} {response.text[:200]}",
                 response.status_code,
             )
         log.info("uploaded %s (%d bytes) as %s", path, len(content), self.user)
@@ -171,9 +171,7 @@ class FilesClient:
             log.warning("could not clean up %s: %s", path, exc)
             return
         if response.status_code not in (200, 204, 404):
-            log.warning(
-                "could not clean up %s: HTTP %s", path, response.status_code
-            )
+            log.warning("could not clean up %s: HTTP %s", path, response.status_code)
         else:
             log.info("cleaned up %s after a failed share", path)
 

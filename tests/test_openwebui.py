@@ -211,7 +211,8 @@ async def test_without_builtins_there_is_nothing_to_poll() -> None:
         await client.aclose()
 
     body = json.loads(respx.calls[1].request.content)
-    assert "session_id" not in body and "features" not in body
+    assert "session_id" not in body
+    assert "features" not in body
 
 
 # --------------------------------------------------------------------------- #

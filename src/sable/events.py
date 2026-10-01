@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
 PLACEHOLDER_RE = re.compile(r"\{([a-zA-Z0-9_-]+)\}")
 
@@ -84,7 +85,7 @@ class TalkEvent:
     message_id: int = 0
     message: str = ""
     raw_message: str = ""
-    parameters: dict = field(default_factory=dict)
+    parameters: dict[str, Any] = field(default_factory=dict)
     reaction: str = ""
     #: User ids mentioned with a real Talk mention, in order of appearance.
     mentions: tuple[str, ...] = ()
@@ -94,7 +95,7 @@ class TalkEvent:
         return self.type == "message"
 
 
-def render_message(message: str, parameters: dict) -> str:
+def render_message(message: str, parameters: dict[str, Any]) -> str:
     """Substitute rich-object placeholders with their display names."""
     if not parameters:
         return message
@@ -118,7 +119,7 @@ def clean_name(value: str) -> str:
     return " ".join(CONTROL_RE.sub(" ", value).split())[:NAME_LIMIT].strip()
 
 
-def mention_keys(parameters: dict, user_id: str) -> set[str]:
+def mention_keys(parameters: dict[str, Any], user_id: str) -> set[str]:
     """The placeholder names in ``parameters`` that are a mention of ``user_id``."""
     return {
         key
@@ -129,7 +130,7 @@ def mention_keys(parameters: dict, user_id: str) -> set[str]:
     }
 
 
-def _actor(payload: dict) -> Actor:
+def _actor(payload: dict[str, Any]) -> Actor:
     kind = str(payload.get("actorType", ""))
     ident = str(payload.get("actorId", ""))
     return Actor(
@@ -146,7 +147,7 @@ def _int(value: object) -> int:
         return 0
 
 
-def _reaction(payload: dict) -> str:
+def _reaction(payload: dict[str, Any]) -> str:
     """The emoji a reaction system message carries.
 
     Talk puts it in ``message``; the parameters are looked at too, and anything
@@ -173,7 +174,9 @@ def _reaction(payload: dict) -> str:
     return ""
 
 
-def parse_message(payload: dict, *, room_token: str = "", room_name: str = "") -> TalkEvent | None:
+def parse_message(
+    payload: dict[str, Any], *, room_token: str = "", room_name: str = ""
+) -> TalkEvent | None:
     """Turn one chat message into a :class:`TalkEvent`, or None if it is not one
     sable acts on (a chat message or a reaction).
 
@@ -189,11 +192,7 @@ def parse_message(payload: dict, *, room_token: str = "", room_name: str = "") -
     kind = str(payload.get("messageType", ""))
     system = str(payload.get("systemMessage", ""))
     actor = _actor(payload)
-    common = {
-        "actor": actor,
-        "room_token": token,
-        "room_name": clean_name(room_name),
-    }
+    room_label = clean_name(room_name)
 
     if kind == "system" and system == "reaction":
         parent = payload.get("parent")
@@ -201,7 +200,14 @@ def parse_message(payload: dict, *, room_token: str = "", room_name: str = "") -
         reaction = _reaction(payload)
         if not parent_id or not reaction:
             return None
-        return TalkEvent(type="reaction", message_id=parent_id, reaction=reaction, **common)
+        return TalkEvent(
+            type="reaction",
+            actor=actor,
+            room_token=token,
+            room_name=room_label,
+            message_id=parent_id,
+            reaction=reaction,
+        )
 
     if kind != "comment":
         return None
@@ -216,10 +222,12 @@ def parse_message(payload: dict, *, room_token: str = "", room_name: str = "") -
     )
     return TalkEvent(
         type="message",
+        actor=actor,
+        room_token=token,
+        room_name=room_label,
         message_id=_int(payload.get("id")),
         message=render_message(raw_message, parameters),
         raw_message=raw_message,
         parameters=parameters,
         mentions=mentions,
-        **common,
     )

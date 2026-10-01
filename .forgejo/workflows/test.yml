@@ -1,12 +1,13 @@
 name: Tests
 
-# Every push to a long-lived branch, and every pull request into one.
+# Every push to dev and main, and every pull request into them. Not `release`:
+# release.yml runs the same checks first thing on a push there and publishes only
+# if they pass, so listing it here would just run the checks twice, side by side.
 on:
   push:
     branches:
       - dev
       - main
-      - release
   pull_request:
     branches:
       - dev
@@ -26,14 +27,5 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Run the test suite
-        run: |
-          set -eu
-          python3 --version
-          python3 -m venv /tmp/uv
-          /tmp/uv/bin/pip install --quiet uv==0.12.19
-          /tmp/uv/bin/uv --version
-          # --locked installs exactly what uv.lock pins, and fails if the lock
-          # no longer matches pyproject.toml.
-          /tmp/uv/bin/uv sync --locked --extra dev
-          /tmp/uv/bin/uv run --locked pytest -q
+      - name: Run the checks
+        run: sh .forgejo/ci.sh

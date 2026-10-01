@@ -7,12 +7,12 @@ Work on `dev`. Keep `main` as the history. Push to `release` to publish.
 ```bash
 # 1. work, and write the changelog entry as you go
 git switch dev
-$EDITOR docs/CHANGELOG.md          # add notes under ## Unreleased
+$EDITOR CHANGELOG.md               # add notes under ## Unreleased
 git commit -am "..." && git push origin dev
 
 # 2. when you are ready to release, name the version
 $EDITOR pyproject.toml             # version = "0.9"
-$EDITOR docs/CHANGELOG.md          # rename ## Unreleased to ## 0.9
+$EDITOR CHANGELOG.md               # rename ## Unreleased to ## 0.9
 uv lock                            # the lock records the project version too
 git commit -am "Release 0.9" && git push origin dev
 
@@ -25,10 +25,9 @@ git switch release && git merge --ff-only main && git push origin release
 
 Step 4 is the release. Forgejo runs the tests, pushes `sable:0.9`, `sable:latest` and a tag
 named after the commit, and creates a Forgejo Release with the tag, the changelog notes and the
-wheel attached, which is what puts it in the repository sidebar.
-
-Do not skip the `uv lock`. The lock file records the project's own version, so `uv sync
---locked` refuses a stale one and the release fails before it builds.
+wheel attached, which is what puts it in the repository sidebar. Do not skip the `uv lock`: the
+lock records the project's own version, so `uv sync --locked` refuses a stale one and the release
+fails before it builds.
 
 ## The three branches
 
@@ -82,7 +81,7 @@ having done nothing — you cannot republish a version that already exists.
 
 ## The changelog is required
 
-[`docs/CHANGELOG.md`](CHANGELOG.md) holds one section per release, and the section matching the
+[`CHANGELOG.md`](../CHANGELOG.md) holds one section per release, and the section matching the
 current version becomes the release body:
 
 ```markdown
@@ -104,23 +103,18 @@ runner.
 
 | Workflow | Runs on | Does |
 | --- | --- | --- |
-| [`test.yml`](../.forgejo/workflows/test.yml) | Pushes to `dev`, `main`, `release`; PRs into `dev` or `main` | Runs pytest |
-| [`build.yml`](../.forgejo/workflows/build.yml) | **Button only** (`workflow_dispatch`) | Tests, then pushes `sable:dev` and `sable:<commit>` |
-| [`release.yml`](../.forgejo/workflows/release.yml) | Pushes to `release`, **plus a button** | Tests, pushes the versioned image, creates the Forgejo Release |
+| [`test.yml`](../.forgejo/workflows/test.yml) | Pushes to `dev` and `main`; PRs into `dev` or `main` | Runs the checks |
+| [`build.yml`](../.forgejo/workflows/build.yml) | **Button only** (`workflow_dispatch`) | Runs the checks, then pushes `sable:dev` and `sable:<commit>` |
+| [`release.yml`](../.forgejo/workflows/release.yml) | Pushes to `release`, **plus a button** | Runs the checks, pushes the versioned image, creates the Forgejo Release |
 
-Every workflow that builds an image runs the suite first, from the lock file:
-
-```bash
-uv sync --locked --extra dev
-uv run --locked pytest -q
-```
-
-`--locked` asserts that `uv.lock` still matches `pyproject.toml` and fails if it does not, so a
-dependency change without a re-lock cannot slip through. The same two commands reproduce CI on
-your own machine.
-
-The [`Dockerfile`](../Dockerfile) has nothing to do with testing — it is one stage that installs
-sable from `uv.lock` and runs it, and `docker build .` builds exactly the image that ships.
+"The checks" are one script, [`.forgejo/ci.sh`](../.forgejo/ci.sh), that every workflow calls right
+after checkout, so the three cannot drift apart and nothing is built or published unless they
+pass. It installs the pinned uv and the locked dependencies (`uv sync --locked --extra dev`, so a
+dependency change without a re-lock cannot slip through), then runs ruff, ruff format --check,
+mypy and pytest. It is for CI only; running the same commands locally is in
+[CONTRIBUTING.md](../CONTRIBUTING.md#getting-started-in-5-minutes). The
+[`Dockerfile`](../Dockerfile) is one stage that installs sable from `uv.lock`, and `docker build .`
+builds exactly the image that ships.
 
 ### The buttons
 
@@ -156,9 +150,17 @@ and leaves that Release untouched.
 | Release `v0.9` and its git tag | Releases, in the repository sidebar |
 | `sable-0.9-py3-none-any.whl` | Attached to that Release, when the wheel builds |
 
-The wheel is archival only, so its step is `continue-on-error`: if it fails, the run warns, the
-release is still created, and it simply has no attachment. Nothing about the release depends on
-it.
+The wheel is archival only, so its step is `continue-on-error`: if it fails, the run warns and the
+release is still created without it.
+
+To get from a running image back to its source, the workflow stamps the commit in as the
+`org.opencontainers.image.revision` label, and every image is also tagged with that commit, so
+the tag list in Packages names the source directly; or use the git tag the Release created:
+
+```bash
+docker image inspect forgejo.subversive.link/subversive/sable:0.9 --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'
+git checkout v0.9
+```
 
 ### What it needs configured
 
@@ -178,39 +180,6 @@ Also: Actions enabled for the repository, and a runner registered with the `dock
 
 Publishing under a different name means editing the `tags:`/`labels:` blocks, the `username:`,
 and `IMAGE` in `release.yml` and `build.yml`.
-
-## Using a release
-
-```bash
-docker pull forgejo.subversive.link/subversive/sable:0.9
-```
-
-In `compose.yaml`, replacing `build: .` with
-`image: forgejo.subversive.link/subversive/sable:0.9` pins a host to that release. Pin the
-version rather than `latest`, so a `docker compose pull` cannot move you unintentionally.
-
-Confirm what is running:
-
-```bash
-curl -fsS https://sable.example.org/healthz    # {"version":"0.9", ...}
-```
-
-…or ask it in chat with `!version`. To get from an image back to its source, the workflow stamps
-the commit in:
-
-```bash
-docker image inspect forgejo.subversive.link/subversive/sable:0.9 --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'
-```
-
-Or go the other way: every image is also tagged with the commit it was built from, so the tag
-list in Packages tells you the source directly.
-
-```bash
-docker pull forgejo.subversive.link/subversive/sable:0937a9479cccec9ea4375de1621eb5e124d2c009
-git show 0937a9479cccec9ea4375de1621eb5e124d2c009
-```
-
-Or use the git tag the Release created: `git checkout v0.9`.
 
 ## Variations you may want later
 

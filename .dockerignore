@@ -12,3 +12,12 @@ compose.yaml
 Dockerfile
 dist
 tests
+.claude
+.mypy_cache
+.ruff_cache
+.pre-commit-config.yaml
+.editorconfig
+docs
+Agents
+*.md
+!README.md

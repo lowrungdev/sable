@@ -21,14 +21,14 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Callable
+from collections.abc import Callable
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 log = logging.getLogger(__name__)
 
 
-class BodyTooLarge(Exception):
+class BodyTooLarge(Exception):  # noqa: N818 - public name, read as a condition rather than an error
     """Raised from ``receive()`` when a streamed body passes its cap.
 
     Deliberately an ``Exception`` and not a ``ValueError`` or an ``HTTPException``:
@@ -61,7 +61,10 @@ class BodyLimitMiddleware:
         if declared is not None and declared > cap:
             log.warning(
                 "refused %s %s: Content-Length %d is over the %d byte cap",
-                scope["method"], scope["path"], declared, cap,
+                scope["method"],
+                scope["path"],
+                declared,
+                cap,
             )
             await _too_large(send, cap)
             return
@@ -89,7 +92,9 @@ class BodyLimitMiddleware:
         except BodyTooLarge:
             log.warning(
                 "refused %s %s: the body streamed past the %d byte cap",
-                scope["method"], scope["path"], cap,
+                scope["method"],
+                scope["path"],
+                cap,
             )
             if started:
                 # Cannot happen for a handler that reads before it answers; if it

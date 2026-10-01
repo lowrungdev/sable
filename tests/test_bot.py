@@ -5,10 +5,10 @@ import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-import pytest
-
 import httpx
+import pytest
 import respx
+
 from conftest import (
     ACTOR_SHAPES,
     BACKEND,
@@ -24,7 +24,6 @@ from conftest import (
     make_config,
     message_payload,
 )
-
 from sable.bot import Bot, now
 from sable.commands import Context
 from sable.config import LLMConfig
@@ -56,7 +55,8 @@ async def test_help_lists_the_commands(bot: Bot) -> None:
     route = message_route()
     await bot.handle(event("!help"))
     body = sent(route)[0]["message"]
-    assert "`!ping`" in body and "`!ai <question>`" in body
+    assert "`!ping`" in body
+    assert "`!ai <question>`" in body
     assert "@sable" in body
 
 
@@ -65,7 +65,8 @@ async def test_help_for_one_command(bot: Bot) -> None:
     route = message_route()
     await bot.handle(event("!help ai"))
     body = sent(route)[0]["message"]
-    assert "**!ai**" in body and "Usage: `!ai <question>`" in body
+    assert "**!ai**" in body
+    assert "Usage: `!ai <question>`" in body
 
 
 @respx.mock
@@ -93,7 +94,7 @@ async def test_unknown_command_hints(bot: Bot) -> None:
 @respx.mock
 async def test_unknown_command_can_stay_silent(llm: FakeLLM) -> None:
     route = message_route()
-    bot = Bot(make_config(unknown_command_hint=False), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(unknown_command_hint=False), llm=llm)
     try:
         await bot.handle(event("!nope"))
     finally:
@@ -104,9 +105,7 @@ async def test_unknown_command_can_stay_silent(llm: FakeLLM) -> None:
 @respx.mock
 async def test_messages_from_bots_are_ignored(bot: Bot) -> None:
     route = message_route()
-    await bot.handle(
-        event("!ping", actor_id="bots/bot-abc", actor_type="bots")
-    )
+    await bot.handle(event("!ping", actor_id="bots/bot-abc", actor_type="bots"))
     assert not route.called
 
 
@@ -161,7 +160,7 @@ async def test_plain_chatter_is_ignored(bot: Bot, llm: FakeLLM) -> None:
 @respx.mock
 async def test_an_ai_room_answers_everything(llm: FakeLLM) -> None:
     route = message_route()
-    bot = Bot(make_config(ai_rooms=["*"]), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(ai_rooms=["*"]), llm=llm)
     try:
         await bot.handle(event("no mention needed"))
     finally:
@@ -172,7 +171,7 @@ async def test_an_ai_room_answers_everything(llm: FakeLLM) -> None:
 @respx.mock
 async def test_ai_rooms_can_be_listed_by_token(llm: FakeLLM) -> None:
     route = message_route()
-    bot = Bot(make_config(ai_rooms=["other-room"]), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(ai_rooms=["other-room"]), llm=llm)
     try:
         await bot.handle(event("no mention needed"))
     finally:
@@ -206,7 +205,7 @@ async def test_history_is_threaded_through_and_can_be_reset(bot: Bot, llm: FakeL
 @respx.mock
 async def test_the_model_is_only_asked_when_configured(llm: FakeLLM) -> None:
     route = message_route()
-    bot = Bot(make_config(llm=LLMConfig()), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(llm=LLMConfig()), llm=llm)
     try:
         await bot.handle(event("@sable hello"))
     finally:
@@ -218,7 +217,7 @@ async def test_the_model_is_only_asked_when_configured(llm: FakeLLM) -> None:
 @respx.mock
 async def test_a_model_failure_is_reported_in_the_room(bot: Bot) -> None:
     route = message_route()
-    bot._llm = FakeLLM(error=LLMError("the model exploded"))  # type: ignore[assignment]
+    bot._llm = FakeLLM(error=LLMError("the model exploded"))
     await bot.handle(event("@sable hello"))
     assert sent(route)[0]["message"].startswith("⚠️")
     assert "exploded" in sent(route)[0]["message"]
@@ -229,7 +228,7 @@ async def test_errors_can_be_kept_out_of_the_room(llm: FakeLLM) -> None:
     route = message_route()
     bot = Bot(
         make_config(report_errors=False),
-        llm=FakeLLM(error=LLMError("boom")),  # type: ignore[arg-type]
+        llm=FakeLLM(error=LLMError("boom")),
     )
     try:
         await bot.handle(event("@sable hello"))
@@ -243,24 +242,23 @@ async def test_the_thinking_reaction_is_added_and_removed(llm: FakeLLM) -> None:
     message_route()
     add = respx.post(REACTION_URL).mock(return_value=httpx.Response(201, json={"ocs": {}}))
     remove = respx.delete(REACTION_URL).mock(return_value=httpx.Response(200, json={"ocs": {}}))
-    bot = Bot(make_config(thinking_reaction="👀"), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(thinking_reaction="👀"), llm=llm)
     try:
         await bot.handle(event("@sable hello", message_id=100))
     finally:
         await bot.aclose()
-    assert add.called and remove.called
+    assert add.called
+    assert remove.called
 
 
 @respx.mock
 async def test_the_reaction_is_removed_even_when_the_model_fails(llm: FakeLLM) -> None:
     message_route()
     respx.post(REACTION_URL).mock(return_value=httpx.Response(201, json={"ocs": {}}))
-    remove = respx.delete(REACTION_URL).mock(
-        return_value=httpx.Response(200, json={"ocs": {}})
-    )
+    remove = respx.delete(REACTION_URL).mock(return_value=httpx.Response(200, json={"ocs": {}}))
     bot = Bot(
         make_config(thinking_reaction="👀"),
-        llm=FakeLLM(error=LLMError("boom")),  # type: ignore[arg-type]
+        llm=FakeLLM(error=LLMError("boom")),
     )
     try:
         await bot.handle(event("@sable hello", message_id=100))
@@ -272,7 +270,7 @@ async def test_the_reaction_is_removed_even_when_the_model_fails(llm: FakeLLM) -
 @respx.mock
 async def test_replies_can_thread_under_the_question(llm: FakeLLM) -> None:
     route = message_route()
-    bot = Bot(make_config(reply_as_reply=True), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(reply_as_reply=True), llm=llm)
     try:
         await bot.handle(event("!ping", message_id=77))
     finally:
@@ -283,7 +281,7 @@ async def test_replies_can_thread_under_the_question(llm: FakeLLM) -> None:
 @respx.mock
 async def test_a_custom_prefix_is_honoured(llm: FakeLLM) -> None:
     route = message_route()
-    bot = Bot(make_config(command_prefix="/"), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(command_prefix="/"), llm=llm)
     try:
         await bot.handle(event("/ping"))
         await bot.handle(event("!ping", message_id=101))
@@ -313,7 +311,9 @@ async def test_whoami_describes_the_sender(bot: Bot) -> None:
     route = message_route()
     await bot.handle(event("!whoami"))
     body = sent(route)[0]["message"]
-    assert "Alice" in body and "users/alice" in body and ROOM in body
+    assert "Alice" in body
+    assert "users/alice" in body
+    assert ROOM in body
 
 
 @respx.mock
@@ -333,7 +333,7 @@ async def test_an_unreachable_nextcloud_does_not_crash_the_handler(bot: Bot) -> 
 @respx.mock
 async def test_an_unreachable_nextcloud_does_not_crash_the_error_path(llm: FakeLLM) -> None:
     respx.post(MESSAGE_URL).mock(side_effect=httpx.ConnectError("refused"))
-    bot = Bot(make_config(), llm=FakeLLM(error=LLMError("boom")))  # type: ignore[arg-type]
+    bot = Bot(make_config(), llm=FakeLLM(error=LLMError("boom")))
     try:
         await bot.handle(event("@sable hello"))
     finally:
@@ -374,9 +374,7 @@ def context_route(
 
 
 @respx.mock
-async def test_reacting_with_the_ask_emoji_answers_that_message(
-    bot: Bot, llm: FakeLLM
-) -> None:
+async def test_reacting_with_the_ask_emoji_answers_that_message(bot: Bot, llm: FakeLLM) -> None:
     from conftest import reaction_event
 
     route = message_route()
@@ -390,19 +388,21 @@ async def test_reacting_with_the_ask_emoji_answers_that_message(
     assert sent(route)[0]["replyTo"] == 100
     prompt = llm.last_prompt
     assert "what is the capital of Peru?" in prompt
-    assert "Bob" in prompt and "Alice" in prompt
+    assert "Bob" in prompt
+    assert "Alice" in prompt
 
 
 @respx.mock
-async def test_the_message_is_picked_out_of_its_neighbours_by_id(
-    bot: Bot, llm: FakeLLM
-) -> None:
+async def test_the_message_is_picked_out_of_its_neighbours_by_id(bot: Bot, llm: FakeLLM) -> None:
     from conftest import reaction_event
 
     message_route()
     context_route(
         "the one I want",
-        extra=[message_payload("a neighbour", message_id=99), message_payload("another", message_id=101)],
+        extra=[
+            message_payload("a neighbour", message_id=99),
+            message_payload("another", message_id=101),
+        ],
     )
     await bot.handle(reaction_event(ASK, message_id=100))
     assert "the one I want" in llm.last_prompt
@@ -410,9 +410,7 @@ async def test_the_message_is_picked_out_of_its_neighbours_by_id(
 
 
 @respx.mock
-async def test_the_ask_emoji_matches_without_its_variation_selector(
-    bot: Bot, llm: FakeLLM
-) -> None:
+async def test_the_ask_emoji_matches_without_its_variation_selector(bot: Bot, llm: FakeLLM) -> None:
     from conftest import reaction_event
 
     message_route()
@@ -503,9 +501,7 @@ async def test_a_message_with_no_text_says_so(bot: Bot, llm: FakeLLM) -> None:
 
 
 @respx.mock
-async def test_a_failed_fetch_is_reported_and_logged(
-    bot: Bot, llm: FakeLLM, caplog
-) -> None:
+async def test_a_failed_fetch_is_reported_and_logged(bot: Bot, llm: FakeLLM, caplog) -> None:
     from conftest import reaction_event
 
     route = message_route()
@@ -525,7 +521,7 @@ async def test_a_failed_fetch_stays_quiet_when_errors_are_not_reported(
 
     route = message_route()
     respx.get(f"{TALK}/chat/{ROOM}/100/context").mock(return_value=httpx.Response(500))
-    bot = Bot(make_config(report_errors=False), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(report_errors=False), llm=llm)
     try:
         await bot.handle(reaction_event(ASK, message_id=100))
     finally:
@@ -549,7 +545,7 @@ async def test_nothing_is_fetched_when_the_feature_is_off(llm: FakeLLM) -> None:
 
     route = message_route()
     fetch = context_route("hello")
-    bot = Bot(make_config(ask_reaction=""), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(ask_reaction=""), llm=llm)
     try:
         await bot.handle(reaction_event(ASK, message_id=100))
     finally:
@@ -565,7 +561,7 @@ async def test_the_ask_emoji_is_ignored_with_no_model_configured(llm: FakeLLM) -
 
     route = message_route()
     fetch = context_route("hello")
-    bot = Bot(make_config(llm=LLMConfig()), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(llm=LLMConfig()), llm=llm)
     try:
         await bot.handle(reaction_event(ASK, message_id=100))
     finally:
@@ -581,7 +577,7 @@ async def test_a_model_failure_on_an_ask_is_reported(llm: FakeLLM) -> None:
 
     route = message_route()
     context_route("hello")
-    bot = Bot(make_config(), llm=FakeLLM(error=LLMError("boom")))  # type: ignore[arg-type]
+    bot = Bot(make_config(), llm=FakeLLM(error=LLMError("boom")))
     try:
         await bot.handle(reaction_event(ASK, message_id=100))
     finally:
@@ -626,7 +622,7 @@ async def test_the_check_never_logs_the_password(bot: Bot, caplog) -> None:
 async def test_the_canonical_user_id_replaces_the_login_name(llm: FakeLLM) -> None:
     """Nextcloud accepts a login name or an email address that is not the user id,
     and it is the id that appears as actorId on everything we post."""
-    bot = Bot(make_config(nextcloud_user="sable@example.org"), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(nextcloud_user="sable@example.org"), llm=llm)
     try:
         assert bot.user_id == "sable@example.org"
         respx.get(USER_URL).mock(return_value=httpx.Response(200, json=whoami_body("sable")))
@@ -639,9 +635,7 @@ async def test_the_canonical_user_id_replaces_the_login_name(llm: FakeLLM) -> No
 
 
 @respx.mock
-async def test_rejected_credentials_are_an_error_that_names_the_settings(
-    bot: Bot, caplog
-) -> None:
+async def test_rejected_credentials_are_an_error_that_names_the_settings(bot: Bot, caplog) -> None:
     respx.get(USER_URL).mock(return_value=httpx.Response(401, text="not logged in"))
     with caplog.at_level(logging.INFO):
         assert await bot.check_nextcloud() is False
@@ -774,9 +768,7 @@ async def test_our_own_answer_can_be_asked_about(bot: Bot, llm: FakeLLM) -> None
 
 
 @respx.mock
-async def test_a_real_mention_goes_to_the_model_and_is_stripped(
-    bot: Bot, llm: FakeLLM
-) -> None:
+async def test_a_real_mention_goes_to_the_model_and_is_stripped(bot: Bot, llm: FakeLLM) -> None:
     from conftest import mention
 
     route = message_route()
@@ -839,18 +831,20 @@ async def test_a_command_after_a_mention_still_runs(bot: Bot) -> None:
     from conftest import mention
 
     route = message_route()
-    await bot.handle(
-        event("{mention-user1} !ping", parameters=mention("mention-user1", user=USER))
-    )
+    await bot.handle(event("{mention-user1} !ping", parameters=mention("mention-user1", user=USER)))
     assert sent(route)[0]["message"] == "pong 🏓"
 
 
 @respx.mock
 async def test_a_thinking_reaction_is_added_and_taken_back(llm: FakeLLM) -> None:
     message_route()
-    added = respx.post(f"{TALK}/reaction/{ROOM}/100").mock(return_value=httpx.Response(201, json={}))
-    removed = respx.delete(f"{TALK}/reaction/{ROOM}/100").mock(return_value=httpx.Response(200, json={}))
-    bot = Bot(make_config(thinking_reaction="🤔"), llm=llm)  # type: ignore[arg-type]
+    added = respx.post(f"{TALK}/reaction/{ROOM}/100").mock(
+        return_value=httpx.Response(201, json={})
+    )
+    removed = respx.delete(f"{TALK}/reaction/{ROOM}/100").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    bot = Bot(make_config(thinking_reaction="🤔"), llm=llm)
     try:
         await bot.handle(event("@sable hi", message_id=100))
     finally:
@@ -869,7 +863,7 @@ async def test_a_conversation_name_never_makes_an_ai_room(llm: FakeLLM) -> None:
     """Anybody who can invite the account can name their conversation after yours,
     so a name in the list matches nothing (the config refuses it outright)."""
     route = message_route()
-    bot = Bot(make_config(ai_rooms=["Team chat"]), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(ai_rooms=["Team chat"]), llm=llm)
     try:
         await bot.handle(event("no mention needed"))
     finally:
@@ -881,7 +875,7 @@ async def test_a_conversation_name_never_makes_an_ai_room(llm: FakeLLM) -> None:
 @respx.mock
 async def test_an_ai_room_is_matched_by_its_token(llm: FakeLLM) -> None:
     route = message_route()
-    bot = Bot(make_config(ai_rooms=[ROOM]), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(ai_rooms=[ROOM]), llm=llm)
     try:
         await bot.handle(event("no mention needed"))
     finally:
@@ -892,7 +886,7 @@ async def test_an_ai_room_is_matched_by_its_token(llm: FakeLLM) -> None:
 @respx.mock
 async def test_a_star_means_every_allowed_room_only(llm: FakeLLM) -> None:
     route = message_route()
-    bot = Bot(make_config(ai_rooms=["*"], allowed_rooms=["s7xk29qp"]), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(ai_rooms=["*"], allowed_rooms=["s7xk29qp"]), llm=llm)
     try:
         await bot.handle(event("no mention needed"))
     finally:
@@ -920,7 +914,7 @@ async def test_the_ignored_message_log_names_the_room_both_ways(bot: Bot, caplog
 @pytest.mark.parametrize("entry", ["alice", "users/alice", "Alice", "  ALICE  "])
 async def test_an_ignored_user_gets_no_reply(llm: FakeLLM, entry: str) -> None:
     route = message_route()
-    bot = Bot(make_config(ignore_users=[entry]), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(ignore_users=[entry]), llm=llm)
     try:
         await bot.handle(event("!ping", actor_id="users/alice", actor_name="Alice"))
         await bot.handle(event("@sable hello", message_id=2, actor_id="users/alice"))
@@ -933,12 +927,10 @@ async def test_an_ignored_user_gets_no_reply(llm: FakeLLM, entry: str) -> None:
 @respx.mock
 async def test_ignoring_one_person_leaves_everyone_else_alone(llm: FakeLLM) -> None:
     route = message_route()
-    bot = Bot(make_config(ignore_users=["alice"]), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(ignore_users=["alice"]), llm=llm)
     try:
         await bot.handle(event("!ping", actor_id="users/alice", actor_name="Alice"))
-        await bot.handle(
-            event("!ping", message_id=2, actor_id="users/bob", actor_name="Bob")
-        )
+        await bot.handle(event("!ping", message_id=2, actor_id="users/bob", actor_name="Bob"))
     finally:
         await bot.aclose()
     assert len(route.calls) == 1
@@ -952,7 +944,7 @@ async def test_an_ignored_users_messages_are_not_sent_to_the_model_by_a_reaction
 
     route = message_route()
     context_route("something private", actor_id="users/alice")
-    bot = Bot(make_config(ignore_users=["alice"]), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(ignore_users=["alice"]), llm=llm)
     try:
         # Ignore means ignore: their words never reach the model, not even when
         # somebody else asks about them.
@@ -970,7 +962,7 @@ async def test_a_reaction_from_an_ignored_user_does_nothing(llm: FakeLLM) -> Non
     from conftest import reaction_event
 
     route = message_route()
-    bot = Bot(make_config(ignore_users=["alice"]), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(ignore_users=["alice"]), llm=llm)
     try:
         await bot.handle(event("a question", message_id=100, actor_id="users/bob"))
         await bot.handle(reaction_event("⁉️", message_id=100, actor_id="users/alice"))
@@ -983,7 +975,7 @@ async def test_a_reaction_from_an_ignored_user_does_nothing(llm: FakeLLM) -> Non
 @respx.mock
 async def test_ignoring_a_guest(llm: FakeLLM) -> None:
     route = message_route()
-    bot = Bot(make_config(ignore_users=["guests/abc123"]), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(ignore_users=["guests/abc123"]), llm=llm)
     try:
         await bot.handle(event("!ping", actor_id="guests/abc123", actor_name="Guest"))
     finally:
@@ -994,7 +986,7 @@ async def test_ignoring_a_guest(llm: FakeLLM) -> None:
 @respx.mock
 async def test_the_ignore_list_is_logged_at_debug(llm: FakeLLM, caplog) -> None:
     message_route()
-    bot = Bot(make_config(ignore_users=["alice"]), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(ignore_users=["alice"]), llm=llm)
     try:
         with caplog.at_level(logging.DEBUG):
             await bot.handle(event("!ping", actor_id="users/alice", actor_name="Alice"))
@@ -1023,7 +1015,7 @@ def context_for(bot: Bot, event) -> Context:
 def admin_bot(llm: FakeLLM) -> Bot:
     """A bot where !reset (and so !forget) belongs to maser alone."""
     config = make_config(admin_commands=["reset"], admin_users=["maser"])
-    return Bot(config, llm=llm)  # type: ignore[arg-type]
+    return Bot(config, llm=llm)
 
 
 @respx.mock
@@ -1105,7 +1097,7 @@ async def test_a_star_leaves_only_the_exceptions_in_help(llm: FakeLLM) -> None:
     config = make_config(
         admin_commands=["*"], normal_commands=["help", "ping"], admin_users=["maser"]
     )
-    bot = Bot(config, llm=llm)  # type: ignore[arg-type]
+    bot = Bot(config, llm=llm)
     try:
         await bot.handle(event("!help", actor_id="users/alice"))
     finally:
@@ -1121,7 +1113,7 @@ async def test_restricting_ai_leaves_it_out_of_the_help_footer(llm: FakeLLM) -> 
     """A mention still reaches the model, so the footer keeps that half."""
     route = message_route()
     config = make_config(admin_commands=["ai"], admin_users=["maser"])
-    bot = Bot(config, llm=llm)  # type: ignore[arg-type]
+    bot = Bot(config, llm=llm)
     try:
         await bot.handle(event("!help", actor_id="users/alice"))
     finally:
@@ -1252,9 +1244,7 @@ async def test_an_actor_with_no_user_id_can_still_run_an_open_command(
 
 @respx.mock
 @pytest.mark.parametrize("shape", BOT_SHAPES, ids=BOT_IDS)
-async def test_a_bot_actor_is_ignored_entirely(
-    bot: Bot, llm: FakeLLM, shape: ActorShape
-) -> None:
+async def test_a_bot_actor_is_ignored_entirely(bot: Bot, llm: FakeLLM, shape: ActorShape) -> None:
     """Neither a command nor a mention from another bot - or from ourselves - gets
     an answer. Answering one is how two bots keep each other busy until somebody
     notices."""
@@ -1338,7 +1328,7 @@ async def test_an_ignore_entry_matches_a_bare_id_a_full_id_or_a_display_name(
     """All three, for every kind of actor: an operator writes down whichever form
     they have in front of them, and the log prints the full actor id."""
     route = message_route()
-    bot = Bot(make_config(ignore_users=[ignore_entry(shape, kind)]), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(ignore_users=[ignore_entry(shape, kind)]), llm=llm)
     try:
         await bot.handle(actor_event(shape, "!ping"))
     finally:
@@ -1354,7 +1344,7 @@ async def test_ignoring_by_display_name_stops_working_when_they_rename_themselve
     name, so an ignore list written against one lapses the moment they change it.
     The id form below keeps working."""
     route = message_route()
-    bot = Bot(make_config(ignore_users=["Guest"]), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(ignore_users=["Guest"]), llm=llm)
     try:
         await bot.handle(event("!ping", actor_id="guests/7f3c9a2b", actor_name="Guest"))
         await bot.handle(
@@ -1368,7 +1358,7 @@ async def test_ignoring_by_display_name_stops_working_when_they_rename_themselve
 @respx.mock
 async def test_ignoring_a_guest_by_hash_survives_a_rename(llm: FakeLLM) -> None:
     route = message_route()
-    bot = Bot(make_config(ignore_users=["guests/7f3c9a2b"]), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(ignore_users=["guests/7f3c9a2b"]), llm=llm)
     try:
         await bot.handle(event("!ping", actor_id="guests/7f3c9a2b", actor_name="Guest"))
         await bot.handle(
@@ -1385,9 +1375,7 @@ async def test_ignoring_a_guest_by_hash_survives_a_rename(llm: FakeLLM) -> None:
 
 
 @respx.mock
-@pytest.mark.parametrize(
-    ("label", "token"), VALID_TOKENS, ids=[label for label, _ in VALID_TOKENS]
-)
+@pytest.mark.parametrize(("label", "token"), VALID_TOKENS, ids=[label for label, _ in VALID_TOKENS])
 async def test_a_command_is_answered_in_a_conversation_of_any_token_shape(
     bot: Bot, label: str, token: str
 ) -> None:
@@ -1405,7 +1393,7 @@ async def test_an_ai_room_listed_by_a_token_of_its_own(llm: FakeLLM) -> None:
     just as well."""
     token = "1234567890"
     route = message_route(token)
-    bot = Bot(make_config(ai_rooms=[token]), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(ai_rooms=[token]), llm=llm)
     try:
         await bot.handle(event("no mention needed", room=token))
     finally:
@@ -1437,7 +1425,7 @@ async def test_history_is_kept_per_conversation(bot: Bot, llm: FakeLLM) -> None:
 def ask_admin_bot(llm: FakeLLM, **overrides) -> Bot:
     """A bot where the ask reaction belongs to maser alone."""
     config = make_config(ask_admins_only=True, admin_users=[ADMIN], **overrides)
-    return Bot(config, llm=llm)  # type: ignore[arg-type]
+    return Bot(config, llm=llm)
 
 
 @respx.mock
@@ -1449,9 +1437,7 @@ async def test_an_admin_can_still_trigger_the_restricted_reaction(llm: FakeLLM) 
     bot = ask_admin_bot(llm)
     try:
         await bot.handle(
-            reaction_event(
-                ASK, message_id=100, actor_id=f"users/{ADMIN}", actor_name=ADMIN
-            )
+            reaction_event(ASK, message_id=100, actor_id=f"users/{ADMIN}", actor_name=ADMIN)
         )
     finally:
         await bot.aclose()
@@ -1488,9 +1474,7 @@ async def test_an_actor_with_no_user_id_cannot_trigger_the_restricted_reaction(
     bot = ask_admin_bot(llm)
     try:
         await bot.handle(event("something of mine", message_id=100, actor_name="Bob"))
-        await bot.handle(
-            actor_reaction_event(shape, ASK, message_id=100, actor_name=ADMIN)
-        )
+        await bot.handle(actor_reaction_event(shape, ASK, message_id=100, actor_name=ADMIN))
     finally:
         await bot.aclose()
     assert not llm.calls
@@ -1498,9 +1482,7 @@ async def test_an_actor_with_no_user_id_cannot_trigger_the_restricted_reaction(
 
 
 @respx.mock
-async def test_a_refused_reaction_is_logged_with_who_was_refused(
-    llm: FakeLLM, caplog
-) -> None:
+async def test_a_refused_reaction_is_logged_with_who_was_refused(llm: FakeLLM, caplog) -> None:
     """The room hears nothing, so the log is the only place the refusal exists -
     the same trade a refused command makes, minus the reply."""
     from conftest import reaction_event
@@ -1511,9 +1493,7 @@ async def test_a_refused_reaction_is_logged_with_who_was_refused(
         await bot.handle(event("something of mine", message_id=100, actor_name="Bob"))
         with caplog.at_level(logging.INFO):
             await bot.handle(
-                reaction_event(
-                    ASK, message_id=100, actor_id="users/alice", actor_name="Alice"
-                )
+                reaction_event(ASK, message_id=100, actor_id="users/alice", actor_name="Alice")
             )
     finally:
         await bot.aclose()
@@ -1564,9 +1544,7 @@ async def test_restricting_the_reaction_leaves_the_mention_path_alone(
 def application_admin_event(text: str = "!reset"):
     """A bot identity posting under the administrator's user id - is_bot and an
     admin user id at once, which is the whole difficulty."""
-    return event(
-        text, actor_id=f"users/{ADMIN}", actor_name=ADMIN, actor_type="bots"
-    )
+    return event(text, actor_id=f"users/{ADMIN}", actor_name=ADMIN, actor_type="bots")
 
 
 async def test_the_admin_check_refuses_a_bot_actor_with_an_admin_user_id(
@@ -1644,9 +1622,7 @@ async def test_ctx_is_admin_refuses_a_bot_actor_wearing_an_admin_user_id(llm: Fa
     bot = admin_bot(llm)
     try:
         human = event("!help", actor_id="users/maser", actor_name="maser")
-        robot = event(
-            "!help", actor_id="users/maser", actor_name="maser", actor_type="bots"
-        )
+        robot = event("!help", actor_id="users/maser", actor_name="maser", actor_type="bots")
         # The config alone would have said yes to both: same user id.
         assert bot.config.is_admin_user("maser") is True
         assert context_for(bot, human).is_admin is True
@@ -1664,7 +1640,8 @@ def test_the_model_is_told_what_day_it_is() -> None:
 
 
 def test_with_no_zone_configured_the_host_clock_is_used() -> None:
-    assert now() and "(" in now()
+    assert now()
+    assert "(" in now()
 
 
 # --------------------------------------------------------------------------- #
@@ -1675,7 +1652,7 @@ def test_with_no_zone_configured_the_host_clock_is_used() -> None:
 @respx.mock
 async def test_triggers_past_the_limit_are_ignored_silently(llm: FakeLLM, caplog) -> None:
     route = message_route()
-    bot = Bot(make_config(rate_limit=3), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(rate_limit=3), llm=llm)
     try:
         with caplog.at_level(logging.INFO):
             for n in range(8):
@@ -1690,7 +1667,7 @@ async def test_triggers_past_the_limit_are_ignored_silently(llm: FakeLLM, caplog
 @respx.mock
 async def test_the_limit_is_per_person(llm: FakeLLM) -> None:
     route = message_route()
-    bot = Bot(make_config(rate_limit=1), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(rate_limit=1), llm=llm)
     try:
         await bot.handle(event("!ping", message_id=1))
         await bot.handle(event("!ping", message_id=2))
@@ -1703,7 +1680,7 @@ async def test_the_limit_is_per_person(llm: FakeLLM) -> None:
 @respx.mock
 async def test_chatter_that_is_not_a_trigger_does_not_count(llm: FakeLLM) -> None:
     route = message_route()
-    bot = Bot(make_config(rate_limit=1), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(rate_limit=1), llm=llm)
     try:
         for n in range(5):
             await bot.handle(event("just talking", message_id=10 + n))
@@ -1719,7 +1696,7 @@ async def test_mentions_and_reactions_count_too(llm: FakeLLM) -> None:
 
     route = message_route()
     context_route("hello")
-    bot = Bot(make_config(rate_limit=2), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(rate_limit=2), llm=llm)
     try:
         await bot.handle(event("@sable one", message_id=1))
         await bot.handle(reaction_event(ASK, message_id=100, system_id=5001))
@@ -1733,7 +1710,7 @@ async def test_mentions_and_reactions_count_too(llm: FakeLLM) -> None:
 @respx.mock
 async def test_a_limit_of_zero_means_none(llm: FakeLLM) -> None:
     route = message_route()
-    bot = Bot(make_config(rate_limit=0), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(rate_limit=0), llm=llm)
     try:
         for n in range(50):
             await bot.handle(event("!ping", message_id=300 + n))
@@ -1745,7 +1722,7 @@ async def test_a_limit_of_zero_means_none(llm: FakeLLM) -> None:
 @respx.mock
 async def test_administrators_are_not_exempt(llm: FakeLLM) -> None:
     route = message_route()
-    bot = Bot(make_config(rate_limit=1, admin_users=["alice"]), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(rate_limit=1, admin_users=["alice"]), llm=llm)
     try:
         await bot.handle(event("!ping", message_id=1))
         await bot.handle(event("!ping", message_id=2))
@@ -1760,7 +1737,7 @@ async def test_the_limiter_uses_an_injectable_clock(llm: FakeLLM) -> None:
 
     route = message_route()
     now = [0.0]
-    bot = Bot(make_config(rate_limit=1), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(rate_limit=1), llm=llm)
     bot._limiter = RateLimiter(1, clock=lambda: now[0])
     try:
         await bot.handle(event("!ping", message_id=1))
@@ -1781,7 +1758,7 @@ REFUSAL = "You are not allowed to use the assistant."
 
 def users_bot(llm: FakeLLM, **overrides) -> Bot:
     config = make_config(llm_users=["bob"], admin_users=[ADMIN], ai_rooms=["*"], **overrides)
-    return Bot(config, llm=llm)  # type: ignore[arg-type]
+    return Bot(config, llm=llm)
 
 
 @respx.mock
@@ -1820,8 +1797,10 @@ async def test_plain_ai_room_messages_from_somebody_not_listed_get_silence(
             await bot.handle(event("no mention needed", actor_id="users/alice"))
     finally:
         await bot.aclose()
-    assert not route.called and not llm.calls
-    assert "SABLE_LLM_USERS" in caplog.text and "Alice (users/alice)" in caplog.text
+    assert not route.called
+    assert not llm.calls
+    assert "SABLE_LLM_USERS" in caplog.text
+    assert "Alice (users/alice)" in caplog.text
 
 
 @respx.mock
@@ -1835,7 +1814,8 @@ async def test_the_ask_reaction_from_somebody_not_listed_gets_silence(llm: FakeL
         await bot.handle(reaction_event(ASK, message_id=100, actor_id="users/alice"))
     finally:
         await bot.aclose()
-    assert not route.called and not llm.calls
+    assert not route.called
+    assert not llm.calls
     assert not fetch.called, "nothing is read back for somebody who may not ask"
 
 
@@ -1903,13 +1883,14 @@ async def test_everybody_may_ask_while_the_list_is_empty(bot: Bot, llm: FakeLLM)
 @respx.mock
 async def test_an_event_from_a_room_that_is_not_allowed_is_dropped(llm: FakeLLM) -> None:
     route = message_route()
-    bot = Bot(make_config(allowed_rooms=["s7xk29qp"]), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(allowed_rooms=["s7xk29qp"]), llm=llm)
     try:
         await bot.handle(event("!ping"))
         await bot.handle(event("@sable hi", message_id=2))
     finally:
         await bot.aclose()
-    assert not route.called and not llm.calls
+    assert not route.called
+    assert not llm.calls
 
 
 @respx.mock
@@ -1918,12 +1899,13 @@ async def test_the_ask_reaction_is_dropped_in_a_room_that_is_not_allowed(llm: Fa
 
     route = message_route()
     fetch = context_route("hello")
-    bot = Bot(make_config(allowed_rooms=["s7xk29qp"]), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(allowed_rooms=["s7xk29qp"]), llm=llm)
     try:
         await bot.handle(reaction_event(ASK, message_id=100))
     finally:
         await bot.aclose()
-    assert not fetch.called and not route.called
+    assert not fetch.called
+    assert not route.called
 
 
 @respx.mock
@@ -1932,12 +1914,13 @@ async def test_the_ask_reaction_respects_the_ignore_list(llm: FakeLLM) -> None:
 
     route = message_route()
     fetch = context_route("hello")
-    bot = Bot(make_config(ignore_users=["alice"]), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(ignore_users=["alice"]), llm=llm)
     try:
         await bot.handle(reaction_event(ASK, message_id=100, actor_id="users/alice"))
     finally:
         await bot.aclose()
-    assert not fetch.called and not route.called
+    assert not fetch.called
+    assert not route.called
 
 
 # --------------------------------------------------------------------------- #
@@ -1962,7 +1945,7 @@ def owui_config(**overrides):
 @respx.mock
 async def test_the_model_gets_tools_only_in_the_rooms_named(llm: FakeLLM) -> None:
     message_route()
-    bot = Bot(owui_config(tool_rooms=[ROOM]), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(owui_config(tool_rooms=[ROOM]), llm=llm)
     try:
         await bot.handle(event("@sable hi", message_id=1))
         message_route("s7xk29qp")
@@ -1975,7 +1958,7 @@ async def test_the_model_gets_tools_only_in_the_rooms_named(llm: FakeLLM) -> Non
 @respx.mock
 async def test_with_no_tool_rooms_tools_are_off_everywhere(llm: FakeLLM) -> None:
     message_route()
-    bot = Bot(owui_config(), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(owui_config(), llm=llm)
     try:
         await bot.handle(event("@sable hi"))
     finally:
@@ -1986,7 +1969,7 @@ async def test_with_no_tool_rooms_tools_are_off_everywhere(llm: FakeLLM) -> None
 @respx.mock
 async def test_a_star_gives_every_room_tools(llm: FakeLLM) -> None:
     message_route()
-    bot = Bot(owui_config(tool_rooms=["*"]), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(owui_config(tool_rooms=["*"]), llm=llm)
     try:
         await bot.handle(event("@sable hi"))
     finally:
@@ -2000,7 +1983,7 @@ async def test_the_ask_reaction_uses_the_room_of_the_reaction(llm: FakeLLM) -> N
 
     message_route()
     context_route("hello")
-    bot = Bot(owui_config(tool_rooms=[ROOM]), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(owui_config(tool_rooms=[ROOM]), llm=llm)
     try:
         await bot.handle(reaction_event(ASK, message_id=100))
     finally:
@@ -2025,7 +2008,7 @@ async def test_a_model_answer_cannot_mention_everybody() -> None:
     from sable.mentions import ZWSP
 
     route = message_route()
-    bot = Bot(make_config(), llm=FakeLLM(reply='@all look @"group/admins" and @alice'))  # type: ignore[arg-type]
+    bot = Bot(make_config(), llm=FakeLLM(reply='@all look @"group/admins" and @alice'))
     try:
         await bot.handle(event("@sable say it"))
     finally:
@@ -2039,7 +2022,7 @@ async def test_an_error_report_cannot_mention_everybody() -> None:
     from sable.mentions import ZWSP
 
     route = message_route()
-    bot = Bot(make_config(), llm=FakeLLM(error=LLMError("backend said @all")))  # type: ignore[arg-type]
+    bot = Bot(make_config(), llm=FakeLLM(error=LLMError("backend said @all")))
     try:
         await bot.handle(event("@sable hi"))
     finally:
@@ -2064,28 +2047,28 @@ def _cases(bot_user: str = USER):
 
     ask = make_config().ask_reaction
     return [
-        ("prefix command", dict(), event("!ping"), True),
-        ("textual mention", dict(), event(f"@{bot_user} hi"), True),
-        ("leading mention", dict(), event(f"{bot_user}: hi"), True),
+        ("prefix command", {}, event("!ping"), True),
+        ("textual mention", {}, event(f"@{bot_user} hi"), True),
+        ("leading mention", {}, event(f"{bot_user}: hi"), True),
         (
             "mention by parameter",
-            dict(),
+            {},
             event("{mention-user1} hi", parameters=mention()),
             True,
         ),
-        ("ai command", dict(), event("!ai what is 2+2"), True),
-        ("plain chatter", dict(), event("lunch?"), False),
-        ("plain chatter in an ai room", dict(ai_rooms=[ROOM]), event("lunch?"), True),
-        ("blank message in an ai room", dict(ai_rooms=[ROOM]), event("   "), False),
-        ("ask reaction", dict(), reaction_event(ask), True),
-        ("ask reaction with the feature off", dict(ask_reaction=""), reaction_event("⁉️"), False),
-        ("other reaction", dict(), reaction_event("👍"), False),
-        ("ignored user", dict(ignore_users=["alice"]), event("!ping"), False),
-        ("ignored user's reaction", dict(ignore_users=["alice"]), reaction_event(ask), False),
-        ("ourselves", dict(), event("!ping", actor_id=f"users/{bot_user}"), False),
-        ("another bot", dict(), event("!ping", actor_id="bots/relay"), False),
-        ("a bot typed actor", dict(), event("!ping", actor_type="bots"), False),
-        ("disallowed room", dict(allowed_rooms=["zzzz9999"]), event("!ping"), False),
+        ("ai command", {}, event("!ai what is 2+2"), True),
+        ("plain chatter", {}, event("lunch?"), False),
+        ("plain chatter in an ai room", {"ai_rooms": [ROOM]}, event("lunch?"), True),
+        ("blank message in an ai room", {"ai_rooms": [ROOM]}, event("   "), False),
+        ("ask reaction", {}, reaction_event(ask), True),
+        ("ask reaction with the feature off", {"ask_reaction": ""}, reaction_event("⁉️"), False),
+        ("other reaction", {}, reaction_event("👍"), False),
+        ("ignored user", {"ignore_users": ["alice"]}, event("!ping"), False),
+        ("ignored user's reaction", {"ignore_users": ["alice"]}, reaction_event(ask), False),
+        ("ourselves", {}, event("!ping", actor_id=f"users/{bot_user}"), False),
+        ("another bot", {}, event("!ping", actor_id="bots/relay"), False),
+        ("a bot typed actor", {}, event("!ping", actor_type="bots"), False),
+        ("disallowed room", {"allowed_rooms": ["zzzz9999"]}, event("!ping"), False),
     ]
 
 
@@ -2093,15 +2076,15 @@ def _cases(bot_user: str = USER):
 async def test_would_handle_agrees_with_handle(label: str, llm: FakeLLM) -> None:
     case = next(c for c in _cases() if c[0] == label)
     _, overrides, ev, expected = case
-    bot = Bot(make_config(**overrides), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(**overrides), llm=llm)
     worked: list[str] = []
 
     async def spy(*args, **kwargs) -> None:
         worked.append("x")
 
-    bot._run_command = spy  # type: ignore[method-assign]
-    bot._run_llm_reply = spy  # type: ignore[method-assign]
-    bot._run_reaction_query = spy  # type: ignore[method-assign]
+    bot._run_command = spy
+    bot._run_llm_reply = spy
+    bot._run_reaction_query = spy
     try:
         assert bot.would_handle(ev) is expected
         await bot.handle(ev)
@@ -2113,7 +2096,7 @@ async def test_would_handle_agrees_with_handle(label: str, llm: FakeLLM) -> None
 async def test_would_handle_consumes_nothing(llm: FakeLLM) -> None:
     """No rate-limit token: asking is free, and the event can still be handled
     afterwards."""
-    bot = Bot(make_config(rate_limit=1), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(rate_limit=1), llm=llm)
     ev = event("!ping")
     try:
         assert all(bot.would_handle(ev) for _ in range(5))
@@ -2128,16 +2111,18 @@ async def test_would_handle_consumes_nothing(llm: FakeLLM) -> None:
 @respx.mock
 async def test_help_does_not_offer_the_model_to_who_may_not_use_it(llm: FakeLLM) -> None:
     route = message_route()
-    bot = Bot(make_config(llm_users=["bob"]), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(llm_users=["bob"]), llm=llm)
     try:
         await bot.handle(event("!help", actor_id="users/alice"))
         await bot.handle(event("!help", actor_id="users/bob", message_id=101))
     finally:
         await bot.aclose()
     for_alice, for_bob = (call["message"] for call in sent(route))
-    assert "!ai" not in for_alice and "Mention me" not in for_alice
+    assert "!ai" not in for_alice
+    assert "Mention me" not in for_alice
     assert "`!ping`" in for_alice
-    assert "`!ai <question>`" in for_bob and "Mention me" in for_bob
+    assert "`!ai <question>`" in for_bob
+    assert "Mention me" in for_bob
 
 
 @respx.mock
@@ -2152,7 +2137,7 @@ async def test_the_same_reaction_added_again_is_handled_again(bot: Bot) -> None:
     async def count(event_) -> None:
         handled.append(event_.message_id)
 
-    bot._run_reaction_query = count  # type: ignore[method-assign]
+    bot._run_reaction_query = count
     bot._ask_key = "\u2049"
     ask = reaction_event("\u2049\ufe0f", message_id=100)
     await bot.handle(ask)

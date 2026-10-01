@@ -16,99 +16,97 @@ assistant already in it.
 ## What it does
 
 **Commands.** A prefix router over a registry, `!` by default. It ships with `!help`, `!ping`,
-`!whoami`, `!ai`, `!reset` and `!version`, and a new one is a decorated async function
-that returns Markdown. This is the seam most people will use; the rest of the bot exists so that
+`!whoami`, `!ai`, `!reset` and `!version`, and a new one is a decorated async function that
+returns Markdown. This is the seam most people will use; the rest of the bot exists so that
 writing a command is boring.
 
 **An assistant.** Mention the account and it answers through any endpoint that speaks OpenAI's
 `/chat/completions` shape, keeping a short rolling history per conversation. React to a message
-with ⁉️ and it answers that message instead, threaded underneath it, reading the message back
-from Talk so it works on old ones too. Pointed at Open WebUI it can also use tools — search, MCP
-servers, whatever that instance offers — with Open WebUI running the loop, in the rooms you
-name.
+with ⁉️ and it answers that message instead, threaded underneath it. Pointed at Open WebUI it can
+also use tools — search, MCP servers, whatever that instance offers — with Open WebUI running the
+loop, in the rooms you name. [When it answers](configuration.md#when-does-the-assistant-answer) is
+in the configuration reference.
 
-Model-agnosticism here is a requirement rather than a nicety. The chat-completions shape is the
-one interface that OpenAI, Ollama, vLLM, llama.cpp, LiteLLM, OpenRouter, Groq and Together all
-speak, so talking it over plain HTTP instead of importing a vendor SDK means switching providers
-is two environment variables, self-hosting needs no code change, and one dependency does the
-work. Anything a particular provider wants that the common shape lacks goes in
-`SABLE_LLM_EXTRA_BODY` and is merged into the request body last.
+Model-agnosticism is a requirement rather than a nicety. The chat-completions shape is the one
+interface that OpenAI, Ollama, vLLM, llama.cpp, LiteLLM, OpenRouter, Groq and Together all speak,
+so talking it over plain HTTP instead of importing a vendor SDK means switching providers is two
+environment variables, self-hosting needs no code change, and one dependency does the work.
+Anything a particular provider wants that the common shape lacks goes in `SABLE_LLM_EXTRA_BODY`,
+merged into the request body last.
 
 **Alerting.** `POST /notify` with a bearer token puts a message in a conversation, optionally
-with a file attached. This is the one-way direction, into Talk: CI, an alertmanager, a cron job, a
-deploy script. Aliases mean callers never need to know conversation tokens. Services that
-cannot speak that shape, and often cannot set a header either, post to `POST /hook/{name}`
-instead, which renders whatever JSON they send into a message.
+with a file attached: the one-way direction, into Talk, for CI, an alertmanager, a cron job or a
+deploy script. Aliases mean callers never need to know conversation tokens. Services that cannot
+speak that shape, and often cannot set a header either, post to `POST /hook/{name}` instead,
+which renders whatever JSON they send into a message.
 
 ## What it deliberately doesn't do
 
-It runs as a user, and everything that follows from that is the trade-off this design makes,
-stated here rather than hidden. What it gains: it only ever connects out, so nothing has to reach
-it and a host behind NAT or a firewall works; nothing is installed in Nextcloud; and because it is
-a user it can read a message back and upload a file. What it costs, honestly:
+It runs as a user, and everything that follows from that is the trade-off this design makes. What
+it gains: it only ever connects out, so nothing has to reach it and a host behind NAT or a
+firewall works; nothing is installed in Nextcloud; and because it is a user it can read a message
+back and upload a file. What it costs:
 
 - **Its credential is a person's.** An app password cannot be scoped, so it reaches that user's
   Files, Contacts and Calendar as well as chat. The answer is a dedicated account that owns
-  nothing else, not a technical control.
+  nothing else, not a technical control ([accepted risk 1](security.md#accepted-risks)).
 - **It holds connections open.** Talk has no single feed across conversations, so sable keeps one
-  long poll per conversation, each occupying a request slot on Nextcloud for up to
-  `SABLE_POLL_TIMEOUT` seconds, all day. On a
-  stock Nextcloud container that slot is one of **five** PHP workers, so an account in seven
-  conversations queues its own polls and slows everyone else; the pool has to be raised before
-  sable is pointed at it (see [deployment.md](deployment.md#give-nextcloud-enough-php-workers)).
-  sable skips conversations nobody addresses a bot in, and follows at most 50 of the rest.
+  long poll per conversation, each occupying a request slot on Nextcloud all day. On a stock
+  Nextcloud that pool is too small and has to be
+  [raised before sable is pointed at it](deployment.md#give-nextcloud-enough-php-workers).
 - **It is a person in the room.** Anyone who can invite participants can invite it, and nothing in
-  Talk marks its messages as automated. `SABLE_ALLOWED_ROOMS` is the answer to the first half:
-  list the conversations it serves, by token, and an invitation to any other gets nothing.
+  Talk marks its messages as automated. `SABLE_ALLOWED_ROOMS` is the answer to the first half.
 - **It hears about a new room late.** The conversation list is rescanned every
-  `SABLE_ROOM_REFRESH` seconds, so an invitation is noticed up to that long after it is sent.
+  `SABLE_ROOM_REFRESH` seconds.
 
 For a chat assistant on a server you run, reachable only from inside, that trade is worth it: the
 requirement it removes is the hard one. If you would rather not give anything a user's
 credential, or cannot spare the PHP workers, it is the wrong tool.
 
-Replies are not streamed. A token-by-token edit loop would hammer the API for little gain, so
-one answer is one message.
+Beyond that trade:
 
-Memory is not durable. History is an in-process cache with a turn cap and a time limit, and a
-restart forgets it. That is the right default for a chat bot; if you need recall across
-restarts, `History` is one small class with three methods, and swapping it is a contained
-change.
-
-sable does not execute tools itself, and has no retrieval. A model that asks for a tool gets no
-answer from the portable backend, because a single round trip cannot give it one. What sable
-will do is hand the whole job to a server that runs the loop already — `SABLE_LLM_BACKEND=openwebui`
-— which keeps the tool registry, the credentials and the authorization in one place that was
-built for them, rather than growing a second one here. The cost is that whoever can ask the model
-in a tools room can set those tools off, which is why tools are a decision about a room
-(`SABLE_LLM_TOOL_ROOMS`, off everywhere by default) and [security.md](security.md#accepted-risks)
-states the rest plainly.
-
-There is no user or permission management beyond a handful of lists. Whether the account is in a
-conversation is Talk's decision, made by whoever invites it, which `SABLE_ALLOWED_ROOMS` can
-override on sable's side; who may use the model and who may run which command are two more lists
-([how they combine](configuration.md#how-the-access-layers-combine)). All of them match Nextcloud
-user ids, not roles or groups. And it is not multi-tenant: one account, one password, one
-Nextcloud. Run a second instance with a second account if you need a second assistant, since they are
-small.
+- **No streaming.** A token-by-token edit loop would hammer the API for little gain, so one
+  answer is one message.
+- **No durable memory.** History is an in-process cache with a turn cap and a time limit, and a
+  restart forgets it, which is the right default for a chat bot
+  ([what it would take](future.md#limitations-with-a-known-fix)).
+- **No tool execution of its own, and no retrieval.** A single round trip cannot run a tool a
+  model asks for. sable hands the whole job to a server that already runs the loop,
+  `SABLE_LLM_BACKEND=openwebui`, which keeps the tool registry, credentials and authorization in
+  one place built for them. The cost is that whoever can ask the model in a tools room can set
+  those tools off, so tools are a decision about a room (`SABLE_LLM_TOOL_ROOMS`, off everywhere by
+  default; [accepted risk 14](security.md#accepted-risks)).
+- **No user or permission management** beyond a handful of lists of Nextcloud user ids and
+  conversation tokens, not roles or groups
+  ([how they combine](configuration.md#how-the-access-layers-combine)). Whether the account is in
+  a conversation is Talk's decision, made by whoever invites it.
+- **Not multi-tenant:** one account, one password, one Nextcloud. Run a second instance with a
+  second account if you need a second assistant, since they are small.
 
 ## How it is built
 
+```
+Nextcloud Talk ◀── long polls, as a user ──────── sable ──┬──▶ command handler ──┐
+   (outbound only)                                        │                      │
+                   Prometheus/CI ──POST /notify──▶ ───────┼──▶ model backend ────┤
+          Komodo/Grafana ──POST /hook/{name}──▶ ──────────┤   (or Open WebUI,    │
+                                                          │    which runs tools) │
+                                                          │                      │
+Nextcloud Talk ◀──── posts, reactions, file shares, as the same user ────────────┘
+```
+
 *Read with long polls, work in the background.* One task per conversation asks Talk for messages
-newer than the last it saw and waits, up to `SABLE_POLL_TIMEOUT` seconds, for something to
-arrive. Each message is handed to a separate task and the loop goes straight back to listening,
-because a model call routinely takes longer than is reasonable to block on. A separate scan
-reconciles the list of conversations every `SABLE_ROOM_REFRESH` seconds. A conversation is first
-followed from its newest message, so nothing said before sable noticed it is replayed.
+newer than the last it saw and waits for something to arrive. Each message is handed to a
+separate task and the loop goes straight back to listening, because a model call routinely takes
+longer than is reasonable to block on. A separate scan reconciles the list of conversations, and a
+conversation is first followed from its newest message, so nothing said before sable noticed it
+is replayed ([which conversations, and when](configuration.md#how-chat-is-received)).
 
 *One identity, for everything.* The same account reads, posts, reacts and uploads, so there is one
 credential to configure and one to lose, and sable knows its own user id exactly. That is what
-lets it tell a real mention from a typed name and ignore its own replies when they come back down
-the poll.
-
-*Refuse to loop.* Its own messages are ignored, recognised by user id, and so is anything from an
-actor Talk marks as a bot (actor type `bots`), so sable cannot answer its own replies and two
-assistants in one room cannot start talking to each other.
+lets it tell a real mention from a typed name, and ignore its own replies and anything from an
+actor Talk marks as a bot when they come back down the poll, so it cannot loop with itself or
+with another assistant in the room.
 
 *Configuration is environment variables and nothing else.* No file format to learn, no parser to
 maintain, and it drops straight into a container, a systemd unit or a `.env` file. `sable
@@ -120,21 +118,16 @@ registry as constructor arguments. That is why the tests cover every endpoint en
 network, no Nextcloud and no model, and why replacing any one of those pieces is a small change
 rather than a fork.
 
-## Trust boundaries
+### The Talk calls it makes
 
-| Boundary | What protects it |
-| --- | --- |
-| sable to Nextcloud | HTTPS, authenticated as the account by its app password. It cannot be scoped, so it reaches everything that user can: chat, Files, Contacts and Calendar. |
-| Nextcloud to sable | Nothing is accepted from Nextcloud unprompted: chat arrives as the answer to sable's own requests. |
-| Anything to `/notify` | A separate bearer token, compared in constant time. Unset means the route answers 404. Request bodies are capped by the app, before the token is checked. |
-| Who may talk to it | Nothing by default: any user who can invite the account can use it. `SABLE_ALLOWED_ROOMS` limits the rooms and `SABLE_LLM_USERS` the people who may use the model. |
-| Chat text to the model | Messages are sent verbatim to your configured backend. Whoever may use the model can send text to that provider — and, in a room named in `SABLE_LLM_TOOL_ROOMS`, can have it call a tool. |
-| A command's own reach | Whatever you give it. Commands run with the account's credentials, and anyone in the conversation can trigger any that is not named in `SABLE_ADMIN_COMMANDS`. |
-| Chat text to other people's notifications | `@all` and group or team mentions in anything sable posts for chat or a webhook are defanged. |
-
-The app password is the value that matters most, and revoking it in Nextcloud is how you
-rotate it. [security.md](security.md) covers all of this properly, including the risks that are
-accepted rather than solved.
+Every call is checked against the [Nextcloud Talk API documentation](https://nextcloud-talk.readthedocs.io/en/latest/),
+and [`Agents/API/talk-user-api-reference.md`](../Agents/API/talk-user-api-reference.md) lists the
+endpoints and what is still unverified. Conversations are API `v4`, chat and reactions `v1`.
+Polling passes `noStatusUpdate=1`, so it does not mark the account as online, and
+`setReadMarker=0`, so it does not mark conversations as read. The ⁉️ reaction reads the message
+back from the context endpoint (capability `chat-get-context`) with `limit=3`, because Talk has no
+single-message endpoint, and picks the message out of the answer, among its neighbours, by id.
+Files go up by WebDAV `PUT` and into the conversation by a share with `shareType=10`.
 
 ## Where to extend it
 
@@ -142,7 +135,7 @@ accepted rather than solved.
 | --- | --- |
 | Add a command | [`commands.py`](../src/sable/commands.py), one decorator |
 | Change when the model answers | `Bot._route` and `Bot.handle` in [`bot.py`](../src/sable/bot.py) |
-| Keep history across restarts | `History` in [`history.py`](../src/sable/history.py) |
+| Keep history across restarts | `History` in [`history.py`](../src/sable/history.py), one small class |
 | Support a backend that isn't OpenAI-shaped | A sibling of [`openwebui.py`](../src/sable/openwebui.py) answering `complete(messages) -> str`, and one branch in `llm_client` |
 | Act on reactions | `Bot._route` in [`bot.py`](../src/sable/bot.py): `reaction` events are already parsed out of Talk's reaction system messages, and only the ask emoji is acted on. A removed reaction is not parsed at all, in `parse_message` in [`events.py`](../src/sable/events.py) |
 | Change which conversations are followed | `Poller.scan` in [`poller.py`](../src/sable/poller.py) |
@@ -151,6 +144,6 @@ accepted rather than solved.
 ## Further reading
 
 [configuration.md](configuration.md) documents every setting, [deployment.md](deployment.md)
-covers running it for real, and [future.md](future.md) records the known limitations and what it
-would take to lift them. The API underneath is the
-[Nextcloud Talk chat API](https://nextcloud-talk.readthedocs.io/en/latest/chat/).
+covers running it for real, [security.md](security.md) the trust boundaries and the risks that
+are accepted rather than solved, and [future.md](future.md) the known limitations and what it
+would take to lift them. [CONTRIBUTING.md](../CONTRIBUTING.md) is the place to start changing it.

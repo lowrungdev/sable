@@ -7,7 +7,7 @@ the morning when an alert does not arrive.
 from __future__ import annotations
 
 import os
-from typing import Callable
+from collections.abc import Callable
 
 import pytest
 
@@ -90,9 +90,7 @@ def test_plain_http_to_another_host_is_doubted(load: Load) -> None:
     config = load(SABLE_NEXTCLOUD_URL="http://nextcloud.internal")
     assert any("plain http://" in w for w in config.warnings)
     assert not any("plain http://" in w for w in load().warnings)
-    assert not load(
-        SABLE_NEXTCLOUD_URL="http://localhost:8080", SABLE_ALLOWED_ROOMS=ROOM
-    ).warnings
+    assert not load(SABLE_NEXTCLOUD_URL="http://localhost:8080", SABLE_ALLOWED_ROOMS=ROOM).warnings
 
 
 # --------------------------------------------------------------------------- #
@@ -404,7 +402,8 @@ def test_the_removed_cache_settings_are_simply_ignored(load: Load) -> None:
     """sable reads a message back from Talk now. An old .env still naming the
     cache is harmless: it is not a setting any more."""
     config = load(SABLE_ASK_ROOMS=ROOM, SABLE_MESSAGE_CACHE="50")
-    assert not hasattr(config, "ask_rooms") and not hasattr(config, "message_cache")
+    assert not hasattr(config, "ask_rooms")
+    assert not hasattr(config, "message_cache")
 
 
 # --------------------------------------------------------------------------- #
@@ -567,7 +566,8 @@ OTHER = "wxyz9876"
 def test_unset_allowed_rooms_means_every_room_and_says_so(load: Load) -> None:
     config = load()
     assert config.allowed_rooms == []
-    assert config.room_allowed(ROOM) and config.room_allowed(OTHER)
+    assert config.room_allowed(ROOM)
+    assert config.room_allowed(OTHER)
     assert any("SABLE_ALLOWED_ROOMS is empty" in w for w in config.warnings)
 
 
@@ -586,7 +586,7 @@ def test_allowed_rooms_takes_tokens_only(load: Load, entry: str) -> None:
 
 
 def test_a_non_token_in_allowed_rooms_explains_why(load: Load) -> None:
-    with pytest.raises(ConfigError, match="not a conversation token.*name their own"):
+    with pytest.raises(ConfigError, match=r"not a conversation token.*name their own"):
         load(SABLE_ALLOWED_ROOMS="Team chat")
 
 
@@ -616,7 +616,9 @@ def test_ai_rooms_take_tokens_or_a_star(load: Load) -> None:
 
 
 def test_a_display_name_in_ai_rooms_is_refused_with_the_reason(load: Load) -> None:
-    with pytest.raises(ConfigError, match="SABLE_AI_ROOMS.*not a conversation token.*name their own"):
+    with pytest.raises(
+        ConfigError, match=r"SABLE_AI_ROOMS.*not a conversation token.*name their own"
+    ):
         load(SABLE_AI_ROOMS="Team chat")
 
 
@@ -629,7 +631,8 @@ def test_an_ai_room_must_be_allowed_to_matter(load: Load) -> None:
 
 def test_a_star_covers_every_room_when_nothing_is_allow_listed(load: Load) -> None:
     config = load(SABLE_AI_ROOMS="*")
-    assert config.ai_room_allowed(ROOM) and config.ai_room_allowed(OTHER)
+    assert config.ai_room_allowed(ROOM)
+    assert config.ai_room_allowed(OTHER)
 
 
 def test_no_ai_rooms_means_none(load: Load) -> None:
@@ -644,12 +647,14 @@ def test_no_ai_rooms_means_none(load: Load) -> None:
 def test_everybody_may_use_the_model_until_users_are_named(load: Load) -> None:
     config = load()
     assert config.llm_users == []
-    assert config.is_llm_user("alice") and config.is_llm_user("")
+    assert config.is_llm_user("alice")
+    assert config.is_llm_user("")
 
 
 def test_named_users_and_admins_may_use_the_model(load: Load) -> None:
     config = load(SABLE_LLM_USERS="alice, Users/Bob", SABLE_ADMIN_USERS="maser")
-    assert config.is_llm_user("alice") and config.is_llm_user("BOB")
+    assert config.is_llm_user("alice")
+    assert config.is_llm_user("BOB")
     assert config.is_llm_user("maser")
     assert not config.is_llm_user("carol")
     assert not config.is_llm_user("")
@@ -661,8 +666,12 @@ def test_the_model_user_list_matches_ids_never_display_names(load: Load) -> None
 
 
 def test_an_open_model_with_tools_is_warned_about(load: Load) -> None:
-    env = {**OWUI, "SABLE_LLM_MODEL": "m", "SABLE_LLM_TOOL_IDS": "server:mcp:1",
-           "SABLE_LLM_TOOL_ROOMS": ROOM}
+    env = {
+        **OWUI,
+        "SABLE_LLM_MODEL": "m",
+        "SABLE_LLM_TOOL_IDS": "server:mcp:1",
+        "SABLE_LLM_TOOL_ROOMS": ROOM,
+    }
     assert any("SABLE_LLM_USERS is empty" in w for w in load(**env).warnings)
     assert not any("SABLE_LLM_USERS" in w for w in load(**env, SABLE_LLM_USERS="alice").warnings)
     # No tools anywhere, nothing to warn about.
@@ -683,13 +692,14 @@ def test_tools_are_off_everywhere_by_default(load: Load) -> None:
 
 def test_tool_rooms_name_where_tools_may_be_used(load: Load) -> None:
     config = load(**OWUI, SABLE_LLM_TOOL_ROOMS=ROOM)
-    assert config.llm.tools_in(ROOM) and not config.llm.tools_in(OTHER)
+    assert config.llm.tools_in(ROOM)
+    assert not config.llm.tools_in(OTHER)
     assert load(**OWUI, SABLE_LLM_TOOL_ROOMS="*").llm.tools_in(OTHER)
     assert not config.llm.tools_in("")
 
 
 def test_a_display_name_in_tool_rooms_is_refused(load: Load) -> None:
-    with pytest.raises(ConfigError, match="SABLE_LLM_TOOL_ROOMS.*not a conversation token"):
+    with pytest.raises(ConfigError, match=r"SABLE_LLM_TOOL_ROOMS.*not a conversation token"):
         load(**OWUI, SABLE_LLM_TOOL_ROOMS="Team chat")
 
 
@@ -707,8 +717,10 @@ def test_tools_with_no_room_to_use_them_are_warned_about(load: Load, extra: dict
     "key", ["tool_ids", "features", "tool_servers", "terminal_id", "session_id"]
 )
 def test_extra_body_cannot_carry_tools_past_the_room_gate(load: Load, key: str) -> None:
-    with pytest.raises(ConfigError, match=rf"SABLE_LLM_EXTRA_BODY must not set {key}.*SABLE_LLM_TOOL_ROOMS"):
-        load(SABLE_LLM_EXTRA_BODY='{"%s": []}' % key)
+    with pytest.raises(
+        ConfigError, match=rf"SABLE_LLM_EXTRA_BODY must not set {key}.*SABLE_LLM_TOOL_ROOMS"
+    ):
+        load(SABLE_LLM_EXTRA_BODY=f'{{"{key}": []}}')
 
 
 # --------------------------------------------------------------------------- #

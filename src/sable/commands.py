@@ -20,8 +20,9 @@ configured administrators.
 from __future__ import annotations
 
 import shlex
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Awaitable, Callable
+from typing import TYPE_CHECKING
 
 from .events import TalkEvent
 
@@ -105,9 +106,7 @@ class Registry:
         return self._commands.get(self._aliases.get(key, key))
 
     def visible(self) -> list[Command]:
-        return sorted(
-            (c for c in self._commands.values() if not c.hidden), key=lambda c: c.name
-        )
+        return sorted((c for c in self._commands.values() if not c.hidden), key=lambda c: c.name)
 
 
 registry = Registry()
@@ -196,9 +195,7 @@ async def whoami(ctx: Context) -> str:
     )
 
 
-@registry.command(
-    "ai", help="Ask the model a question.", usage="ai <question>", aliases=("ask",)
-)
+@registry.command("ai", help="Ask the model a question.", usage="ai <question>", aliases=("ask",))
 async def ai(ctx: Context) -> str | None:
     if not ctx.args:
         raise CommandError("Ask me something.")

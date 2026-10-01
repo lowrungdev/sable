@@ -10,6 +10,40 @@ is not worth publishing.
 Format: `## <version>`, optionally followed by a date. Anything until the next
 `##` heading is the body.
 
+## Unreleased
+
+- **One CI check script for every workflow.** `.forgejo/ci.sh` installs the
+  pinned uv and the locked dependencies, then runs ruff, ruff format --check,
+  mypy and pytest; `test.yml`, `build.yml` and `release.yml` all call it, so a
+  build or a release now also needs lint and types to pass, and the install
+  steps are no longer copied three times. `test.yml` no longer triggers on
+  pushes to `release`, so a release push runs the checks once, inside
+  `release.yml`, instead of twice in parallel.
+- **`README.md`, `LICENSE` and `CHANGELOG.md` moved to the repository root**,
+  where contributors and tooling look for them. Everything that read the old
+  `docs/` paths follows: `pyproject.toml`, the Dockerfile, the release
+  workflow's notes extraction, the tests and the links between the pages.
+- **Issue and pull request templates** under `.forgejo/` (bug report, feature
+  request, pull request checklist).
+- **`SECURITY.md`**: supported versions and how to report a problem.
+- **`.editorconfig`**, and `.gitattributes` now pins text files to LF.
+- **`CONTRIBUTING.md`, `CLAUDE.md` and `AGENTS.md`** at the root: a contributor guide, and
+  the guidance every coding agent is expected to follow.
+- **Linting, formatting and type checking**: ruff (lint and format) and strict mypy, with
+  pre-commit hooks, a `dev` extra that carries them, and the same checks in the test workflow
+  before pytest.
+- **README trimmed** to the pitch, a feature list, a minimal quickstart and a map of the
+  documentation. The code map, the development notes and the example command moved to
+  `CONTRIBUTING.md`, and the architecture diagram to `purpose.md`.
+- **Documentation restructured by topic, not just de-duplicated.** Each file now holds only
+  what its name promises and links to the owner for the rest: settings and how they behave in
+  `configuration.md`, running it in `deployment.md`, threats and accepted risks in
+  `security.md`, the Talk calls it makes and the design in `purpose.md`, releases only in
+  `releasing.md`, contributor how-tos only in `CONTRIBUTING.md`. The comments in `.env.example`
+  and `compose.yaml` shrink to what a setting is for, with the detail left to
+  `configuration.md`. `tests/test_docs.py` now checks the links in `CONTRIBUTING.md`,
+  `CLAUDE.md`, `AGENTS.md` and `SECURITY.md` too.
+
 ## 0.9
 
 - **Leftovers of the old webhook-bot design removed.** Events are now named
@@ -56,7 +90,7 @@ Format: `## <version>`, optionally followed by a date. Anything until the next
   `/hook/{name}` and `/healthz` alone.
   Why: a user can read a message back and upload a file, which a bot cannot, and
   nothing has to be installed in Nextcloud or reachable from it. What it costs is
-  in [purpose.md](purpose.md) and [security.md](security.md) - chiefly that the
+  in [purpose.md](docs/purpose.md) and [security.md](docs/security.md) - chiefly that the
   credential is a user's app password, which cannot be scoped and reaches that
   user's Files, Contacts and Calendar, so give sable an account that owns nothing
   else; and that every long poll holds a request slot on Nextcloud for up to
@@ -68,7 +102,7 @@ Format: `## <version>`, optionally followed by a date. Anything until the next
   scan now send `noStatusUpdate=1`, so sable no longer flips its account online,
   and removing a reaction sends the emoji in the request body as documented
   (and in the query string too, for a server that reads only the URL).
-  The calls are listed in [configuration.md](configuration.md).
+  The calls are listed in [configuration.md](docs/configuration.md).
   sable no longer follows conversations nobody addresses a bot in (the Talk
   updates room, a former one-to-one, the account's note to self and the
   "Let's get started!" sample), so those hold no request open. A long poll that
@@ -76,7 +110,7 @@ Format: `## <version>`, optionally followed by a date. Anything until the next
   conversation and pointing at the PHP-FPM pool, instead of being reported as
   "lost connection to Nextcloud". The stock pool of five workers is too small
   for more than a few conversations: see
-  [deployment.md](deployment.md#give-nextcloud-enough-php-workers).
+  [deployment.md](docs/deployment.md#give-nextcloud-enough-php-workers).
   **Migrating:** (1) create a Nextcloud user for sable and an app password for it
   under Settings > Security > Devices & sessions; (2) invite that user to each
   conversation it should be in - a normal invitation, there is no bot switch;
@@ -114,7 +148,7 @@ Format: `## <version>`, optionally followed by a date. Anything until the next
   system message through the chat poll, and sable reads the emoji and the id of
   the reacted-to message from it, as tested against Nextcloud Talk on 2026-10-01.
   Removing a reaction is still unexercised; see
-  [future.md](future.md#talk-features-not-yet-used).
+  [future.md](docs/future.md#talk-features-not-yet-used).
 - **The ⁉️ reaction reads the message back from Talk instead of remembering it.**
   It calls `GET /chat/{token}/{messageId}/context` (capability
   `chat-get-context`), so it works on old messages and across restarts, and sable
@@ -126,7 +160,7 @@ Format: `## <version>`, optionally followed by a date. Anything until the next
 - **BREAKING: access is now narrowed by room, by person and by tool, and several
   settings changed meaning.** None of it is needed to keep a deployment running
   except where marked; all of it is worth doing. Read
-  [how the access layers combine](configuration.md#how-the-access-layers-combine).
+  [how the access layers combine](docs/configuration.md#how-the-access-layers-combine).
   **Migrating:**
   (1) set `SABLE_ALLOWED_ROOMS` to the conversation *tokens* sable should serve.
   Empty still follows every room the account is in, but now with a startup
@@ -172,10 +206,10 @@ Format: `## <version>`, optionally followed by a date. Anything until the next
   must exceed `SABLE_MAX_UPLOAD_BYTES`), all capabilities dropped,
   `no-new-privileges`, `pids_limit: 256` and `mem_limit: 768m`. The documented
   systemd unit gains `TasksMax=256`. See
-  [deployment.md](deployment.md#container-hardening).
+  [deployment.md](docs/deployment.md#container-hardening).
 - **`!whoami` and the participant type.** The participant type was documented as
   already arriving on the event; it does not, so `!whoami` never prints it. See
-  [future.md](future.md#limitations-with-a-known-fix).
+  [future.md](docs/future.md#limitations-with-a-known-fix).
 
 ## 0.7
 

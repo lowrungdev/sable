@@ -5,12 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable
 
 import httpx
 import pytest
 import respx
-from sable.talk import ROOMS_API_BASE
+
 from conftest import (
     BACKEND,
     ROOM,
@@ -22,9 +22,9 @@ from conftest import (
     message_payload,
     reaction_payload,
 )
-
 from sable.bot import Bot
 from sable.poller import MAX_POLLED_ROOMS, Poller
+from sable.talk import ROOMS_API_BASE
 
 OTHER = "wxyz9876"
 ROOM_URL = f"{BACKEND}{ROOMS_API_BASE}/room"
@@ -79,7 +79,7 @@ class Room:
         return [int(r.url.params["lastKnownMessageId"]) for r in self.polls]
 
 
-async def until(condition: Callable[[], bool], timeout: float = 3.0) -> None:
+async def until(condition: Callable[[], bool], timeout: float = 3.0) -> None:  # noqa: ASYNC109
     deadline = asyncio.get_running_loop().time() + timeout
     while not condition():
         if asyncio.get_running_loop().time() > deadline:
@@ -90,7 +90,7 @@ async def until(condition: Callable[[], bool], timeout: float = 3.0) -> None:
 @pytest.fixture
 async def rig(llm: FakeLLM) -> AsyncIterator[tuple[Bot, Poller, list[asyncio.Task]]]:
     """A bot and a poller whose handlers run as plain tasks, and quickly."""
-    bot = Bot(make_config(poll_timeout=5), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(poll_timeout=5), llm=llm)
     tasks: list[asyncio.Task] = []
     poller = Poller(
         bot,
@@ -152,7 +152,7 @@ async def test_a_room_with_no_last_message_asks_for_the_newest_first(rig) -> Non
 
 @respx.mock
 async def test_the_cursor_advances_and_a_304_keeps_it(rig) -> None:
-    bot, poller, tasks = rig
+    _bot, poller, _tasks = rig
     feed = Room([message_payload("!ping", message_id=51)], 304)
     route = post_route()
     respx.get(ROOM_URL).mock(return_value=ocs([room(last=50)]))
@@ -170,9 +170,11 @@ async def test_the_cursor_advances_and_a_304_keeps_it(rig) -> None:
 
 @respx.mock
 async def test_messages_arrive_in_order_and_each_is_handled(rig) -> None:
-    bot, poller, tasks = rig
+    _bot, poller, _tasks = rig
     # Talk answers oldest first, but the loop must not rely on it.
-    feed = Room([message_payload("!version", message_id=53), message_payload("!ping", message_id=52)])
+    feed = Room(
+        [message_payload("!version", message_id=53), message_payload("!ping", message_id=52)]
+    )
     route = post_route()
     respx.get(ROOM_URL).mock(return_value=ocs([room(last=50)]))
     respx.get(chat_url()).mock(side_effect=feed)
@@ -181,7 +183,8 @@ async def test_messages_arrive_in_order_and_each_is_handled(rig) -> None:
     await until(lambda: len(route.calls) == 2)
 
     bodies = [b["message"] for b in sent_bodies(route)]
-    assert len(bodies) == 2 and "pong 🏓" in bodies
+    assert len(bodies) == 2
+    assert "pong 🏓" in bodies
     assert feed.cursors[1] == 53
 
 
@@ -189,9 +192,7 @@ async def test_messages_arrive_in_order_and_each_is_handled(rig) -> None:
 
 
 @respx.mock
-async def test_a_room_that_appears_is_followed_and_one_that_goes_is_dropped(
-    rig, caplog
-) -> None:
+async def test_a_room_that_appears_is_followed_and_one_that_goes_is_dropped(rig, caplog) -> None:
     _, poller, _ = rig
     feeds = {ROOM: Room(), OTHER: Room()}
     listing = respx.get(ROOM_URL).mock(return_value=ocs([room(ROOM, 50)]))
@@ -318,7 +319,7 @@ async def test_another_bot_is_ignored(rig) -> None:
 
 @respx.mock
 async def test_a_mention_by_parameter_reaches_the_model(rig, llm: FakeLLM) -> None:
-    _, poller, tasks = rig
+    _, poller, _tasks = rig
     feed = Room(
         [
             message_payload(
@@ -342,7 +343,7 @@ async def test_a_mention_by_parameter_reaches_the_model(rig, llm: FakeLLM) -> No
 async def test_the_ask_reaction_arrives_as_a_system_message_and_is_answered(
     rig, llm: FakeLLM
 ) -> None:
-    _, poller, tasks = rig
+    _, poller, _tasks = rig
     feed = Room(
         [message_payload("the deploy failed", message_id=51, actor_name="Bob")],
         [reaction_payload("⁉️", message_id=51, system_id=52)],
@@ -352,9 +353,7 @@ async def test_the_ask_reaction_arrives_as_a_system_message_and_is_answered(
     respx.get(chat_url()).mock(side_effect=feed)
     # The reaction names the message by id only; its text is read back from Talk.
     respx.get(f"{chat_url()}/51/context").mock(
-        return_value=ocs(
-            [message_payload("the deploy failed", message_id=51, actor_name="Bob")]
-        )
+        return_value=ocs([message_payload("the deploy failed", message_id=51, actor_name="Bob")])
     )
 
     await poller.scan()
@@ -520,7 +519,7 @@ def leave_url(token: str) -> str:
 
 
 def allowed_rig(llm: FakeLLM, **overrides):
-    bot = Bot(make_config(poll_timeout=5, **overrides), llm=llm)  # type: ignore[arg-type]
+    bot = Bot(make_config(poll_timeout=5, **overrides), llm=llm)
     tasks: list[asyncio.Task] = []
     poller = Poller(
         bot,
@@ -575,7 +574,8 @@ async def test_unlisted_rooms_are_left_when_asked(llm: FakeLLM, caplog) -> None:
     finally:
         await poller.stop()
         await bot.aclose()
-    assert leave.called and not stay.called
+    assert leave.called
+    assert not stay.called
     assert f"left conversation {OTHER}" in caplog.text
 
 
@@ -594,7 +594,9 @@ async def test_notify_and_hook_destinations_are_not_left(llm: FakeLLM) -> None:
         return_value=ocs([room(ROOM, 50), room(OTHER, 60), room(third, 60), room(fourth, 60)])
     )
     respx.get(chat_url(ROOM)).mock(side_effect=Room())
-    gone = {t: respx.delete(leave_url(t)).mock(return_value=ocs({})) for t in (OTHER, third, fourth)}
+    gone = {
+        t: respx.delete(leave_url(t)).mock(return_value=ocs({})) for t in (OTHER, third, fourth)
+    }
     try:
         await poller.scan()
     finally:
@@ -606,7 +608,14 @@ async def test_notify_and_hook_destinations_are_not_left(llm: FakeLLM) -> None:
 @respx.mock
 async def test_only_group_and_public_rooms_are_left(llm: FakeLLM) -> None:
     bot, poller = allowed_rig(llm, allowed_rooms=[ROOM], leave_unlisted_rooms=True)
-    tokens = {1: "oneone01", 2: "group002", 3: "public03", 4: "change04", 5: "former05", 6: "notes006"}
+    tokens = {
+        1: "oneone01",
+        2: "group002",
+        3: "public03",
+        4: "change04",
+        5: "former05",
+        6: "notes006",
+    }
     respx.get(ROOM_URL).mock(
         return_value=ocs([room(ROOM, 50)] + [room(t, 5, type=k) for k, t in tokens.items()])
     )
@@ -640,9 +649,13 @@ async def test_a_room_that_will_not_let_go_is_said_once_and_the_scan_goes_on(
     llm: FakeLLM, caplog
 ) -> None:
     bot, poller = allowed_rig(llm, allowed_rooms=[ROOM], leave_unlisted_rooms=True)
-    respx.get(ROOM_URL).mock(return_value=ocs([room(ROOM, 50), room(OTHER, 60), room("thrd0003", 60)]))
+    respx.get(ROOM_URL).mock(
+        return_value=ocs([room(ROOM, 50), room(OTHER, 60), room("thrd0003", 60)])
+    )
     respx.get(chat_url(ROOM)).mock(side_effect=Room())
-    refuse = respx.delete(leave_url(OTHER)).mock(return_value=httpx.Response(400, text="last owner"))
+    refuse = respx.delete(leave_url(OTHER)).mock(
+        return_value=httpx.Response(400, text="last owner")
+    )
     fine = respx.delete(leave_url("thrd0003")).mock(return_value=ocs({}))
     try:
         with caplog.at_level(logging.WARNING):

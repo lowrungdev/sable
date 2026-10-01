@@ -49,6 +49,7 @@ def _segment(value: str) -> str:
     """
     return quote(str(value), safe="")
 
+
 log = logging.getLogger(__name__)
 
 
@@ -59,9 +60,7 @@ class OpenWebUIClient:
     ``LLMError``, so ``Bot`` does not know which one it holds.
     """
 
-    def __init__(
-        self, config: LLMConfig, *, client: httpx.AsyncClient | None = None
-    ) -> None:
+    def __init__(self, config: LLMConfig, *, client: httpx.AsyncClient | None = None) -> None:
         self.config = config
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(timeout=config.timeout)
@@ -84,9 +83,7 @@ class OpenWebUIClient:
         """One request against Open WebUI, with its failures named usefully."""
         url = f"{self.config.base_url}{path}"
         try:
-            response = await self._client.request(
-                method, url, headers=self._headers(), **kwargs
-            )
+            response = await self._client.request(method, url, headers=self._headers(), **kwargs)
         except httpx.TimeoutException as exc:
             self._state.record_failure(exc)
             raise LLMError(f"{url} did not answer within {self.config.timeout}s") from exc
@@ -96,12 +93,8 @@ class OpenWebUIClient:
 
         self._state.record_success()
         if response.status_code >= 400:
-            log.warning(
-                "%s returned HTTP %s: %s", url, response.status_code, response.text[:200]
-            )
-            raise LLMError(
-                f"{url} returned HTTP {response.status_code}: {response.text[:400]}"
-            )
+            log.warning("%s returned HTTP %s: %s", url, response.status_code, response.text[:200])
+            raise LLMError(f"{url} returned HTTP {response.status_code}: {response.text[:400]}")
         if not response.content:
             return None
         try:
@@ -210,10 +203,11 @@ class OpenWebUIClient:
                 return
             if time.monotonic() >= deadline:
                 raise LLMError(
-                    f"the model was still working after {self.config.timeout}s "
-                    f"(SABLE_LLM_TIMEOUT)"
+                    f"the model was still working after {self.config.timeout}s (SABLE_LLM_TIMEOUT)"
                 )
-            await asyncio.sleep(min(self.config.poll_interval, max(0.0, deadline - time.monotonic())))
+            await asyncio.sleep(
+                min(self.config.poll_interval, max(0.0, deadline - time.monotonic()))
+            )
 
     async def _read_answer(self, chat_id: str, assistant_id: str) -> str:
         record = await self._call("GET", f"/v1/chats/{_segment(chat_id)}") or {}
@@ -293,7 +287,8 @@ def _citations(sources: Any) -> str:
     for source in sources:
         if not isinstance(source, dict):
             continue
-        origin = source.get("source") if isinstance(source.get("source"), dict) else {}
+        raw_origin = source.get("source")
+        origin = raw_origin if isinstance(raw_origin, dict) else {}
         label = str(origin.get("name") or origin.get("id") or "").strip()
         for meta in source.get("metadata") or []:
             if isinstance(meta, dict) and meta.get("source"):

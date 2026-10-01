@@ -14,8 +14,8 @@ import os
 import httpx
 import pytest
 import respx
-from conftest import TALK, FakeLLM, event, message_payload, reaction_event
 
+from conftest import TALK, FakeLLM, event
 from sable.app import create_app
 from sable.bot import NOT_ALLOWED, Bot
 from sable.config import Config, ConfigError
@@ -73,18 +73,21 @@ def test_the_operators_environment_loads_and_says_what_is_off(operator_env) -> N
 def test_extra_body_carrying_tools_is_a_clear_startup_error(
     operator_env, monkeypatch: pytest.MonkeyPatch, key: str
 ) -> None:
-    monkeypatch.setenv("SABLE_LLM_EXTRA_BODY", json.dumps({key: ["x"] if key == "tool_ids" else {}}))
+    monkeypatch.setenv(
+        "SABLE_LLM_EXTRA_BODY", json.dumps({key: ["x"] if key == "tool_ids" else {}})
+    )
     with pytest.raises(ConfigError) as caught:
         Config.from_env()
     text = str(caught.value)
-    assert key in text and "SABLE_LLM_TOOL_ROOMS" in text
+    assert key in text
+    assert "SABLE_LLM_TOOL_ROOMS" in text
 
 
 @respx.mock
 async def test_startup_and_a_few_messages_behave_as_configured(operator_env, caplog) -> None:
     config = Config.from_env()
     llm = FakeLLM()
-    bot = Bot(config, llm=llm)  # type: ignore[arg-type]
+    bot = Bot(config, llm=llm)
     ai_route = respx.post(f"{TALK}/chat/{AI}").mock(
         return_value=httpx.Response(201, json={"ocs": {"data": {"id": 1}}})
     )
@@ -96,7 +99,8 @@ async def test_startup_and_a_few_messages_behave_as_configured(operator_env, cap
         with caplog.at_level(logging.INFO):
             async with app.router.lifespan_context(app):
                 pass
-        assert "tools:" in caplog.text and "none (off everywhere)" in caplog.text
+        assert "tools:" in caplog.text
+        assert "none (off everywhere)" in caplog.text
 
         # A plain message in the AI room is answered, with tools off.
         await bot.handle(event("what is 2+2?", room=AI, message_id=10))
@@ -106,12 +110,16 @@ async def test_startup_and_a_few_messages_behave_as_configured(operator_env, cap
         # `!reset` and `!ai` are for the administrators.
         await bot.handle(event("!reset", room=AI, message_id=11))
         await bot.handle(event("!ai hi", room=AI, message_id=12))
-        assert say(ai_route)[1:] == ["`!reset` is for administrators only.",
-                                     "`!ai` is for administrators only."]
+        assert say(ai_route)[1:] == [
+            "`!reset` is for administrators only.",
+            "`!ai` is for administrators only.",
+        ]
         assert llm.tools == [False]
 
         # An administrator may; ids are matched without regard to case.
-        await bot.handle(event("!ai hi", room=AI, message_id=13, actor_id="users/Maser", actor_name="m"))
+        await bot.handle(
+            event("!ai hi", room=AI, message_id=13, actor_id="users/Maser", actor_name="m")
+        )
         assert llm.tools == [False, False]
 
         # Mentioning the bot still reaches the model for everyone, anywhere.
@@ -133,14 +141,19 @@ async def test_a_model_user_list_leaves_a_bystander_in_an_ai_room_unanswered(
     monkeypatch.setenv("SABLE_LLM_USERS", "alice")
     config = Config.from_env()
     llm = FakeLLM()
-    bot = Bot(config, llm=llm)  # type: ignore[arg-type]
+    bot = Bot(config, llm=llm)
     route = respx.post(f"{TALK}/chat/{AI}").mock(
         return_value=httpx.Response(201, json={"ocs": {"data": {"id": 1}}})
     )
     try:
-        await bot.handle(event("hello", room=AI, message_id=1, actor_id="users/bob", actor_name="Bob"))
-        assert not route.called and not llm.calls
-        await bot.handle(event("@sable hello", room=AI, message_id=2, actor_id="users/bob", actor_name="Bob"))
+        await bot.handle(
+            event("hello", room=AI, message_id=1, actor_id="users/bob", actor_name="Bob")
+        )
+        assert not route.called
+        assert not llm.calls
+        await bot.handle(
+            event("@sable hello", room=AI, message_id=2, actor_id="users/bob", actor_name="Bob")
+        )
         assert say(route) == [NOT_ALLOWED]
         await bot.handle(event("hello", room=AI, message_id=3))
         assert llm.tools == [False]
