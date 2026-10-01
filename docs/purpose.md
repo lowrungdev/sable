@@ -6,16 +6,12 @@ What sable is for, what it deliberately leaves alone, and why it is built this w
 
 Nextcloud Talk is where a lot of teams already are, but getting something into it
 programmatically is awkward. You can write a Nextcloud app in PHP, which means shipping and
-maintaining real server-side code against Nextcloud releases. You can register a bot through
-Talk's webhook Bot API, which is the supported path but makes Nextcloud call you — so you need an
-endpoint it can reach, signatures to verify, and a bot install that only an administrator with
-shell access can do — and which, by design, cannot read a message back or attach a file. Or you
-can run an ordinary user account that long-polls the chat API, which works with nothing installed
-on the server, reads everything a person can, and appears in the room as a person rather than as a
-bot.
+maintaining real server-side code against Nextcloud releases. Or you can run an ordinary user
+account that long-polls the chat API, which works with nothing installed on the server, reads
+everything a person can, and appears in the room as a person.
 
-sable is that last option, written once, with the jobs most teams actually want from a chat bot
-already in it. It started as the second and was changed to the third, for the reasons below.
+sable is that second option, written once, with the jobs most teams actually want from a chat
+assistant already in it.
 
 ## What it does
 
@@ -24,7 +20,7 @@ already in it. It started as the second and was changed to the third, for the re
 that returns Markdown. This is the seam most people will use; the rest of the bot exists so that
 writing a command is boring.
 
-**An assistant.** Mention the bot and it answers through any endpoint that speaks OpenAI's
+**An assistant.** Mention the account and it answers through any endpoint that speaks OpenAI's
 `/chat/completions` shape, keeping a short rolling history per conversation. React to a message
 with ⁉️ and it answers that message instead, threaded underneath it, reading the message back
 from Talk so it works on old ones too. Pointed at Open WebUI it can also use tools — search, MCP
@@ -46,19 +42,17 @@ instead, which renders whatever JSON they send into a message.
 
 ## What it deliberately doesn't do
 
-It does not get a bot's protections. It runs as a user, and everything that follows from that is
-the trade-off this design makes, stated here rather than hidden. What it gains: it only ever
-connects out, so nothing has to reach it and a host behind NAT or a firewall works; nothing is
-installed in Nextcloud and no administrator has to run `occ`; there are no signatures, secrets to
-keep in step or webhook to forge; and because it is a user it can read a message back and upload a
-file, which a bot cannot. What it costs, honestly:
+It runs as a user, and everything that follows from that is the trade-off this design makes,
+stated here rather than hidden. What it gains: it only ever connects out, so nothing has to reach
+it and a host behind NAT or a firewall works; nothing is installed in Nextcloud; and because it is
+a user it can read a message back and upload a file. What it costs, honestly:
 
 - **Its credential is a person's.** An app password cannot be scoped, so it reaches that user's
-  Files, Contacts and Calendar as well as chat, where a bot's secret could only post messages. The
-  answer is a dedicated account that owns nothing else, not a technical control.
+  Files, Contacts and Calendar as well as chat. The answer is a dedicated account that owns
+  nothing else, not a technical control.
 - **It holds connections open.** Talk has no single feed across conversations, so sable keeps one
   long poll per conversation, each occupying a request slot on Nextcloud for up to
-  `SABLE_POLL_TIMEOUT` seconds, all day. A webhook costs the server nothing while idle. On a
+  `SABLE_POLL_TIMEOUT` seconds, all day. On a
   stock Nextcloud container that slot is one of **five** PHP workers, so an account in seven
   conversations queues its own polls and slows everyone else; the pool has to be raised before
   sable is pointed at it (see [deployment.md](deployment.md#give-nextcloud-enough-php-workers)).
@@ -67,7 +61,7 @@ file, which a bot cannot. What it costs, honestly:
   Talk marks its messages as automated. `SABLE_ALLOWED_ROOMS` is the answer to the first half:
   list the conversations it serves, by token, and an invitation to any other gets nothing.
 - **It hears about a new room late.** The conversation list is rescanned every
-  `SABLE_ROOM_REFRESH` seconds, where a bot install is effective at once.
+  `SABLE_ROOM_REFRESH` seconds, so an invitation is noticed up to that long after it is sent.
 
 For a chat assistant on a server you run, reachable only from inside, that trade is worth it: the
 requirement it removes is the hard one. If you would rather not give anything a user's
@@ -95,7 +89,7 @@ conversation is Talk's decision, made by whoever invites it, which `SABLE_ALLOWE
 override on sable's side; who may use the model and who may run which command are two more lists
 ([how they combine](configuration.md#how-the-access-layers-combine)). All of them match Nextcloud
 user ids, not roles or groups. And it is not multi-tenant: one account, one password, one
-Nextcloud. Run a second instance with a second account if you need a second bot, since they are
+Nextcloud. Run a second instance with a second account if you need a second assistant, since they are
 small.
 
 ## How it is built
@@ -112,10 +106,9 @@ credential to configure and one to lose, and sable knows its own user id exactly
 lets it tell a real mention from a typed name and ignore its own replies when they come back down
 the poll.
 
-*Refuse to loop.* Its own messages and events from bots are ignored, and every event is
-de-duplicated on the conversation, type, message id, actor and reaction together. A message seen
-twice produces one reply rather than two, two bots in a room cannot start talking to each other,
-and two people reacting to the same message are still two distinct events.
+*Refuse to loop.* Its own messages are ignored, recognised by user id, and so is anything from an
+actor Talk marks as a bot (actor type `bots`), so sable cannot answer its own replies and two
+assistants in one room cannot start talking to each other.
 
 *Configuration is environment variables and nothing else.* No file format to learn, no parser to
 maintain, and it drops straight into a container, a systemd unit or a `.env` file. `sable
@@ -136,7 +129,7 @@ rather than a fork.
 | Anything to `/notify` | A separate bearer token, compared in constant time. Unset means the route answers 404. Request bodies are capped by the app, before the token is checked. |
 | Who may talk to it | Nothing by default: any user who can invite the account can use it. `SABLE_ALLOWED_ROOMS` limits the rooms and `SABLE_LLM_USERS` the people who may use the model. |
 | Chat text to the model | Messages are sent verbatim to your configured backend. Whoever may use the model can send text to that provider — and, in a room named in `SABLE_LLM_TOOL_ROOMS`, can have it call a tool. |
-| A command's own reach | Whatever you give it. Commands run with the bot's credentials, and anyone in the conversation can trigger any that is not named in `SABLE_ADMIN_COMMANDS`. |
+| A command's own reach | Whatever you give it. Commands run with the account's credentials, and anyone in the conversation can trigger any that is not named in `SABLE_ADMIN_COMMANDS`. |
 | Chat text to other people's notifications | `@all` and group or team mentions in anything sable posts for chat or a webhook are defanged. |
 
 The app password is the value that matters most, and revoking it in Nextcloud is how you
@@ -148,10 +141,10 @@ accepted rather than solved.
 | You want to | Look at |
 | --- | --- |
 | Add a command | [`commands.py`](../src/sable/commands.py), one decorator |
-| Change when the model answers | `Bot.handle` in [`bot.py`](../src/sable/bot.py) |
+| Change when the model answers | `Bot._route` and `Bot.handle` in [`bot.py`](../src/sable/bot.py) |
 | Keep history across restarts | `History` in [`history.py`](../src/sable/history.py) |
 | Support a backend that isn't OpenAI-shaped | A sibling of [`openwebui.py`](../src/sable/openwebui.py) answering `complete(messages) -> str`, and one branch in `llm_client` |
-| Act on reactions | The `Like` branch of `Bot.handle`; `Like` and `Undo` are already parsed out of Talk's reaction system messages, though nothing acts on `Undo` |
+| Act on reactions | `Bot._route` in [`bot.py`](../src/sable/bot.py): `reaction` events are already parsed out of Talk's reaction system messages, and only the ask emoji is acted on. A removed reaction is not parsed at all, in `parse_message` in [`events.py`](../src/sable/events.py) |
 | Change which conversations are followed | `Poller.scan` in [`poller.py`](../src/sable/poller.py) |
 | Add an HTTP route | [`app.py`](../src/sable/app.py) |
 

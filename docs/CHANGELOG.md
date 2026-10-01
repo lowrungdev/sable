@@ -10,6 +10,38 @@ is not worth publishing.
 Format: `## <version>`, optionally followed by a date. Anything until the next
 `##` heading is the body.
 
+## 0.9
+
+- **Leftovers of the old webhook-bot design removed.** Events are now named
+  plainly: `message` and `reaction` (they were `Create`, `Like` and `Undo`),
+  and the log lines that print the type say `message` or `reaction` - for
+  example `ignoring reaction from myself`, `no handler for reaction events`,
+  `rate limit: ignoring message from ...` and the poller's DEBUG
+  `received reaction from ... in ... (message ...)`. A reaction being taken
+  back is no longer parsed at all (`reaction_deleted`, `reaction_revoked` and
+  every other system message are ignored), so nothing can act on a removal. A
+  bot is now only an actor of Talk type `bots`; sable's own account is
+  recognised by its user id.
+- **Events are no longer de-duplicated.** Polling hands over each message once,
+  so the cache of the last 512 events and its `ignoring redelivered ...` log
+  line were dead weight - and they had a cost: putting the ⁉️ reaction back on a
+  message after taking it off was dropped as a repeat. It works again.
+- **`!whoami` no longer prints a participant type**, which user-account mode
+  never receives. It now says who you are, whether you are a user, a guest or a
+  bot, and the conversation, and nothing more.
+- **Unused code removed:** `Actor.participant_type`, `TalkEvent.reply_to_id`,
+  `TalkEvent.raw`, `Context.sender`, `Registry.__contains__` and the
+  `reference_id` argument of `TalkClient.send_message`. None of it was
+  reachable from a command or a setting.
+- **Documentation rewritten and corrected.** purpose.md, security.md, future.md,
+  configuration.md and deployment.md describe the user-account design on its own
+  terms, with no comparisons to the design it replaced. The Talk-calls table now
+  lists the call that finds where to start in a conversation, the full set of
+  poll parameters, and `limit=3` (not 1) for reading a message back; the hook
+  renderer's body keys include `err`; the troubleshooting row for a silent ⁉️
+  looks for `received reaction`; the `/notify` file responses list `502`; and the
+  code map covers `__main__.py`.
+
 ## 0.8
 
 - **BREAKING: sable now runs as an ordinary Nextcloud user, not as a Talk bot.**
@@ -89,8 +121,8 @@ Format: `## <version>`, optionally followed by a date. Anything until the next
   keeps no cache of chat content. Replies: "I cannot find that message" for a
   404, "That message has been deleted.", "That message has no text for me to
   read."; a system message is silent, and a failed read is logged and reported.
-  Not yet checked against a live server: that `limit=1` includes the message
-  itself.
+  Not yet checked against a live server: that the call returns the message
+  itself (sable asks for three neighbours each way and picks it out by id).
 - **BREAKING: access is now narrowed by room, by person and by tool, and several
   settings changed meaning.** None of it is needed to keep a deployment running
   except where marked; all of it is worth doing. Read

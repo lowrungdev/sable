@@ -2,16 +2,15 @@
 
 Talk's chat API hands back JSON message objects: an ``id``, who wrote it
 (``actorType`` and ``actorId``), the text with rich-object placeholders like
-``{mention-user1}`` and the ``messageParameters`` that fill them in. Three kinds
+``{mention-user1}`` and the ``messageParameters`` that fill them in. Two kinds
 matter here:
 
-* ``Create`` - a chat message was posted (``messageType`` ``comment``)
-* ``Like`` / ``Undo`` - a reaction was added / revoked by a moderator. Talk reports
-  these as *system* messages (``reaction`` / ``reaction_revoked``) whose ``parent``
-  is the message reacted to. A reaction its author takes back arrives as
-  ``reaction_deleted``, which is not parsed, since nothing acts on a removal.
+* ``message`` - a chat message was posted (``messageType`` ``comment``)
+* ``reaction`` - a reaction was added. Talk reports it as a *system* message
+  (``reaction``) whose ``parent`` is the message reacted to.
 
-Everything else - joins, renames, deleted messages - is of no interest, and
+Everything else - joins, renames, deleted messages, removed reactions - is of no
+interest, and
 :func:`parse_message` says so by returning None. :func:`render_message` flattens
 the placeholders back into something a human (or a model) can read.
 """
@@ -58,12 +57,11 @@ class Actor:
     type: str = ""
     id: str = ""
     name: str = ""
-    participant_type: str = ""
 
     @property
     def is_bot(self) -> bool:
-        """True for other bots - never react to these, or you loop."""
-        return self.type in ("bot", "bots") or self.id.startswith("bots/")
+        """True for Talk's ``bots`` actors - never react to these, or you loop."""
+        return self.type == "bots"
 
     @property
     def is_guest(self) -> bool:
@@ -87,15 +85,13 @@ class TalkEvent:
     message: str = ""
     raw_message: str = ""
     parameters: dict = field(default_factory=dict)
-    reply_to_id: int = 0
     reaction: str = ""
     #: User ids mentioned with a real Talk mention, in order of appearance.
     mentions: tuple[str, ...] = ()
-    raw: dict = field(default_factory=dict)
 
     @property
     def is_message(self) -> bool:
-        return self.type == "Create"
+        return self.type == "message"
 
 
 def render_message(message: str, parameters: dict) -> str:
@@ -153,9 +149,8 @@ def _int(value: object) -> int:
 def _reaction(payload: dict) -> str:
     """The emoji a reaction system message carries.
 
-    Talk puts it in ``message``. A revoked reaction may instead carry a sentence
-    with placeholders, so the parameters are looked at too, and anything too long
-    to be an emoji is refused rather than taken for one.
+    Talk puts it in ``message``; the parameters are looked at too, and anything
+    too long to be an emoji is refused rather than taken for one.
     """
     text = str(payload.get("message", "")).strip()
     if (
@@ -180,7 +175,7 @@ def _reaction(payload: dict) -> str:
 
 def parse_message(payload: dict, *, room_token: str = "", room_name: str = "") -> TalkEvent | None:
     """Turn one chat message into a :class:`TalkEvent`, or None if it is not one
-    the bot has any use for.
+    sable acts on (a chat message or a reaction).
 
     Raises EventError for something that is not a message object at all.
     """
@@ -194,26 +189,19 @@ def parse_message(payload: dict, *, room_token: str = "", room_name: str = "") -
     kind = str(payload.get("messageType", ""))
     system = str(payload.get("systemMessage", ""))
     actor = _actor(payload)
-    parent = payload.get("parent")
-    parent_id = _int(parent.get("id")) if isinstance(parent, dict) else 0
     common = {
         "actor": actor,
         "room_token": token,
         "room_name": clean_name(room_name),
-        "raw": payload,
     }
 
-    if kind == "system" and system in ("reaction", "reaction_revoked"):
+    if kind == "system" and system == "reaction":
+        parent = payload.get("parent")
+        parent_id = _int(parent.get("id")) if isinstance(parent, dict) else 0
         reaction = _reaction(payload)
-        # A revoked reaction need not say which emoji: nothing acts on one.
-        if not parent_id or (system == "reaction" and not reaction):
+        if not parent_id or not reaction:
             return None
-        return TalkEvent(
-            type="Like" if system == "reaction" else "Undo",
-            message_id=parent_id,
-            reaction=reaction,
-            **common,
-        )
+        return TalkEvent(type="reaction", message_id=parent_id, reaction=reaction, **common)
 
     if kind != "comment":
         return None
@@ -227,12 +215,11 @@ def parse_message(payload: dict, *, room_token: str = "", room_name: str = "") -
         if isinstance(param, dict) and param.get("type") == "user" and param.get("id")
     )
     return TalkEvent(
-        type="Create",
+        type="message",
         message_id=_int(payload.get("id")),
         message=render_message(raw_message, parameters),
         raw_message=raw_message,
         parameters=parameters,
-        reply_to_id=parent_id,
         mentions=mentions,
         **common,
     )

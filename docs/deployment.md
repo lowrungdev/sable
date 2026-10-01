@@ -9,8 +9,8 @@ You need Nextcloud with Talk installed, permission to create a user on it, and e
 sable is a Nextcloud user, so the connection goes one way: sable reaches out to Nextcloud, and
 Nextcloud never calls sable. It needs outbound access to your Nextcloud and to the model
 backend, and nothing inbound at all unless something calls `/notify` or `/hook/{name}`, or you
-probe `/healthz` from another host. There is no HTTPS endpoint to expose to Nextcloud and no bot
-to install with `occ`.
+probe `/healthz` from another host. There is no HTTPS endpoint to expose to Nextcloud and nothing
+to install in it.
 
 ### Give Nextcloud enough PHP workers
 
@@ -83,7 +83,7 @@ sable --check
 ### Docker Compose (recommended)
 
 [`compose.yaml`](../compose.yaml) lists every setting in its `environment:` block, with only the
-three required ones active and the rest commented out beside their defaults, so the bot can be
+three required ones active and the rest commented out beside their defaults, so sable can be
 configured entirely in that one file. It also loads `.env` if one exists, and values in the
 `environment:` block override it. The required settings are wired as `${VAR}` lookups so they stay
 in `.env` rather than in a file you commit, and a missing one fails immediately:
@@ -161,7 +161,7 @@ ExecStart=/opt/sable/app/.venv/bin/sable --env-file /opt/sable/.env
 Restart=on-failure
 RestartSec=5s
 
-# The bot writes nothing and needs no privileges. This is the same lockdown
+# sable writes nothing and needs no privileges. This is the same lockdown
 # compose.yaml applies to the container.
 NoNewPrivileges=true
 PrivateTmp=true
@@ -242,7 +242,7 @@ Confirm the path works:
 
 ```bash
 curl -fsS https://sable.example.org/healthz
-# {"status":"ok","version":"0.8","user":"sable","llm":"gpt-4o-mini","notify":true,"nextcloud":true}
+# {"status":"ok","version":"0.9","user":"sable","llm":"gpt-4o-mini","notify":true,"nextcloud":true}
 
 # ...or, with SABLE_HEALTH_TOKEN set:
 curl -fsS -H "X-Health-Token: $SABLE_HEALTH_TOKEN" https://sable.example.org/healthz
@@ -324,7 +324,7 @@ In the conversation, within a minute of the invitation:
 
 ```
 !ping                 →  pong 🏓
-!version              →  sable 0.8 · model gpt-4o-mini
+!version              →  sable 0.9 · model gpt-4o-mini
 @sable are you there  →  the model's answer, with @sable picked from Talk's mention list
 ```
 
@@ -366,7 +366,8 @@ Responses: `201` with the stored filename, path and size; `401` for a bad token;
 `SABLE_MAX_UPLOAD_BYTES`, or for a request body over the cap sable puts on `/notify` (that one
 before the token is even checked; see [request size caps](configuration.md#request-size-caps));
 `400` for JSON or UTF-8 that does not parse, nesting too deep, or if Nextcloud rejected the share;
-`422` for a body that is not a JSON object, a bad base64 file, or neither message nor file. If the
+`422` for a body that is not a JSON object, a bad base64 file, or neither message nor file; `502` if
+Nextcloud could not be reached or failed in some other way. If the
 upload succeeds but the share fails, the uploaded file is deleted again rather than left orphaned
 in the account's Files.
 
@@ -458,7 +459,7 @@ At `INFO`, sable logs its own lifecycle, its configuration, and every use — an
 the interesting lines are not buried:
 
 ```
-sable 0.8 starting
+sable 0.9 starting
   listening on:   http://0.0.0.0:8080
   nextcloud:      https://cloud.example.org as sable
   receiving:      long polls of up to 30s, conversations rescanned every 60s
@@ -480,7 +481,7 @@ sable 0.8 starting
   health check:   GET /healthz (open)
   log level:      INFO
 signed in to https://cloud.example.org as sable (Sable)
-sable 0.8 ready
+sable 0.9 ready
 following conversation abcd1234 ('Team chat')
 Alice (users/alice) ran !ping in abcd1234
 Alice (users/alice) asked the model in abcd1234 (22 chars)
@@ -489,8 +490,8 @@ Alice (users/alice) asked the model about message 12 in abcd1234, written by Bob
 relayed an alert to abcd1234 (alias alerts) as message 4242
 left conversation zzzz9999 ('Lunch'): not in SABLE_ALLOWED_ROOMS and not a /notify or /hook destination
 no longer in conversation abcd1234 ('Team chat') - no further messages from it
-sable 0.8 stopping
-sable 0.8 stopped
+sable 0.9 stopping
+sable 0.9 stopped
 ```
 
 Settings that are probably a mistake are logged as warnings straight after the block (an empty
@@ -566,7 +567,7 @@ Rotating the app password needs no reinstalling. Create a new one under Settings
 put it in `SABLE_NEXTCLOUD_PASSWORD`, restart, then revoke the old one. Until the restart, a
 revoked password means every call to Nextcloud is refused with a 401.
 
-Run one process, and one per account. Conversation history, the redelivery cache, the rate
+Run one process, and one per account. Conversation history, the rate
 limiter and the position in each conversation all live in memory, so two workers would split them
 and replies would forget context depending on which worker answered. Worse, two processes signed
 in as the same account would each read every message and each answer it. One process handles chat
@@ -633,8 +634,8 @@ says what each one does and does not cover. The full checklist is in
 | Replies are cut short with `_[truncated]_` | The answer exceeded `SABLE_MAX_MESSAGE_CHARS`; Talk's own ceiling is 32000 characters. |
 | `HTTP 429` from Talk | Nextcloud is throttling the account, most likely for posting too fast. Batch or slow down whatever is calling `/notify`. |
 | Mentions ignored | Pick the account from Talk's mention list, or start the message with its user id. `SABLE_NEXTCLOUD_USER` has to be the id people mention. Set `SABLE_LOG_LEVEL=DEBUG` and watch for `message in <token> was not for me`. |
-| The ⁉️ reaction does nothing | Set `SABLE_LOG_LEVEL=DEBUG` and react again. Silence is by design when the reactor is outside `SABLE_ALLOWED_ROOMS`, `SABLE_LLM_USERS` or `SABLE_ADMIN_USERS` (with `SABLE_ASK_ADMINS_ONLY`), when they are over the rate limit, when the message's author is in `SABLE_IGNORE_USERS`, or when it is a system message; each leaves a log line. If no `received Like` line appears at all, the reaction never arrived through the chat poll — see [future.md](future.md#talk-features-not-yet-used). |
-| The ⁉️ reaction says `I cannot find that message` | Talk answered 404 to the read-back: the message was deleted, or the account cannot see it. The call is `GET /chat/{token}/{messageId}/context`, which needs the `chat-get-context` capability. `That message has been deleted.` and `…has no text for me to read` are the other two replies. A transport failure instead says `I could not read the message you reacted to` and is logged. |
+| The ⁉️ reaction does nothing | Set `SABLE_LOG_LEVEL=DEBUG` and react again. Silence is by design when the reactor is outside `SABLE_ALLOWED_ROOMS`, `SABLE_LLM_USERS` or `SABLE_ADMIN_USERS` (with `SABLE_ASK_ADMINS_ONLY`), when they are over the rate limit, when the message's author is in `SABLE_IGNORE_USERS`, or when it is a system message; each leaves a log line. If no `received reaction` line appears at all, the reaction never arrived through the chat poll — see [future.md](future.md#talk-features-not-yet-used). |
+| The ⁉️ reaction says `I cannot find that message` | Talk answered 404 to the read-back: the message was deleted, or the account cannot see it. The call is `GET /chat/{token}/{messageId}/context`, which needs the `chat-get-context` capability. `That message has been deleted.` and `…has no text for me to read` are the other two replies. Any other failure to read it (Nextcloud unreachable, or an HTTP error other than 404) instead says `⚠️ Sorry - I could not read the message you reacted to (…)`, is logged, and is not posted at all with `SABLE_REPORT_ERRORS=false`. |
 | `/notify` returns 404 | `SABLE_NOTIFY_TOKEN` is unset, so the route is disabled. |
 | `/hook/<name>` returns 404 | No hook by that name, or `SABLE_HOOKS` is unset. A configured hook with a bad token answers 401 instead, so 404 means the name. |
 | `!reset is for administrators only` | The sender's Nextcloud user id is not in `SABLE_ADMIN_USERS`. The log line names who was refused. Display names are never matched, only user ids. |

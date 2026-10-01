@@ -23,7 +23,7 @@ sable --check
 ```
 
 ```
-sable 0.8 config OK
+sable 0.9 config OK
   nextcloud:  https://cloud.example.org
   account:    sable (password set)
   polling:    30s long polls, rooms rescanned every 60s
@@ -39,7 +39,7 @@ The `warning:` lines are the [startup warnings](#startup-warnings), printed here
 check shows them; there are none when the configuration raises no doubts.
 
 A bad value exits with status 2 and a message naming the variable. Configuration errors are
-fatal at startup by design: a failed deploy is better than a bot that silently ignores half its
+fatal at startup by design: a failed deploy is better than a service that silently ignores half its
 settings. The startup log then repeats the resolved configuration, in more detail than `--check`
 covers (it shows the allowed rooms, who may use the model, the rate limit and where tools are
 on, none of which `--check` does), so the running process tells you what it actually believes.
@@ -55,20 +55,22 @@ starting. The message cache and its two settings were removed that way (the ⁉�
 | Kind | Accepted |
 | --- | --- |
 | Boolean | `1`, `true`, `yes`, `on`, or `0`, `false`, `no`, `off`, case-insensitive. Anything else is an error. |
-| Number | Plain integer or decimal. Empty means "use the default". |
+| Number | A plain integer; the few settings measured in fractional seconds or a temperature (`SABLE_LLM_TIMEOUT`, `SABLE_LLM_POLL_INTERVAL`, `SABLE_LLM_TEMPERATURE`) also take a decimal. Empty means "use the default". |
 | List | Comma-separated; whitespace around entries is trimmed. |
 | Map | `alias=value,other=value2`, or a JSON object: `{"alias": "value"}`. |
 | JSON | A JSON **object**, e.g. `{"top_k": 40}`. |
 
 Values are trimmed and URLs have trailing slashes stripped, so a stray space or slash in a
-`.env` file will not break anything.
+`.env` file will not break anything. A `#` comment has to sit on a line of its own: sable's
+`.env` reader does not strip a trailing one, so the comments after values in the `ini` examples
+below are for reading, and pasted into a `.env` they become part of the value (usually a startup
+error).
 
 ## The Nextcloud account
 
 sable is an ordinary Nextcloud user. It reads chat by long-polling the Talk chat API as that
-user, and posts, reacts and uploads files as the same user. There is no bot to register, no
-webhook for Nextcloud to call and no shared secret: all it needs is an account, an app password,
-and an invitation to the conversations it should be in.
+user, and posts, reacts and uploads files as the same user. All it needs is an account, an app
+password, and an invitation to the conversations it should be in.
 
 | Variable | Default | Notes |
 | --- | --- | --- |
@@ -121,10 +123,11 @@ what is still unverified. Note that **conversations and chat live under differen
 | --- | --- | --- |
 | Who am I | `GET /ocs/v2.php/cloud/user` | Nextcloud OCS |
 | List conversations | `GET /ocs/v2.php/apps/spreed/api/v4/room` (`noStatusUpdate=1`) | [conversation](https://nextcloud-talk.readthedocs.io/en/latest/conversation/) |
-| Wait for messages | `GET /ocs/v2.php/apps/spreed/api/v1/chat/{token}` with `lookIntoFuture=1`, `timeout`, `lastKnownMessageId`, `setReadMarker=0`, `noStatusUpdate=1`; 304 means nothing new | [chat](https://nextcloud-talk.readthedocs.io/en/latest/chat/) |
+| Find where to start | `GET .../api/v1/chat/{token}` with `lookIntoFuture=0`, `limit=1`, `setReadMarker=0`, `noStatusUpdate=1`; only for a conversation whose list entry carries no last message | [chat](https://nextcloud-talk.readthedocs.io/en/latest/chat/) |
+| Wait for messages | `GET /ocs/v2.php/apps/spreed/api/v1/chat/{token}` with `lookIntoFuture=1`, `timeout`, `lastKnownMessageId`, `limit=100`, `includeLastKnown=0`, `setReadMarker=0`, `noStatusUpdate=1`; 304 means nothing new | [chat](https://nextcloud-talk.readthedocs.io/en/latest/chat/) |
 | Post | `POST .../api/v1/chat/{token}` | [chat](https://nextcloud-talk.readthedocs.io/en/latest/chat/) |
 | React, un-react | `POST` and `DELETE .../api/v1/reaction/{token}/{messageId}`, emoji in the body | [reaction](https://nextcloud-talk.readthedocs.io/en/latest/reaction/) |
-| Read one message back (the ⁉️ reaction) | `GET .../api/v1/chat/{token}/{messageId}/context` with `limit=1`; needs the `chat-get-context` capability. Talk has no single-message endpoint, so the message is picked out of the answer by id | [chat](https://nextcloud-talk.readthedocs.io/en/latest/chat/) |
+| Read one message back (the ⁉️ reaction) | `GET .../api/v1/chat/{token}/{messageId}/context` with `limit=3`; needs the `chat-get-context` capability. Talk has no single-message endpoint, so the message is picked out of the answer, among its neighbours, by id | [chat](https://nextcloud-talk.readthedocs.io/en/latest/chat/) |
 | Leave a conversation (`SABLE_LEAVE_UNLISTED_ROOMS`) | `DELETE /ocs/v2.php/apps/spreed/api/v4/room/{token}/participants/self` | [participant](https://nextcloud-talk.readthedocs.io/en/latest/participant/) |
 | Attach a file | WebDAV `PUT`, then `POST /ocs/v2.php/apps/files_sharing/api/v1/shares` with `shareType=10` | [chat](https://nextcloud-talk.readthedocs.io/en/latest/chat/) |
 
@@ -146,7 +149,7 @@ permission in that conversation, or Talk answers 403; a failed reaction is logge
 | `SABLE_THINKING_REACTION` | *(empty)* | A single emoji stuck on the triggering message while the model works, then removed — e.g. `👀`. Empty disables it, which saves two API calls per answer. Failures here are ignored; a reaction is never load-bearing. |
 | `SABLE_ASK_REACTION` | `⁉️` | React to any message with this and the bot sends that message to the model, answering in a reply threaded under it. The message is read back from Talk, so nothing is remembered. Empty disables the feature. |
 | `SABLE_ASK_ADMINS_ONLY` | `false` | Restrict that reaction to `SABLE_ADMIN_USERS`. On with an empty `SABLE_ADMIN_USERS` is a startup error, since nobody could then use it. See [below](#restricting-the-reaction). |
-| `SABLE_UNKNOWN_COMMAND_HINT` | `true` | Reply "I have no `!foo` command" on an unknown command. Turn off in busy rooms where people use other bots with the same prefix. |
+| `SABLE_UNKNOWN_COMMAND_HINT` | `true` | Reply "I have no `foo` command. Try `!help`." on an unknown command (`!foo`). Turn off in busy rooms where people use other bots with the same prefix. |
 | `SABLE_REPORT_ERRORS` | `true` | Post failures into the conversation as well as logging them; the reply is prefixed with a warning sign. Off means failures are logged only and the room stays quiet. |
 | `SABLE_STARTUP_CHECK` | `true` | Sign in to Nextcloud at startup (`cloud/user`) and log who it says the account is, so a wrong URL, an untrusted certificate or a rejected app password shows up at boot. Never fatal. |
 | `SABLE_IGNORE_USERS` | *(empty)* | Users to ignore completely. Comma-separated; each entry matches a bare user id (`alice`), a full actor id (`users/alice`), or a display name. See [below](#ignoring-people). |
@@ -181,8 +184,9 @@ room, not the person, so on its own it lets anyone in a tools room set the tools
 row 6 (the startup warning says so). And `SABLE_ASK_ADMINS_ONLY` narrows the ⁉️ reaction further
 still, to the administrators.
 
-A trigger counts against row 4 before rows 5 and 6 are asked, so somebody refused by either
-still uses up their allowance.
+Between rows 2 and 3 the account's own messages and anything from another bot (Talk actor type
+`bots`) are dropped, so sable never answers itself or another assistant. A trigger counts against
+row 4 before rows 5 and 6 are asked, so somebody refused by either still uses up their allowance.
 
 ### When does the assistant answer?
 
@@ -226,8 +230,8 @@ not contain log another, because sable never reads those conversations and the e
 `/notify` and `/hook` destinations need not be listed: they post without following the
 conversation.
 
-`SABLE_LOG_LEVEL=DEBUG` prints both identifiers for every message sable decided to ignore, so you
-can find the token of a room you want:
+`SABLE_LOG_LEVEL=DEBUG` prints both identifiers for every message in a followed room that was not
+for sable, so you can find the token of a room you want:
 
 ```
 message in a1b2c3d4 ('AI') was not for me - no prefix, no mention, and not an AI room
@@ -273,7 +277,7 @@ message, are:
 | A message with no text | "That message has no text for me to read." |
 | A system message (a join, a rename) | Nothing |
 | The author is in `SABLE_IGNORE_USERS` | Nothing, so ignored people stay unreadable by somebody else's reaction |
-| The call fails | Logged, and reported to the room unless `SABLE_REPORT_ERRORS` is off |
+| The call fails, or the model does | Logged, and reported to the room unless `SABLE_REPORT_ERRORS` is off (threaded under the message only with `SABLE_REPLY_AS_REPLY`) |
 
 The asker has to pass the same checks as any other trigger: the room allow-list, the rate limit,
 `SABLE_ASK_ADMINS_ONLY` if it is on, and `SABLE_LLM_USERS`. Refusals here are logged and say
@@ -282,9 +286,9 @@ nothing in the room, since the message belongs to somebody who did nothing.
 This relies on Talk delivering reaction events through the same chat poll as messages, which
 it does: the feature has been confirmed against a live server. Two things have not been
 exercised: a reaction being taken back (see [future.md](future.md#talk-features-not-yet-used)),
-and whether the context call with `limit=1` includes the message itself, which the Talk
-documentation does not say outright; sable picks the message out of the answer by id and treats a
-missing one as not found.
+and whether the context call includes the message itself, which the Talk documentation does not
+say outright; sable asks for three neighbours each way, picks the message out of the answer by id
+and treats a missing one as not found.
 
 ### Restricting the reaction
 
@@ -336,7 +340,7 @@ The default of `8` is a ceiling rather than a target, and most deployments never
 ```ini
 SABLE_MAX_CONCURRENT_REPLIES=1     # a local model that serves one request at a time
 SABLE_MAX_CONCURRENT_REPLIES=32    # a hosted backend with headroom
-SABLE_MAX_CONCURRENT_REPLIES=0     # no ceiling, which is how it behaved before this setting
+SABLE_MAX_CONCURRENT_REPLIES=0     # no ceiling: every event starts a model call of its own
 ```
 
 Past the ceiling a reply **waits for a slot**, but only so many may wait:
@@ -621,7 +625,7 @@ token is a startup error rather than something you discover when an alert goes m
 The renderer flattens the payload to dotted paths, so nesting stops mattering, then looks for a
 severity among `level`, `severity`, `status`, `state`, `priority` and `urgency`; a title among
 `title`, `subject`, `summary`, `alertname`, `event`, `name` and `type`; and a body among
-`message`, `text`, `description`, `details`, `body`, `reason` and `error`. Whatever is left is
+`message`, `text`, `description`, `details`, `body`, `reason`, `error` and `err`. Whatever is left is
 shown as key and value pairs.
 
 Identifiers and timestamps are dropped, because a chat message already has its own time and the

@@ -104,7 +104,6 @@ def message_payload(
     actor_id: str = "users/alice",
     actor_name: str = "Alice",
     parameters: dict | None = None,
-    in_reply_to: int = 0,
 ) -> dict:
     """A chat message as the chat API returns it."""
     kind, ident = split_actor(actor_id)
@@ -121,8 +120,6 @@ def message_payload(
         "systemMessage": "",
         "reactions": {},
     }
-    if in_reply_to:
-        payload["parent"] = {"id": in_reply_to, "messageType": "comment", "message": "earlier"}
     return payload
 
 

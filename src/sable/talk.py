@@ -287,7 +287,6 @@ class TalkClient:
         *,
         reply_to: int = 0,
         silent: bool = False,
-        reference_id: str = "",
     ) -> int:
         """Post a Markdown message. Returns the new message id (0 if unknown)."""
         message = self.truncate(message)
@@ -296,8 +295,6 @@ class TalkClient:
         payload: dict[str, object] = {"message": message, "silent": silent}
         if reply_to:
             payload["replyTo"] = reply_to
-        if reference_id:
-            payload["referenceId"] = reference_id
         response = await self._talk("POST", f"/chat/{room_token}", payload=payload)
         data = _ocs_data(response)
         new_id = _int(data.get("id")) if isinstance(data, dict) else 0
