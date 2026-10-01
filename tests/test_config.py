@@ -363,7 +363,7 @@ def test_admins_without_admin_commands_are_allowed(load: Load) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Hooks and alerting no longer need a separate URL
+# Hooks and alerting
 # --------------------------------------------------------------------------- #
 
 

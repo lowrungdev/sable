@@ -314,6 +314,31 @@ def test_the_removed_echo_command_is_not_documented() -> None:
         assert "!echo" not in read(path), f"{path.name} still mentions the removed !echo command"
 
 
+#: Phrases that only make sense for sable's former design, a webhook bot on
+#: Talk's Bot API, or for event names and fields that no longer exist. The
+#: changelog is history and may name all of them.
+OBSOLETE = re.compile(
+    r"bot api|bot secret|occ talk:bot|X-Nextcloud-Talk-(?:Signature|Random|Backend)"
+    r"|ActivityStreams|backend pin|replay cache|webhook bot|bot install|\bno bot\b"
+    r"|redeliver|de-?duplicat|received (?:Like|Create|Undo)|ignoring (?:Like|Create|Undo)"
+    r"|\b(?:Like|Undo)\b branch|bot-management",
+    re.IGNORECASE,
+)
+
+
+def test_no_doc_describes_the_old_bot_design() -> None:
+    files = [ENV_EXAMPLE, COMPOSE, ROOT / "Dockerfile", *sorted(DOCS.glob("*.md"))]
+    files += sorted((ROOT / "Agents").rglob("*.md"))
+    for path in files:
+        if path.name == "CHANGELOG.md":
+            continue
+        found = OBSOLETE.search(read(path))
+        assert found is None, (
+            f"{path.name} still mentions {found.group(0)!r}, which belongs to the "
+            f"webhook-bot design or to a removed feature. Only the changelog keeps that."
+        )
+
+
 # --------------------------------------------------------------------------- #
 # Links that go somewhere
 # --------------------------------------------------------------------------- #

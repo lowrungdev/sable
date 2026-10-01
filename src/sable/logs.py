@@ -18,7 +18,7 @@ class HealthCheckFilter(logging.Filter):
     """Drop access lines for a probe that answered normally.
 
     Only the successful ones. A probe that starts failing - 401 once a health
-    token is set, 503 while something is wrong - is exactly the line you want,
+    token is set - is exactly the line you want,
     and it is the reason this filters rather than turning the access log off.
     """
 

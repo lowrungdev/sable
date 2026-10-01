@@ -29,10 +29,9 @@ is open to anyone who can reach the port is bounded in the app itself: request b
 per route, tokens are compared in constant time, and text sable posts on behalf of strangers cannot
 page a room.
 
-What changed from a webhook bot is worth saying plainly. Nothing signs or verifies anything any
-more: sable trusts what Nextcloud's chat API returns over TLS, which is where it always got the
-content from, and its one credential is a user's, not a bot's. That credential is larger and cannot
-be narrowed. In exchange there is no inbound webhook to forge, replay or redirect.
+sable trusts what Nextcloud's chat API returns over TLS and checks it no further, and its one
+credential is a whole user's, which cannot be narrowed. Nothing is accepted from Nextcloud
+unprompted, so chat has no inbound endpoint to forge or redirect.
 
 ## Trust boundaries
 
@@ -91,10 +90,8 @@ in [deployment.md](deployment.md#if-your-nextcloud-uses-an-internal-or-self-sign
 ## Abuse resistance
 
 Events from actors Talk marks as bots (actor type `bots`, ids starting `bots/`) are ignored, as
-is anything the account wrote itself, so two bots in one room cannot start answering each other
-and sable cannot answer its own replies. Every event is de-duplicated on the conversation, type,
-message id, actor and reaction together, keeping the last 512, so a message seen twice produces
-one reply while two people reacting to the same message remain two distinct events.
+is anything the account wrote itself (recognised by user id), so two bots in one room cannot start
+answering each other and sable cannot answer its own replies.
 
 `SABLE_MAX_CONCURRENT_REPLIES` caps how many model calls can be open at once, eight by default.
 Nothing upstream paces the messages Talk hands over, so without a ceiling a burst in a busy room
@@ -205,9 +202,8 @@ These are known and deliberate. Decide for yourself whether they are acceptable.
 
 1. **The app password is the single credential, and it cannot be scoped.** It is the account's,
    so anybody holding it can read every conversation the account is in, post and react as it,
-   and read and write that user's Files, Contacts and Calendar. A webhook bot's shared secret
-   could only post messages; this is a much larger thing to lose, and it is the direct price of
-   running as a user. Give sable a dedicated account that owns nothing else and is in only the
+   and read and write that user's Files, Contacts and Calendar. That is a large thing to lose,
+   and it is the direct price of running as a user. Give sable a dedicated account that owns nothing else and is in only the
    rooms it needs, so that what the password reaches is nearly nothing beyond chat. It is
    revocable on its own, and revoking it is the response to a leak. Uploads land in
    `SABLE_UPLOAD_PATH` inside that user's own Files, and filenames from callers are sanitised and
@@ -247,14 +243,14 @@ These are known and deliberate. Decide for yourself whether they are acceptable.
    has done nothing.
 
 8. **sable is a person in the room, and whoever can add participants can add it.** It appears in
-   Talk's participant list as an ordinary user, and there is no bot switch for a moderator to
-   flip: anyone allowed to invite people to a conversation can invite it, after which everything
+   Talk's participant list as an ordinary user, and nothing sets it apart from one: anyone
+   allowed to invite people to a conversation can invite it, after which everything
    said there is read and — if it is an AI room or the account is mentioned — sent to the model
    backend. Out of the box that means *anybody* who can invite it, which is why an empty
    `SABLE_ALLOWED_ROOMS` logs a warning: list the tokens it should serve and everything else is
    neither read nor answered, and with `SABLE_LEAVE_UNLISTED_ROOMS` the account leaves the rest.
-   Conversely, nothing in Talk marks its messages as automated, so people may take an answer for a
-   person's. Name the account so that it is obvious, keep it out of rooms where that is not
+   Conversely, nothing in Talk marks its messages as automated either, so people may take an answer
+   for a person's. Name the account so that it is obvious, keep it out of rooms where that is not
    wanted, and list it in no more rooms than it needs: each conversation is also a long poll held
    open on Nextcloud, which is why no more than 50 are followed.
 
@@ -267,8 +263,7 @@ These are known and deliberate. Decide for yourself whether they are acceptable.
    somebody with many accounts has many allowances, and the queue bound
    (`SABLE_MAX_QUEUED_REPLIES`) then decides what is dropped. Reading chat has its own cost, which
    is not a risk to sable but to Nextcloud: every long poll holds a request slot for up to
-   `SABLE_POLL_TIMEOUT` seconds, per conversation, continuously, where a webhook would cost it
-   nothing while idle. On a small server with few PHP workers that is enough to be felt, and
+   `SABLE_POLL_TIMEOUT` seconds, per conversation, continuously. On a small server with few PHP workers that is enough to be felt, and
    in practice it is an availability problem for everyone on that Nextcloud: the stock
    container's pool is five workers, so seven followed conversations starve it, queue other
    users' requests behind idle polls, and make sable's own posts time out. Raise
@@ -365,7 +360,8 @@ These are known and deliberate. Decide for yourself whether they are acceptable.
 - [ ] The container hardening in `compose.yaml` kept (read-only root, `/tmp` tmpfs sized above
       `SABLE_MAX_UPLOAD_BYTES`, no capabilities, `no-new-privileges`, pid and memory limits), or the
       systemd equivalents (`PrivateTmp`, `TasksMax`, `MemoryMax`)
-- [ ] `SABLE_RATE_LIMIT` and `SABLE_MAX_QUEUED_REPLIES` left on, not set to `0`
+- [ ] `SABLE_RATE_LIMIT` and `SABLE_MAX_CONCURRENT_REPLIES` left on, not set to `0` (`0` lifts
+      either one; for `SABLE_MAX_QUEUED_REPLIES` it means nothing may wait, which is stricter)
 - [ ] The image pinned by version or digest on the host rather than `latest`
 
 ## Reporting a problem

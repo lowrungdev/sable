@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import re
-from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -56,13 +55,6 @@ def now(timezone: str = "") -> str:
     label = timezone or moment.tzname() or "local time"
     return f"{moment:%A %d %B %Y, %H:%M} ({label})"
 
-#: How many recently handled events to remember, so a message delivered twice
-#: does not produce a second reply.
-SEEN_CACHE = 512
-
-#: (conversation, event type, message id, actor, reaction) - see Bot.seen.
-SeenKey = tuple[str, str, int, str, str]
-
 #: Said to somebody outside SABLE_LLM_USERS who addressed the model directly.
 NOT_ALLOWED = "You are not allowed to use the assistant."
 
@@ -110,8 +102,6 @@ class Bot:
         self._owns_http = http_client is None
         self._http = http_client or httpx.AsyncClient(timeout=30.0)
         self._llm = llm if llm is not None else llm_client(config.llm, self._http)
-        self._seen: deque[SeenKey] = deque(maxlen=SEEN_CACHE)
-        self._seen_set: set[SeenKey] = set()
         #: The one account sable is. Everything posted under its id is ours.
         self.talk = TalkClient(
             config.nextcloud_url,
@@ -161,7 +151,7 @@ class Bot:
 
         The bot check belongs in the decision rather than in front of it. An
         administrator's id is a plain string, and what keeps another bot from
-        passing for one is the is_bot early return in handle happening to run
+        passing for one is the bot check in _screen happening to run
         first - true, and only true while nobody moves a line. Refusing here
         holds wherever the question is asked from.
         """
@@ -255,31 +245,6 @@ class Bot:
             and event.actor.user_id.casefold() == mine
         )
 
-    def seen(self, event: TalkEvent) -> bool:
-        """Record an event and report whether we already handled it.
-
-        The actor and the reaction are part of the key, not just the message id:
-        for a reaction event the id is the message being reacted *to*, so two
-        people reacting to one message - or one person reacting twice with
-        different emoji - would otherwise look like a redelivery of the first.
-        For a chat message both are constant, so the id still decides.
-        """
-        key = (
-            event.room_token,
-            event.type,
-            event.message_id,
-            event.actor.id,
-            event.reaction,
-        )
-        if event.message_id and key in self._seen_set:
-            return True
-        self._seen.append(key)
-        self._seen_set.add(key)
-        if len(self._seen_set) > len(self._seen):
-            # A deque eviction dropped an entry; rebuild the membership set.
-            self._seen_set = set(self._seen)
-        return False
-
     # -- routing ----------------------------------------------------------- #
 
     def strip_mention(self, event: TalkEvent) -> tuple[bool, str]:
@@ -347,7 +312,7 @@ class Bot:
         """
         # Gated on ask_enabled, not just the emoji: with no model configured there
         # is nothing to ask.
-        if self.ask_enabled and event.type == "Like" and self.is_ask_reaction(event.reaction):
+        if self.ask_enabled and event.type == "reaction" and self.is_ask_reaction(event.reaction):
             return _Route("reaction")
 
         if not event.is_message:
@@ -374,8 +339,7 @@ class Bot:
 
     def would_handle(self, event: TalkEvent) -> bool:
         """Would ``handle`` do any work for this event? Synchronous and free of
-        side effects: it consumes no rate-limit token and records nothing as
-        seen. The poller asks before spawning, so that chatter, our own replies
+        side effects: it consumes no rate-limit token. The poller asks before spawning, so that chatter, our own replies
         and other bots never occupy a reply slot."""
         return self._screen(event) and self._route(event) is not None
 
@@ -384,9 +348,6 @@ class Bot:
         # Re-checked here although the poller asks would_handle first: this is
         # also the entry point for anything that does not come through it.
         if not self._screen(event):
-            return
-        if self.seen(event):
-            log.info("ignoring redelivered %s #%s", event.type, event.message_id)
             return
         route = self._route(event)
         if route is None:

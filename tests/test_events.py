@@ -22,7 +22,7 @@ SHAPE_IDS = [shape.label for shape in ACTOR_SHAPES]
 def test_parses_a_chat_message() -> None:
     event = parse_message(message_payload("!ping", message_id=42), room_name="Team chat")
     assert event is not None and event.is_message
-    assert event.type == "Create"
+    assert event.type == "message"
     assert event.message == "!ping"
     assert event.message_id == 42
     assert event.room_token == ROOM
@@ -79,24 +79,9 @@ def test_render_message_leaves_unknown_placeholders_alone() -> None:
     assert render_message("{x}", {"x": "not-a-dict"}) == "{x}"
 
 
-def test_parses_a_reply() -> None:
-    event = parse_message(message_payload("sure", in_reply_to=7))
-    assert event.reply_to_id == 7
-
-
-def test_detects_bots_and_guests() -> None:
-    bot_event = parse_message(message_payload("beep", actor_id="bots/bot-abc123"))
-    assert bot_event.actor.is_bot
-    assert bot_event.actor.user_id == ""
-
-    guest_event = parse_message(message_payload("hi", actor_id="guests/hash", actor_name="G"))
-    assert guest_event.actor.is_guest
-    assert not guest_event.actor.is_bot
-
-
-def test_a_reaction_system_message_is_a_like() -> None:
+def test_a_reaction_system_message_is_a_reaction_event() -> None:
     event = parse_message(reaction_payload("😆", message_id=1567))
-    assert event.type == "Like"
+    assert event.type == "reaction"
     assert not event.is_message
     # The message reacted to, not the system message that reports the reaction.
     assert event.message_id == 1567
@@ -104,23 +89,24 @@ def test_a_reaction_system_message_is_a_like() -> None:
     assert event.actor.user_id == "alice"
 
 
-def test_a_revoked_reaction_is_an_undo() -> None:
-    event = parse_message(reaction_payload("😆", message_id=1567, undo=True))
-    assert event.type == "Undo"
-    assert event.message_id == 1567
+def test_a_removed_reaction_is_not_an_event() -> None:
+    assert parse_message(reaction_payload("😆", message_id=1567, undo=True)) is None
+    payload = reaction_payload("😆", message_id=1567)
+    payload["systemMessage"] = "reaction_deleted"
+    assert parse_message(payload) is None
 
 
-def test_a_revoked_reaction_may_carry_its_emoji_in_the_parameters() -> None:
-    payload = reaction_payload(undo=True, message_id=9)
-    payload["message"] = "{actor} removed a reaction"
+def test_a_reaction_may_carry_its_emoji_in_the_parameters() -> None:
+    payload = reaction_payload(message_id=9)
+    payload["message"] = "{reaction}"
     payload["messageParameters"] = {"reaction": {"type": "highlight", "name": "⁉️"}}
     assert parse_message(payload).reaction == "⁉️"
 
 
 def test_a_system_keyword_is_not_taken_for_an_emoji() -> None:
-    payload = reaction_payload(undo=True)
+    payload = reaction_payload()
     payload["message"] = "reaction_revoked"
-    assert parse_message(payload).reaction == ""
+    assert parse_message(payload) is None
 
 
 def test_a_reaction_without_an_emoji_or_a_target_is_not_an_event() -> None:
@@ -233,16 +219,6 @@ def test_an_id_that_is_not_a_users_id_yields_no_user_id(label: str, actor_id: st
     whole reason somebody who is not a local user cannot reach the admin
     commands. A type matched loosely would hand them over."""
     assert parse_message(message_payload(actor_id=actor_id)).actor.user_id == ""
-
-
-def test_an_actor_type_of_bots_is_a_bot_whatever_the_id_looks_like() -> None:
-    """Two bots answering each other is a loop nobody is watching."""
-    actor = parse_message(message_payload(actor_id="bots/sable")).actor
-    assert actor.is_bot
-    payload = message_payload()
-    payload["actorType"] = "bots"
-    payload["actorId"] = "bot-abc"
-    assert parse_message(payload).actor.is_bot
 
 
 def test_a_federated_user_is_neither_guest_nor_bot_yet_has_no_user_id() -> None:

@@ -11,10 +11,10 @@ $EDITOR docs/CHANGELOG.md          # add notes under ## Unreleased
 git commit -am "..." && git push origin dev
 
 # 2. when you are ready to release, name the version
-$EDITOR pyproject.toml             # version = "0.5"
-$EDITOR docs/CHANGELOG.md          # rename ## Unreleased to ## 0.5
+$EDITOR pyproject.toml             # version = "0.9"
+$EDITOR docs/CHANGELOG.md          # rename ## Unreleased to ## 0.9
 uv lock                            # the lock records the project version too
-git commit -am "Release 0.5" && git push origin dev
+git commit -am "Release 0.9" && git push origin dev
 
 # 3. integrate into the history
 git switch main && git merge --no-ff dev && git push origin main
@@ -23,7 +23,7 @@ git switch main && git merge --no-ff dev && git push origin main
 git switch release && git merge --ff-only main && git push origin release
 ```
 
-Step 4 is the release. Forgejo runs the tests, pushes `sable:0.5`, `sable:latest` and a tag
+Step 4 is the release. Forgejo runs the tests, pushes `sable:0.9`, `sable:latest` and a tag
 named after the commit, and creates a Forgejo Release with the tag, the changelog notes and the
 wheel attached, which is what puts it in the repository sidebar.
 
@@ -45,9 +45,9 @@ main     ────●──────────────●───�
                             \         \
 release  ────────────────────●─────────●──   push → publish
                              │         │
-                            v0.4     v0.5    ← Releases, in the sidebar
+                            v0.8     v0.9    ← Releases, in the sidebar
                              │         │
-registry            sable:0.4   sable:0.5, sable:latest
+registry            sable:0.8   sable:0.9, sable:latest
 ```
 
 ### Why `--no-ff` into `main` but `--ff-only` into `release`
@@ -149,12 +149,12 @@ and leaves that Release untouched.
 
 | Artifact | Where |
 | --- | --- |
-| `…/sable:0.5` | Packages: that release. What a server should pin to. |
+| `…/sable:0.9` | Packages: that release. What a server should pin to. |
 | `…/sable:latest` | Packages: the newest release. |
 | `…/sable:<commit>` | Packages: the full commit sha it was built from, so any image maps back to its source. |
 | `…/sable@sha256:…` | Packages: the digest, printed in the run summary. Immutable, and the only way to pin one exact build. |
-| Release `v0.5` and its git tag | Releases, in the repository sidebar |
-| `sable-0.5-py3-none-any.whl` | Attached to that Release, when the wheel builds |
+| Release `v0.9` and its git tag | Releases, in the repository sidebar |
+| `sable-0.9-py3-none-any.whl` | Attached to that Release, when the wheel builds |
 
 The wheel is archival only, so its step is `continue-on-error`: if it fails, the run warns, the
 release is still created, and it simply has no attachment. Nothing about the release depends on
@@ -182,24 +182,24 @@ and `IMAGE` in `release.yml` and `build.yml`.
 ## Using a release
 
 ```bash
-docker pull forgejo.subversive.link/subversive/sable:0.5
+docker pull forgejo.subversive.link/subversive/sable:0.9
 ```
 
 In `compose.yaml`, replacing `build: .` with
-`image: forgejo.subversive.link/subversive/sable:0.5` pins a host to that release. Pin the
+`image: forgejo.subversive.link/subversive/sable:0.9` pins a host to that release. Pin the
 version rather than `latest`, so a `docker compose pull` cannot move you unintentionally.
 
 Confirm what is running:
 
 ```bash
-curl -fsS https://sable.example.org/healthz    # {"version":"0.5", ...}
+curl -fsS https://sable.example.org/healthz    # {"version":"0.9", ...}
 ```
 
 …or ask it in chat with `!version`. To get from an image back to its source, the workflow stamps
 the commit in:
 
 ```bash
-docker image inspect forgejo.subversive.link/subversive/sable:0.5 --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'
+docker image inspect forgejo.subversive.link/subversive/sable:0.9 --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'
 ```
 
 Or go the other way: every image is also tagged with the commit it was built from, so the tag
@@ -210,7 +210,7 @@ docker pull forgejo.subversive.link/subversive/sable:0937a9479cccec9ea4375de1621
 git show 0937a9479cccec9ea4375de1621eb5e124d2c009
 ```
 
-Or use the git tag the Release created: `git checkout v0.5`.
+Or use the git tag the Release created: `git checkout v0.9`.
 
 ## Variations you may want later
 

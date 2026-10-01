@@ -169,6 +169,7 @@ The code is small enough to read in a sitting:
 [hooks.py](../src/sable/hooks.py) for rendering somebody else's webhook into a message,
 [app.py](../src/sable/app.py) for the HTTP surface,
 [config.py](../src/sable/config.py) for the environment,
+[`__main__.py`](../src/sable/__main__.py) for the command line and `--check`,
 [limits.py](../src/sable/limits.py) for the request body caps,
 [ratelimit.py](../src/sable/ratelimit.py) for the per-person limit,
 [mentions.py](../src/sable/mentions.py) for defanging mass mentions, and

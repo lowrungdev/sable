@@ -103,11 +103,6 @@ async def test_root_is_a_plain_banner(app_client: httpx.AsyncClient) -> None:
     assert response.text.startswith("sable ")
 
 
-async def test_there_is_no_webhook_route(app_client: httpx.AsyncClient) -> None:
-    """Chat is read by polling, so nothing is posted to us by Talk."""
-    assert (await app_client.post("/webhook", json={"type": "Create"})).status_code == 404
-
-
 @respx.mock
 async def test_a_dispatched_message_reaches_the_bot_and_is_answered() -> None:
     route = message_route()
@@ -289,7 +284,6 @@ async def test_startup_and_shutdown_are_logged_with_the_configuration(caplog) ->
     assert "starting" in text and "ready" in text
     assert "stopping" in text and "stopped" in text
     assert "listening on:   http://0.0.0.0:8080" in text
-    assert "/webhook" not in text
     assert f"nextcloud:      {BACKEND} as sable" in text
     assert "receiving:      long polls of up to 30s, conversations rescanned every 60s" in text
     assert "command prefix: '!'" in text

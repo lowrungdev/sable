@@ -48,10 +48,6 @@ class Context:
         return self.event.room_token
 
     @property
-    def sender(self) -> str:
-        return self.event.actor.name or self.event.actor.id
-
-    @property
     def is_admin(self) -> bool:
         """May the sender run the admin commands?
 
@@ -112,9 +108,6 @@ class Registry:
         return sorted(
             (c for c in self._commands.values() if not c.hidden), key=lambda c: c.name
         )
-
-    def __contains__(self, name: str) -> bool:
-        return self.get(name) is not None
 
 
 registry = Registry()
@@ -198,8 +191,7 @@ async def whoami(ctx: Context) -> str:
     actor = ctx.event.actor
     kind = "bot" if actor.is_bot else "guest" if actor.is_guest else "user"
     return (
-        f"You are **{actor.name or 'unknown'}** (`{actor.id}`), a {kind}"
-        f"{f' with participant type {actor.participant_type}' if actor.participant_type else ''}, "
+        f"You are **{actor.name or 'unknown'}** (`{actor.id}`), a {kind}, "
         f"in conversation `{ctx.event.room_token}`."
     )
 

@@ -404,8 +404,8 @@ def create_app(
     ) -> dict[str, object]:
         """Relay a message, optionally with a file, into a conversation.
 
-        One URL, one call, three accepted shapes: JSON as before, JSON with a
-        base64 ``file``, or multipart/form-data with an uploaded ``file``.
+        One URL, one call, three accepted shapes: JSON, JSON with a base64
+        ``file``, or multipart/form-data with an uploaded ``file``.
         """
         if not config.notify_enabled:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "alerting endpoint is disabled")
@@ -620,7 +620,7 @@ def concurrency_summary(config: Config) -> str:
     """The concurrency line in the startup block.
 
     Spelled out in both states, because the ceiling is what stands between a
-    redelivery storm and as many open model calls as there were events, each
+    burst of messages and as many open model calls as there were events, each
     holding SABLE_LLM_TIMEOUT open.
     """
     if not config.max_concurrent_replies:

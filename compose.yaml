@@ -19,7 +19,7 @@ services:
   sable:
     # Build from this checkout. To run a published release instead, delete these
     # two lines and use the image CI built (see docs/releasing.md):
-    #   image: forgejo.subversive.link/subversive/sable:0.6
+    #   image: forgejo.subversive.link/subversive/sable:0.9
     build: .
     image: sable:latest
     container_name: sable
@@ -164,7 +164,7 @@ services:
       # error — it would leave the feature usable by nobody.
       # SABLE_ASK_ADMINS_ONLY: "false"
 
-      # Reply "I have no !foo command" on an unknown command.
+      # Reply "I have no `foo` command. Try `!help`." on an unknown !foo.
       # SABLE_UNKNOWN_COMMAND_HINT: "true"
 
       # Post failures into the conversation as well as logging them.

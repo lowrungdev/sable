@@ -3,8 +3,8 @@
 Fetched 2026-10-01 from https://nextcloud-talk.readthedocs.io/en/latest/ (via WebFetch, so a small
 model summarised each page: recheck anything surprising on the page itself). **Refresh** by
 re-fetching the pages below, diffing against this file, and updating it plus `Fetched` above.
-Pages: `/global/`, `/conversation/`, `/chat/`, `/reaction/`, `/capabilities/`, `/participant/`,
-`/bot-management/` (index also lists avatar, call, poll, settings, integration, webinar).
+Pages: `/global/`, `/conversation/`, `/chat/`, `/reaction/`, `/capabilities/`, `/participant/`
+(the index also lists avatar, call, poll, settings, integration, webinar).
 sable's code is `src/sable/talk.py`, `events.py` and `poller.py`.
 
 ## Base paths: not one version for everything
@@ -84,8 +84,8 @@ threads 22.0. Limits: `config.chat.max-length`, `config.chat.read-privacy`.
    shape. Nothing acts on them.
 2. Whether a reaction moves a conversation's `lastMessage` in `GET /room` (matters only for a
    room-list polling design).
-3. sable treats `reaction_revoked` as Undo; author removal is actually `reaction_deleted`
-   (harmless today, nothing acts on Undo).
+3. sable parses no removal at all: `parse_message` keeps the `reaction` system message and ignores
+   every other one, `reaction_deleted` and `reaction_revoked` included. Nothing acts on a removal.
 4. sable's DELETE sends `reaction` in the body, as documented, and also as a query parameter in
    case a server reads DELETE parameters only from the URL.
 5. sable does not yet check the 256 reaction permission or the `reactions` capability.
@@ -96,9 +96,9 @@ threads 22.0. Limits: `config.chat.max-length`, `config.chat.read-privacy`.
   200 returns an array of chat messages (same shape as the poll) around the requested one; 404 when
   the conversation is not found for the participant; 412 lobby active and not moderator. Headers
   `X-Chat-Last-Given` and `X-Chat-Last-Common-Read`. **There is no single-message endpoint**; sable's
-  `TalkClient.message()` calls this with `limit=1` and picks the entry whose `id` matches (none ->
+  `TalkClient.message()` calls this with `limit=3` (`CONTEXT_LIMIT`) and picks the entry whose `id` matches (none ->
   treated as not found). The docs do not say outright that the centre message is in the array: the code
-  does not assume it. Unverified live: whether `limit=1` still includes the message itself.
+  does not assume it. Unverified live: whether the message itself is included in the answer.
 - **Leave a conversation** (`participant` page): `DELETE /ocs/v2.php/apps/spreed/api/v4/room/{token}/participants/self`.
   200 left; 400 when the caller is a moderator/owner and no other moderator/owner remains; 404
   conversation not found for the participant. (403 is listed only for removing *other* attendees.)

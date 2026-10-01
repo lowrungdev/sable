@@ -17,7 +17,7 @@ swap the class for one backed by Redis or SQLite; it has three methods and `Bot`
 constructor argument, so nothing else changes. Worth doing when people start noticing that a
 deploy loses context mid-conversation.
 
-**One process only.** History, the redelivery cache, the rate limiter and the position in each
+**One process only.** History, the rate limiter and the position in each
 conversation all live in memory, so running two workers would split them: replies would forget
 context depending on which worker answered. Two processes signed in as the same account are
 worse, since each long-polls every conversation and answers every message, so a question gets two
@@ -38,14 +38,12 @@ alerting routes, whose only protection is the size cap on each body.
 **Command authorization is global, not per room.** `SABLE_ADMIN_COMMANDS` and `SABLE_ADMIN_USERS`
 say who may run what across every conversation the bot is in. What they cannot say is "maser may
 deploy, but only from the ops room", or defer to Talk's own notion of a moderator — which is
-the thing an operator reaches for next. `Actor.participant_type` exists in
-[`events.py`](../src/sable/events.py), but nothing fills it in, and in user-account mode the chat
-messages and reaction events sable reads are reported not to carry the sender's participant type
-(not re-checked against a live server), so it is always empty and the clause of `!whoami` that
-would print it never fires. A rule against Talk's
-moderator role would need a lookup (the conversation's participant list) per decision, which is not
-a small change, and it is not there because it is one more thing to get wrong for a bot whose admin
-list is usually two names. Revisit when the first per-room rule is actually wanted. The same goes
+the thing an operator reaches for next. sable does not know the sender's participant type: the
+chat messages and reaction events it reads are reported not to carry it (not re-checked against a
+live server), so `!whoami` says only whether the sender is a user, a guest or a bot. A rule
+against Talk's moderator role would need a lookup (the conversation's participant list) per
+decision, which is not a small change, and it is not there because it is one more thing to get
+wrong for an assistant whose admin list is usually two names. Revisit when the first per-room rule is actually wanted. The same goes
 for `SABLE_LLM_USERS` and `SABLE_ALLOWED_ROOMS`, which are also global lists of ids and tokens.
 
 ## Talk features not yet used
@@ -55,14 +53,16 @@ live Nextcloud on 2026-10-01 and works: Talk delivers the reaction as a `reactio
 message through the same chat poll as everything else, with the reacted-to message in `parent`,
 and `_reaction()` recovers the emoji. The Talk documentation had suggested that message might be
 replaced before a poll saw it, and that its text might be a `{reaction}` placeholder; neither
-got in the way. What has not been exercised is removal. A reaction a person takes back arrives
-as `reaction_deleted`, which is not parsed, while `reaction_revoked` is a moderator removing
-someone else's and is parsed as `Undo`; nothing acts on either. If a feature ever needs to,
-that is the place to start, in `parse_message` in [`events.py`](../src/sable/events.py).
+got in the way. What has not been exercised is removal. A reaction a person takes back is documented as
+`reaction_deleted` and a moderator removing someone else's as `reaction_revoked`; whether either
+arrives through the poll is not known. Neither is parsed: `parse_message` in
+[`events.py`](../src/sable/events.py) keeps the `reaction` system message and ignores every other
+system message, so nothing acts on a removal. If a feature ever needs to, that is the place to
+start.
 
 Reactions are handled for one emoji: ⁉️ sends the message it is attached to to the model. Any
 other reaction is parsed and ignored, so a second behaviour — an approval flow where a thumbs-up
-from the right person does something — is a branch in `Bot.handle` next to the existing one.
+from the right person does something — is a branch in `Bot._route` next to the existing one.
 Joining and leaving a conversation are not parsed at all; a greeting when sable is invited would
 hang off `Poller.scan`, which is where it learns of a new conversation.
 
@@ -73,10 +73,10 @@ The ⁉️ feature reads the message it points at back from Talk, one call per r
 context endpoint (`GET /chat/{token}/{messageId}/context`, capability `chat-get-context`), since
 Talk has no single-message endpoint. That replaced an in-memory message cache, so it works on old
 messages and across restarts and holds no chat content. What is not checked against a live server
-is whether the call with `limit=1` includes the message itself: the Talk documentation does not
-say, and `TalkClient.message` picks the entry whose id matches and treats none as "not found". If a
-server answers with the neighbours only, every reaction would get "I cannot find that message", and
-the fix is a larger `limit` in that one call.
+is whether the call includes the message itself: the Talk documentation does not say, so
+`TalkClient.message` asks for three neighbours each way (`CONTEXT_LIMIT`), picks the entry whose id
+matches and treats none as "not found". If a server answers with the neighbours only, every
+reaction would get "I cannot find that message", and the fix is a larger `limit` in that one call.
 
 File attachments are done, as the same account that posts: it uploads over WebDAV and shares into
 the conversation, on the `/notify` path. The other direction is not done — sable cannot read a
@@ -112,9 +112,7 @@ from just those. That holds nothing open, at the cost of a few seconds of latenc
 request per interval, and it would replace `SABLE_POLL_TIMEOUT` and `SABLE_ROOM_REFRESH` with a
 single interval. It is **not** implemented, and it rests on something not yet verified: whether
 a reaction moves a conversation's `lastMessage`, which the ⁉️ feature would need (the feature
-works today because every conversation has its own poll, which sees the reaction directly). Talk's webhook
-Bot API is the other way out, which costs an idle server nothing, at the price of everything the
-[user-account model](purpose.md#what-it-deliberately-doesnt-do) was chosen to avoid.
+works today because every conversation has its own poll, which sees the reaction directly).
 
 ## Assistant features
 
@@ -133,7 +131,8 @@ Retrieval is untouched, and the interesting question there is what corpus, and w
 Files is it.
 
 `SABLE_LLM_MODEL` is global. A cheap model for chatter and an expensive one for a particular
-room is a small change to `answer_with_llm`, which already takes a model override.
+room is a small change to `answer_with_llm`: both clients' `complete()` already take a model
+override, but `answer_with_llm` does not pass one.
 
 Model output is posted verbatim. If prompt injection becomes a real concern rather than a
 theoretical one, the place to intervene is between the completion and the reply.

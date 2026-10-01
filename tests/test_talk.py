@@ -50,18 +50,17 @@ async def test_send_message_is_a_chat_post_with_basic_auth() -> None:
 
 
 @respx.mock
-async def test_send_message_passes_reply_and_reference() -> None:
+async def test_send_message_passes_reply_and_silent() -> None:
     route = respx.post(CHAT_URL).mock(return_value=ocs({"id": 1}, 201))
     client = make()
     try:
-        await client.send_message(ROOM, "hi", reply_to=7, silent=True, reference_id="ref-1")
+        await client.send_message(ROOM, "hi", reply_to=7, silent=True)
     finally:
         await client.aclose()
     assert json.loads(route.calls.last.request.content) == {
         "message": "hi",
         "silent": True,
         "replyTo": 7,
-        "referenceId": "ref-1",
     }
 
 

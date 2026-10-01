@@ -111,15 +111,6 @@ async def test_messages_from_bots_are_ignored(bot: Bot) -> None:
 
 
 @respx.mock
-async def test_a_redelivered_event_is_handled_once(bot: Bot) -> None:
-    route = message_route()
-    incoming = event("!ping", message_id=55)
-    await bot.handle(incoming)
-    await bot.handle(incoming)
-    assert len(route.calls) == 1
-
-
-@respx.mock
 async def test_a_mention_goes_to_the_model(bot: Bot, llm: FakeLLM) -> None:
     route = message_route()
     await bot.handle(event("@sable how are you?"))
@@ -334,7 +325,7 @@ async def test_empty_messages_do_nothing(bot: Bot) -> None:
 
 @respx.mock
 async def test_an_unreachable_nextcloud_does_not_crash_the_handler(bot: Bot) -> None:
-    # The webhook was answered long ago; a failed post is a log line, not a raise.
+    # A failed post is a log line, not a raise.
     respx.post(MESSAGE_URL).mock(side_effect=httpx.ConnectError("refused"))
     await bot.handle(event("!ping"))
 
@@ -350,53 +341,11 @@ async def test_an_unreachable_nextcloud_does_not_crash_the_error_path(llm: FakeL
 
 
 @respx.mock
-async def test_two_people_reacting_to_one_message_are_both_seen(bot: Bot) -> None:
-    # The event id is the message reacted *to*, so these share it. Keying on the
-    # id alone would drop the second as a redelivery.
-    from conftest import reaction_event
-
-    alice = reaction_event("👍", message_id=100, actor_id="users/alice")
-    bob = reaction_event("😄", message_id=100, actor_id="users/bob")
-    assert bot.seen(alice) is False
-    assert bot.seen(bob) is False
-
-
-@respx.mock
-async def test_one_person_reacting_twice_with_different_emoji(bot: Bot) -> None:
-    from conftest import reaction_event
-
-    first = reaction_event("👍", message_id=100)
-    second = reaction_event("🎉", message_id=100)
-    assert bot.seen(first) is False
-    assert bot.seen(second) is False
-
-
-@respx.mock
-async def test_the_same_reaction_redelivered_is_still_deduplicated(bot: Bot) -> None:
-    from conftest import reaction_event
-
-    event_ = reaction_event("👍", message_id=100)
-    assert bot.seen(event_) is False
-    assert bot.seen(reaction_event("👍", message_id=100)) is True
-
-
-@respx.mock
-async def test_adding_and_removing_a_reaction_are_distinct_events(bot: Bot) -> None:
-    from conftest import reaction_event
-
-    added = reaction_event("👍", message_id=100)
-    removed = reaction_event("👍", message_id=100, undo=True)
-    assert bot.seen(added) is False
-    assert bot.seen(removed) is False
-
-
-@respx.mock
 async def test_reactions_draw_no_reply_and_no_model_call(bot: Bot, llm: FakeLLM) -> None:
     from conftest import reaction_event
 
     route = message_route()
     await bot.handle(reaction_event("👍"))
-    await bot.handle(reaction_event("👍", undo=True))
     assert not route.called
     assert not llm.calls
 
@@ -479,17 +428,6 @@ async def test_another_emoji_does_nothing(bot: Bot, llm: FakeLLM) -> None:
     route = message_route()
     await bot.handle(event("hello", message_id=100))
     await bot.handle(reaction_event("👍", message_id=100))
-    assert not route.called
-    assert not llm.calls
-
-
-@respx.mock
-async def test_removing_the_ask_emoji_does_nothing(bot: Bot, llm: FakeLLM) -> None:
-    from conftest import reaction_event
-
-    route = message_route()
-    await bot.handle(event("hello", message_id=100))
-    await bot.handle(reaction_event(ASK, message_id=100, undo=True))
     assert not route.called
     assert not llm.calls
 
@@ -1461,21 +1399,6 @@ async def test_a_command_is_answered_in_a_conversation_of_any_token_shape(
 
 
 @respx.mock
-async def test_the_same_message_id_in_two_conversations_is_not_a_redelivery(
-    bot: Bot,
-) -> None:
-    """The conversation is part of the seen key, so two rooms cannot deduplicate
-    each other's events - and a bot in many conversations at once is the normal
-    case, not the exotic one."""
-    here = message_route()
-    there = message_route("1234567890")
-    await bot.handle(event("!ping", message_id=500))
-    await bot.handle(event("!ping", message_id=500, room="1234567890"))
-    assert here.called
-    assert there.called
-
-
-@respx.mock
 async def test_an_ai_room_listed_by_a_token_of_its_own(llm: FakeLLM) -> None:
     """The positive half of the token match: the existing token test only shows a
     non-matching entry staying quiet, which a match that never fires would pass
@@ -2188,13 +2111,12 @@ async def test_would_handle_agrees_with_handle(label: str, llm: FakeLLM) -> None
 
 
 async def test_would_handle_consumes_nothing(llm: FakeLLM) -> None:
-    """No rate-limit token and no dedupe entry: asking is free, and the event can
-    still be handled afterwards."""
+    """No rate-limit token: asking is free, and the event can still be handled
+    afterwards."""
     bot = Bot(make_config(rate_limit=1), llm=llm)  # type: ignore[arg-type]
     ev = event("!ping")
     try:
         assert all(bot.would_handle(ev) for _ in range(5))
-        assert not bot._seen and not bot._seen_set
         with respx.mock:
             route = message_route()
             await bot.handle(ev)
@@ -2216,3 +2138,23 @@ async def test_help_does_not_offer_the_model_to_who_may_not_use_it(llm: FakeLLM)
     assert "!ai" not in for_alice and "Mention me" not in for_alice
     assert "`!ping`" in for_alice
     assert "`!ai <question>`" in for_bob and "Mention me" in for_bob
+
+
+@respx.mock
+async def test_the_same_reaction_added_again_is_handled_again(bot: Bot) -> None:
+    """Talk names a reaction event by the message it is on, so putting an emoji
+    back after taking it off looks identical to the first time. Nothing may
+    swallow it as a repeat: polling hands over each event once."""
+    from conftest import reaction_event
+
+    handled: list[int] = []
+
+    async def count(event_) -> None:
+        handled.append(event_.message_id)
+
+    bot._run_reaction_query = count  # type: ignore[method-assign]
+    bot._ask_key = "\u2049"
+    ask = reaction_event("\u2049\ufe0f", message_id=100)
+    await bot.handle(ask)
+    await bot.handle(reaction_event("\u2049\ufe0f", message_id=100))
+    assert handled == [100, 100]

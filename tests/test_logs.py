@@ -32,7 +32,7 @@ def test_a_probe_that_failed_is_kept() -> None:
 
 
 def test_every_other_route_is_kept() -> None:
-    assert HealthCheckFilter().filter(access("/webhook", 200))
+    assert HealthCheckFilter().filter(access("/hook/komodo", 200))
     assert HealthCheckFilter().filter(access("/notify", 201))
 
 

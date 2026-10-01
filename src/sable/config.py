@@ -253,7 +253,7 @@ class Config:
     # --- chat behaviour ----------------------------------------------------
     command_prefix: str = "!"
     #: Conversations the account follows at all, as tokens. Empty means every one
-    #: it is in, which is how it behaved before this setting existed.
+    #: it is in.
     allowed_rooms: list[str] = field(default_factory=list)
     #: Leave every group or public conversation that is not allowed and is not
     #: a /notify or /hook destination. Only acts when allowed_rooms is set.
