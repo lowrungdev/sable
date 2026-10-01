@@ -7,7 +7,7 @@ name: Release
 #   release  what is published: a container image and a Forgejo Release
 #
 # The version in pyproject.toml is the release number, and the matching section
-# of docs/CHANGELOG.md is its notes. A version that is already released is never
+# of CHANGELOG.md is its notes. A version that is already released is never
 # published again - bump the version to publish a new one.
 #
 # The button on this workflow rebuilds and re-pushes the image for whatever is
@@ -66,7 +66,7 @@ jobs:
             $0 ~ re { inside = 1; next }
             /^## / { inside = 0 }
             inside { print }
-          ' docs/CHANGELOG.md > /tmp/notes.md
+          ' CHANGELOG.md > /tmp/notes.md
 
           # Drop blank lines at both ends.
           sed -i -e '/./,$!d' /tmp/notes.md
@@ -74,7 +74,7 @@ jobs:
           printf '%s\n' "$NOTES" > /tmp/notes.md
 
           if ! grep -q '[^[:space:]]' /tmp/notes.md; then
-            echo "docs/CHANGELOG.md has nothing under '## $VERSION'." >&2
+            echo "CHANGELOG.md has nothing under '## $VERSION'." >&2
             echo "Write the release notes there first - they become the release body." >&2
             exit 1
           fi

@@ -6,9 +6,9 @@ build-backend = "hatchling.build"
 name = "sable"
 version = "0.9"
 description = "A Nextcloud Talk assistant that runs as a user account: command handling, an OpenAI-compatible LLM assistant, and an inbound alerting endpoint."
-readme = "docs/README.md"
+readme = "README.md"
 license = "MIT"
-license-files = ["docs/LICENSE"]
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",
