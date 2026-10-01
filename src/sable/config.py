@@ -27,6 +27,9 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 #: so the /notify caller was told 500 where the same value uppercased got 400.
 TOKEN_RE = re.compile(r"^[a-z0-9]{4,64}\Z")
 
+#: The longest a Talk long poll can be asked to wait (Talk clamps to this).
+MAX_POLL_TIMEOUT = 60
+
 #: How sable talks to a model backend.
 LLM_BACKENDS = frozenset({"openai", "openwebui"})
 
@@ -49,8 +52,28 @@ TOKEN_HINT = (
 DEFAULT_TRUSTED_PROXIES = ("127.0.0.1", "::1")
 
 
+#: Request-body keys that switch tools on. They have their own settings, gated
+#: per conversation, and SABLE_LLM_EXTRA_BODY is merged after that gate.
+TOOL_BODY_KEYS = frozenset(
+    {"tool_ids", "features", "tool_servers", "terminal_id", "session_id"}
+)
+
+
 class ConfigError(ValueError):
     """Raised when the environment is missing or contradicts itself."""
+
+
+def _check_tokens(name: str, entries: list[str], *, star: bool = False) -> None:
+    """Refuse an entry that is not a conversation token (``*`` too, if ``star``)."""
+    for entry in entries:
+        if entry == "*" and star:
+            continue
+        if not TOKEN_RE.match(entry):
+            raise ConfigError(
+                f"{name} entry {entry!r} is not a conversation token: {TOKEN_HINT}. "
+                "Tokens are required because any user can name their own "
+                "conversation after yours, and a name would then match theirs."
+            )
 
 
 def _str(name: str, default: str = "") -> str:
@@ -195,6 +218,10 @@ class LLMConfig:
     #: Append the sources the loop cited. Worth having: it is how you notice an
     #: answer came from an encyclopaedia rather than from today's market.
     show_sources: bool = False
+    #: Conversations (tokens, or ``*``) where tool_ids and features may be sent.
+    #: Anywhere else the model is asked with no tools at all, and empty means
+    #: nowhere: tools are a decision about a room, never a default.
+    tool_rooms: list[str] = field(default_factory=list)
 
     @property
     def enabled(self) -> bool:
@@ -204,50 +231,64 @@ class LLMConfig:
     def agentic(self) -> bool:
         return self.backend == "openwebui"
 
+    def tools_in(self, token: str) -> bool:
+        """May the model be offered tools when it answers in this conversation?"""
+        return "*" in self.tool_rooms or (bool(token) and token in self.tool_rooms)
+
 
 @dataclass(frozen=True)
 class Config:
-    # --- Talk bot identity -------------------------------------------------
-    bot_secret: str
-    #: The secret being rotated away from, accepted on incoming webhooks only.
-    #: Talk holds one secret per bot install, so changing it means uninstalling
-    #: and reinstalling the bot, and every event that arrives in between fails
-    #: its signature check. Keeping the old value here covers that window.
-    bot_secret_previous: str = ""
-    bot_name: str = "sable"
-    nextcloud_url: str = ""
-    pin_backend: bool = True
+    # --- the Nextcloud account sable is -------------------------------------
+    nextcloud_url: str
+    #: A regular Nextcloud user. sable reads chat as this user, posts as it, and
+    #: uploads files into its Files. An app password, not the login password.
+    nextcloud_user: str
+    #: Never in the repr: a Config reaches logs and tracebacks.
+    nextcloud_password: str = field(repr=False)
+    #: Seconds each long poll for new messages may wait. Talk allows up to 60.
+    poll_timeout: int = 30
+    #: Seconds between looks at which conversations the account is in.
+    room_refresh: int = 60
 
     # --- chat behaviour ----------------------------------------------------
     command_prefix: str = "!"
+    #: Conversations the account follows at all, as tokens. Empty means every one
+    #: it is in, which is how it behaved before this setting existed.
+    allowed_rooms: list[str] = field(default_factory=list)
+    #: Leave every group or public conversation that is not allowed and is not
+    #: a /notify or /hook destination. Only acts when allowed_rooms is set.
+    leave_unlisted_rooms: bool = False
+    #: Tokens (or ``*`` for every allowed room) where every message goes to the
+    #: model, without a mention. Never display names: anybody can name their own
+    #: conversation after yours.
     ai_rooms: list[str] = field(default_factory=list)
     reply_as_reply: bool = False
     thinking_reaction: str = ""
     #: React with this to send a message to the model. Empty disables the
-    #: feature, and with it the message cache that makes it possible.
+    #: feature. The reacted-to message is read back from Talk.
     ask_reaction: str = "⁉️"
     #: Restrict that reaction to the admin_users. Anybody in a conversation can
     #: otherwise forward somebody else's words to the model backend without
     #: saying anything in the room, which is accepted risk 7 in security.md.
     ask_admins_only: bool = False
-    #: Conversations whose messages are cached for the reaction, matched like
-    #: ai_rooms. Empty means *every* conversation, which is the asymmetry to
-    #: watch: an empty ai_rooms means no rooms. Deliberate - reading empty as
-    #: none would switch the feature off for every existing deployment on
-    #: upgrade, silently, which is the one outcome worth ruling out.
-    ask_rooms: list[str] = field(default_factory=list)
-    #: Messages remembered per conversation, so a reaction can refer to one.
-    message_cache: int = 200
     report_errors: bool = True
     startup_check: bool = True
     unknown_command_hint: bool = True
     max_message_chars: int = 30000
     #: Model calls allowed to be in flight at once; 0 lifts the ceiling. Every
     #: trigger becomes a background task with no limit of its own, so a busy room
-    #: or a burst of redeliveries means that many completions open together, each
-    #: holding the llm.timeout open. Talk rate-limits the replies we send, not
-    #: the events it sends us, so nothing upstream applies the brakes either.
+    #: or a burst of messages means that many completions open together, each
+    #: holding the llm.timeout open. Nothing upstream limits how many messages
+    #: arrive, so nothing applies the brakes but this.
     max_concurrent_replies: int = 8
+    #: Triggers (a command, a model question, an ask reaction) one person may set
+    #: off per minute; the rest are ignored. 0 lifts the limit.
+    rate_limit: int = 20
+    #: Replies allowed to WAIT for a free slot once the ceiling above is reached.
+    #: Past it the new work is dropped (and logged), so a flood cannot grow an
+    #: unbounded pile of parked tasks. 0 means nothing may wait: with every slot
+    #: busy, the next reply is dropped. Irrelevant when the ceiling is 0.
+    max_queued_replies: int = 20
 
     # --- conversation memory ----------------------------------------------
     history_turns: int = 12
@@ -260,6 +301,11 @@ class Config:
     #: Events from these users are dropped entirely. Entries match the bare user
     #: id, the full actor id, or the display name.
     ignore_users: list[str] = field(default_factory=list)
+
+    # --- who may use the model ---------------------------------------------
+    #: Nextcloud user ids allowed to make the model answer, on top of the
+    #: admin_users. Empty means everyone.
+    llm_users: list[str] = field(default_factory=list)
 
     # --- who may run which command -----------------------------------------
     #: Commands only the admin users may run. ``*`` stands for every command,
@@ -289,12 +335,7 @@ class Config:
     max_hook_bytes: int = 256 * 1024
 
     # --- file attachments -------------------------------------------------
-    #: A Nextcloud *user* account, used only to upload and share files. The bot
-    #: API cannot attach anything to a message, so this is the second, larger
-    #: credential that buys attachments. Leave empty and /notify stays text-only.
-    nextcloud_user: str = ""
-    nextcloud_password: str = ""
-    #: Folder inside that user's own Files where attachments are put.
+    #: Folder inside the account's own Files where attachments are put.
     upload_path: str = "/sable"
     #: Largest attachment /notify will accept, in bytes.
     max_upload_bytes: int = 25 * 1024 * 1024
@@ -343,23 +384,6 @@ class Config:
         return bool(self.notify_token)
 
     @property
-    def inbound_secrets(self) -> tuple[str, ...]:
-        """The secrets an incoming signature may have been made with, current first.
-
-        One entry normally, two while a rotation is in progress. Try them in this
-        order and stop at the first that verifies.
-
-        Incoming verification only. Everything sable *sends* - the bot API calls
-        in bot.py - is signed with ``bot_secret`` and never with the previous one:
-        Talk has already been given the new value by then, so signing with the old
-        one would be rejected. The previous secret exists to keep believing events
-        that were signed before the reinstall, nothing more.
-        """
-        if self.bot_secret_previous:
-            return (self.bot_secret, self.bot_secret_previous)
-        return (self.bot_secret,)
-
-    @property
     def health_guarded(self) -> bool:
         """Does GET /healthz need a token?"""
         return bool(self.health_token)
@@ -375,11 +399,6 @@ class Config:
 
     def hook_token(self, name: str) -> str:
         return self.hook_tokens.get(name.strip().lower(), "")
-
-    @property
-    def uploads_enabled(self) -> bool:
-        """Can /notify accept a file? Needs the user account as well as the URL."""
-        return bool(self.nextcloud_user and self.nextcloud_password and self.nextcloud_url)
 
     def is_ignored(self, actor_id: str, name: str = "") -> bool:
         """Should everything from this actor be dropped?
@@ -434,6 +453,15 @@ class Config:
             return True
         return any(self._listed(self.admin_commands, name) for name in names)
 
+    @staticmethod
+    def _user_listed(entries: list[str], user_id: str) -> bool:
+        if not user_id or not entries:
+            return False
+        wanted = user_id.casefold()
+        return any(
+            entry.strip().casefold().removeprefix("users/") == wanted for entry in entries
+        )
+
     def is_admin_user(self, user_id: str) -> bool:
         """May this Nextcloud user run the admin commands?
 
@@ -443,80 +471,78 @@ class Config:
         SABLE_IGNORE_USERS may match a name and this may not. Guests and bots
         have no user id at all, so they are never admins.
         """
-        if not user_id or not self.admin_users:
-            return False
-        wanted = user_id.casefold()
-        return any(
-            entry.strip().casefold().removeprefix("users/") == wanted
-            for entry in self.admin_users
-        )
+        return self._user_listed(self.admin_users, user_id)
 
-    def ai_room_allowed(self, token: str, name: str = "") -> bool:
+    def is_llm_user(self, user_id: str) -> bool:
+        """May this Nextcloud user make the model answer?
+
+        Everybody may while SABLE_LLM_USERS is empty. Once it names anybody, only
+        those users and the administrators may, matched on the id like
+        :meth:`is_admin_user`: a guest or a federated user has none, so is out.
+        """
+        if not self.llm_users:
+            return True
+        return self._user_listed(self.llm_users, user_id) or self.is_admin_user(user_id)
+
+    def room_allowed(self, token: str) -> bool:
+        """Does the account follow this conversation? Everything, if unset."""
+        return not self.allowed_rooms or token in self.allowed_rooms
+
+    def ai_room_allowed(self, token: str) -> bool:
         """Should a plain (non-command, non-mention) message go to the LLM?
 
-        An entry matches either the conversation token - ``abcd1234``, the last
-        segment of the conversation's URL - or its display name, ignoring case
-        and surrounding space.
-
-        Prefer tokens where it matters: a token is permanent, while any moderator
-        can rename a conversation, which would silently change whether the bot
-        answers everything in it.
+        Only by token. A display name is chosen by whoever creates the
+        conversation, so matching one would let anybody who can invite the
+        account name their room after yours and have every message in it
+        answered. ``*`` means every conversation the account follows.
         """
-        if "*" in self.ai_rooms:
-            return True
-        if token and token in self.ai_rooms:
-            return True
-        wanted = name.strip().casefold()
-        return bool(wanted) and any(
-            entry.strip().casefold() == wanted for entry in self.ai_rooms
-        )
+        if not self.room_allowed(token):
+            return False
+        return "*" in self.ai_rooms or (bool(token) and token in self.ai_rooms)
 
-    def ask_room_allowed(self, token: str, name: str = "") -> bool:
-        """Should this conversation's messages be cached for the ask reaction?
-
-        Entries are matched exactly as :meth:`ai_room_allowed` matches its own -
-        conversation token or display name, ignoring case and surrounding space,
-        with ``*`` for all of them - and tokens are preferable here for the same
-        reason: renaming a conversation would otherwise change what is cached.
-
-        An empty list means **every** conversation, where an empty ``ai_rooms``
-        means none. The asymmetry is deliberate: the cache is on today for every
-        room the bot is in, and reading empty as none would turn the reaction off
-        across every existing deployment the moment it upgraded.
-        """
-        if not self.ask_rooms or "*" in self.ask_rooms:
-            return True
-        if token and token in self.ask_rooms:
-            return True
-        wanted = name.strip().casefold()
-        return bool(wanted) and any(
-            entry.strip().casefold() == wanted for entry in self.ask_rooms
-        )
+    @property
+    def destination_rooms(self) -> set[str]:
+        """Conversations sable posts into on behalf of /notify and /hook."""
+        found = set(self.notify_rooms.values())
+        found |= {self.hook_room(name) for name in self.hooks}
+        return {room for room in found if room}
 
     @classmethod
     def from_env(cls) -> Config:
-        secret = _str("SABLE_BOT_SECRET")
-        if not secret:
-            raise ConfigError(
-                "SABLE_BOT_SECRET is required; it is the secret you passed to "
-                "`occ talk:bot:install`."
+        url = _str("SABLE_NEXTCLOUD_URL").rstrip("/")
+        user = _str("SABLE_NEXTCLOUD_USER")
+        password = _str("SABLE_NEXTCLOUD_PASSWORD")
+        missing_account = [
+            name
+            for name, value in (
+                ("SABLE_NEXTCLOUD_URL", url),
+                ("SABLE_NEXTCLOUD_USER", user),
+                ("SABLE_NEXTCLOUD_PASSWORD", password),
             )
-        if not 40 <= len(secret) <= 128:
+            if not value
+        ]
+        if missing_account:
             raise ConfigError(
-                "SABLE_BOT_SECRET must be 40-128 characters, matching what Nextcloud "
-                f"accepts for a bot secret (got {len(secret)})."
+                f"{', '.join(missing_account)} required: sable signs in to Nextcloud "
+                "as an ordinary user. Create one for it, give it an app password "
+                "(Settings > Security > Devices & sessions), and set all three of "
+                "SABLE_NEXTCLOUD_URL, SABLE_NEXTCLOUD_USER and "
+                "SABLE_NEXTCLOUD_PASSWORD."
             )
-        previous = _str("SABLE_BOT_SECRET_PREVIOUS")
-        if previous and not 40 <= len(previous) <= 128:
+        if not re.match(r"^https?://[^/\s]+", url):
             raise ConfigError(
-                "SABLE_BOT_SECRET_PREVIOUS must be 40-128 characters, the same range "
-                f"Nextcloud accepts for the secret it replaces (got {len(previous)})."
+                f"SABLE_NEXTCLOUD_URL must start with http:// or https://, got {url!r}"
             )
-        if previous and previous == secret:
+        poll_timeout = _int("SABLE_POLL_TIMEOUT", 30)
+        if poll_timeout < 1:
             raise ConfigError(
-                "SABLE_BOT_SECRET_PREVIOUS is the same value as SABLE_BOT_SECRET, so "
-                "nothing has been rotated. It is there to hold the secret you are "
-                "rotating away from; set it to the old value, or unset it."
+                f"SABLE_POLL_TIMEOUT must be at least 1 second (got {poll_timeout})"
+            )
+        room_refresh = _int("SABLE_ROOM_REFRESH", 60)
+        if room_refresh < 5:
+            raise ConfigError(
+                "SABLE_ROOM_REFRESH must be at least 5 seconds: it is how often "
+                f"the conversation list is fetched (got {room_refresh})"
             )
 
         llm = LLMConfig(
@@ -538,27 +564,30 @@ class Config:
             poll_interval=_float("SABLE_LLM_POLL_INTERVAL", 2.0) or 0.0,
             keep_chats=_bool("SABLE_LLM_KEEP_CHATS", False),
             show_sources=_bool("SABLE_LLM_SHOW_SOURCES", False),
+            tool_rooms=_csv("SABLE_LLM_TOOL_ROOMS"),
         )
 
         config = cls(
-            bot_secret=secret,
-            bot_secret_previous=previous,
-            bot_name=_str("SABLE_BOT_NAME", "sable"),
-            nextcloud_url=_str("SABLE_NEXTCLOUD_URL").rstrip("/"),
-            pin_backend=_bool("SABLE_PIN_BACKEND", True),
+            nextcloud_url=url,
+            nextcloud_user=user,
+            nextcloud_password=password,
+            poll_timeout=min(poll_timeout, MAX_POLL_TIMEOUT),
+            room_refresh=room_refresh,
             command_prefix=_str("SABLE_COMMAND_PREFIX", "!") or "!",
+            allowed_rooms=_csv("SABLE_ALLOWED_ROOMS"),
+            leave_unlisted_rooms=_bool("SABLE_LEAVE_UNLISTED_ROOMS", False),
             ai_rooms=_csv("SABLE_AI_ROOMS"),
             reply_as_reply=_bool("SABLE_REPLY_AS_REPLY", False),
             thinking_reaction=_str("SABLE_THINKING_REACTION"),
             ask_reaction=_str("SABLE_ASK_REACTION", "⁉️"),
             ask_admins_only=_bool("SABLE_ASK_ADMINS_ONLY", False),
-            ask_rooms=_csv("SABLE_ASK_ROOMS"),
-            message_cache=_int("SABLE_MESSAGE_CACHE", 200),
             report_errors=_bool("SABLE_REPORT_ERRORS", True),
             startup_check=_bool("SABLE_STARTUP_CHECK", True),
             unknown_command_hint=_bool("SABLE_UNKNOWN_COMMAND_HINT", True),
             max_message_chars=_int("SABLE_MAX_MESSAGE_CHARS", 30000),
             max_concurrent_replies=_int("SABLE_MAX_CONCURRENT_REPLIES", 8),
+            rate_limit=_int("SABLE_RATE_LIMIT", 20),
+            max_queued_replies=_int("SABLE_MAX_QUEUED_REPLIES", 20),
             history_turns=_int("SABLE_HISTORY_TURNS", 12),
             history_ttl=_int("SABLE_HISTORY_TTL", 3600),
             llm=llm,
@@ -566,6 +595,7 @@ class Config:
             admin_commands=_csv("SABLE_ADMIN_COMMANDS"),
             normal_commands=_csv("SABLE_NORMAL_COMMANDS"),
             admin_users=_csv("SABLE_ADMIN_USERS"),
+            llm_users=_csv("SABLE_LLM_USERS"),
             notify_token=_str("SABLE_NOTIFY_TOKEN"),
             notify_rooms=_mapping("SABLE_NOTIFY_ROOMS"),
             hooks={
@@ -574,8 +604,6 @@ class Config:
             hook_tokens=_prefixed("SABLE_HOOK_TOKEN_"),
             hook_templates=_prefixed("SABLE_HOOK_TEMPLATE_"),
             max_hook_bytes=_int("SABLE_MAX_HOOK_BYTES", 256 * 1024),
-            nextcloud_user=_str("SABLE_NEXTCLOUD_USER"),
-            nextcloud_password=_str("SABLE_NEXTCLOUD_PASSWORD"),
             upload_path="/" + _str("SABLE_UPLOAD_PATH", "/sable").strip("/"),
             max_upload_bytes=_int("SABLE_MAX_UPLOAD_BYTES", 25 * 1024 * 1024),
             api_docs=_bool("SABLE_API_DOCS", False),
@@ -636,11 +664,31 @@ class Config:
                 "nobody at all could use the reaction. Name the administrators, or "
                 "turn it off to leave the reaction open to everyone."
             )
+        if config.rate_limit < 0:
+            raise ConfigError(
+                "SABLE_RATE_LIMIT cannot be negative. Use 0 for no limit, or the "
+                "number of triggers one person may set off per minute "
+                f"(got {config.rate_limit})."
+            )
+        _check_tokens("SABLE_ALLOWED_ROOMS", config.allowed_rooms)
+        if "*" in config.allowed_rooms:
+            raise ConfigError(
+                "SABLE_ALLOWED_ROOMS does not take '*': leave it empty to follow "
+                "every conversation, or list the conversation tokens."
+            )
+        _check_tokens("SABLE_AI_ROOMS", config.ai_rooms, star=True)
+        _check_tokens("SABLE_LLM_TOOL_ROOMS", config.llm.tool_rooms, star=True)
         if config.max_concurrent_replies < 0:
             raise ConfigError(
                 "SABLE_MAX_CONCURRENT_REPLIES cannot be negative. Use 0 for no "
                 "ceiling at all, or a count of model calls to allow at once "
                 f"(got {config.max_concurrent_replies})."
+            )
+        if config.max_queued_replies < 0:
+            raise ConfigError(
+                "SABLE_MAX_QUEUED_REPLIES cannot be negative. Use 0 to let no "
+                "reply wait for a slot, or a count of replies allowed to queue "
+                f"(got {config.max_queued_replies})."
             )
 
         missing = sorted(set(config.hooks) - set(config.hook_tokens))
@@ -676,11 +724,6 @@ class Config:
                     f"SABLE_NOTIFY_ROOMS entry {alias}={room!r} is not a "
                     f"conversation token: {TOKEN_HINT}."
                 )
-        if config.hooks and not config.nextcloud_url:
-            raise ConfigError(
-                "SABLE_NEXTCLOUD_URL is required when SABLE_HOOKS is set: a webhook "
-                "from another service carries no Nextcloud address to reply to."
-            )
         if config.timezone:
             try:
                 ZoneInfo(config.timezone)
@@ -690,6 +733,60 @@ class Config:
                     f"name such as America/New_York or Europe/Berlin ({exc})"
                 ) from exc
         warnings: list[str] = []
+        if poll_timeout > MAX_POLL_TIMEOUT:
+            warnings.append(
+                f"SABLE_POLL_TIMEOUT is {poll_timeout}, but Talk holds a long poll "
+                f"for at most {MAX_POLL_TIMEOUT} seconds; using {MAX_POLL_TIMEOUT}."
+            )
+        if config.nextcloud_url.startswith("http://") and not re.match(
+            r"^http://(localhost|127\.|\[::1\])", config.nextcloud_url
+        ):
+            warnings.append(
+                "SABLE_NEXTCLOUD_URL is plain http://, so the account's password "
+                "crosses the network unencrypted on every request. Use https:// "
+                "unless this is a private network you trust."
+            )
+        if not config.allowed_rooms:
+            warnings.append(
+                "SABLE_ALLOWED_ROOMS is empty, so sable follows every conversation "
+                "it is in, and any user who can invite the account into one can use "
+                "it. List the conversation tokens it should serve."
+            )
+        if config.leave_unlisted_rooms and not config.allowed_rooms:
+            warnings.append(
+                "SABLE_LEAVE_UNLISTED_ROOMS has no effect while SABLE_ALLOWED_ROOMS "
+                "is empty: without a list there is nothing to call unlisted."
+            )
+        if config.allowed_rooms:
+            for name, entries in (
+                ("SABLE_AI_ROOMS", config.ai_rooms),
+                ("SABLE_LLM_TOOL_ROOMS", config.llm.tool_rooms),
+            ):
+                outside = [e for e in entries if e != "*" and e not in config.allowed_rooms]
+                if outside:
+                    warnings.append(
+                        f"{name} lists {', '.join(outside)}, which SABLE_ALLOWED_ROOMS "
+                        "does not: sable never reads those conversations, so the "
+                        "entry does nothing."
+                    )
+        tools_configured = bool(config.llm.tool_ids or config.llm.features)
+        if tools_configured and not config.llm.tool_rooms:
+            warnings.append(
+                "SABLE_LLM_TOOL_IDS or SABLE_LLM_FEATURES is set, but "
+                "SABLE_LLM_TOOL_ROOMS is empty: tools are configured and no "
+                "conversation may use them."
+            )
+        if (
+            config.llm.enabled
+            and tools_configured
+            and config.llm.tool_rooms
+            and not config.llm_users
+        ):
+            warnings.append(
+                "the model has tools in some conversations and SABLE_LLM_USERS is "
+                "empty, so anybody in those conversations can set them off. Name "
+                "the users who may use the model."
+            )
         if config.llm.backend not in LLM_BACKENDS:
             raise ConfigError(
                 f"SABLE_LLM_BACKEND must be one of {', '.join(sorted(LLM_BACKENDS))}, "
@@ -733,6 +830,15 @@ class Config:
                 "SABLE_LLM_FEATURES needs SABLE_LLM_BUILTIN_TOOLS on: without a "
                 "session id Open WebUI does not offer the built-in tools at all"
             )
+        smuggled = sorted(TOOL_BODY_KEYS & set(config.llm.extra_body))
+        if smuggled:
+            raise ConfigError(
+                "SABLE_LLM_EXTRA_BODY must not set "
+                + ", ".join(smuggled)
+                + ": it is merged last, so it would hand tools to every room past "
+                "the per-room gate. Use SABLE_LLM_TOOL_IDS / SABLE_LLM_FEATURES and "
+                "name the rooms in SABLE_LLM_TOOL_ROOMS."
+            )
         forbidden = sorted({"stream", "messages"} & set(config.llm.extra_body))
         if forbidden:
             raise ConfigError(
@@ -743,27 +849,7 @@ class Config:
             )
         if config.max_hook_bytes <= 0:
             raise ConfigError("SABLE_MAX_HOOK_BYTES must be greater than zero")
-        if bool(config.nextcloud_user) != bool(config.nextcloud_password):
-            raise ConfigError(
-                "SABLE_NEXTCLOUD_USER and SABLE_NEXTCLOUD_PASSWORD go together: "
-                "set both to enable file attachments, or neither to keep /notify "
-                "text-only."
-            )
-        if config.nextcloud_user and not config.nextcloud_url:
-            raise ConfigError(
-                "SABLE_NEXTCLOUD_URL is required for file attachments: there is no "
-                "incoming request to learn the server address from when uploading."
-            )
         if config.max_upload_bytes <= 0:
             raise ConfigError("SABLE_MAX_UPLOAD_BYTES must be greater than zero")
-        if config.notify_enabled and not config.nextcloud_url:
-            raise ConfigError(
-                "SABLE_NEXTCLOUD_URL is required when SABLE_NOTIFY_TOKEN is set: "
-                "outbound-only messages have no incoming request to learn the "
-                "server URL from."
-            )
-        if config.pin_backend and not config.nextcloud_url:
-            # Nothing to pin against; fall back to trusting the signed header.
-            object.__setattr__(config, "pin_backend", False)
         object.__setattr__(config, "warnings", tuple(warnings))
         return config

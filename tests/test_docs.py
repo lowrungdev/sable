@@ -22,8 +22,8 @@ from pathlib import Path
 import pytest
 from conftest import make_config
 
-from sable.app import create_app
-from sable.config import Config
+from sable.app import create_app, tools_summary
+from sable.config import Config, LLMConfig
 
 ROOT = Path(__file__).resolve().parent.parent
 DOCS = ROOT / "docs"
@@ -82,7 +82,7 @@ def test_the_pattern_does_not_invent_a_variable_out_of_a_constant() -> None:
     # app.py names status.HTTP_422_UNPROCESSABLE_CONTENT eleven times. The whole
     # reason for the lookbehind, and the reason not to keep an exclusion list.
     assert variables("status.HTTP_422_UNPROCESSABLE_CONTENT") == set()
-    assert variables("SABLE_BOT_SECRET") == {"SABLE_BOT_SECRET"}
+    assert variables("SABLE_NEXTCLOUD_USER") == {"SABLE_NEXTCLOUD_USER"}
 
 
 @pytest.mark.parametrize("path", OPERATOR_FILES, ids=lambda path: path.name)
@@ -114,11 +114,16 @@ def test_no_file_documents_a_variable_the_code_never_reads(path: Path) -> None:
 #: that default lands in. Not every documented variable: a required one, a
 #: secret, and anything documented as *(unset)* have nothing to compare.
 DOCUMENTED_DEFAULTS = {
-    "SABLE_BOT_NAME": "bot_name",
-    "SABLE_PIN_BACKEND": "pin_backend",
+    "SABLE_POLL_TIMEOUT": "poll_timeout",
+    "SABLE_ROOM_REFRESH": "room_refresh",
     "SABLE_COMMAND_PREFIX": "command_prefix",
+    "SABLE_ALLOWED_ROOMS": "allowed_rooms",
+    "SABLE_LEAVE_UNLISTED_ROOMS": "leave_unlisted_rooms",
+    "SABLE_AI_ROOMS": "ai_rooms",
+    "SABLE_LLM_USERS": "llm_users",
+    "SABLE_RATE_LIMIT": "rate_limit",
+    "SABLE_MAX_QUEUED_REPLIES": "max_queued_replies",
     "SABLE_ASK_REACTION": "ask_reaction",
-    "SABLE_MESSAGE_CACHE": "message_cache",
     "SABLE_UNKNOWN_COMMAND_HINT": "unknown_command_hint",
     "SABLE_REPORT_ERRORS": "report_errors",
     "SABLE_STARTUP_CHECK": "startup_check",
@@ -142,6 +147,7 @@ DOCUMENTED_DEFAULTS = {
 #: The same, for settings that live on config.llm rather than on config.
 DOCUMENTED_LLM_DEFAULTS = {
     "SABLE_LLM_BACKEND": "backend",
+    "SABLE_LLM_TOOL_ROOMS": "tool_rooms",
     "SABLE_LLM_BUILTIN_TOOLS": "builtin_tools",
     "SABLE_LLM_POLL_INTERVAL": "poll_interval",
     "SABLE_LLM_KEEP_CHATS": "keep_chats",
@@ -189,19 +195,13 @@ def written_as(value: object) -> str:
 
 @pytest.fixture
 def default_config(monkeypatch: pytest.MonkeyPatch) -> Config:
-    """What an operator gets having set only the one required variable.
-
-    SABLE_NEXTCLOUD_URL is set too, although no default under test is read from
-    it: pin_backend is documented `true`, and from_env turns it off when there is
-    no URL to pin against - which configuration.md says on the same line
-    ("Automatically disabled when no URL is set"). Without a URL the check would
-    fail on the documented behaviour instead of on a stale default.
-    """
+    """What an operator gets having set only the three required variables."""
     for key in list(os.environ):
         if key.startswith("SABLE_"):
             monkeypatch.delenv(key, raising=False)
-    monkeypatch.setenv("SABLE_BOT_SECRET", "s" * 40)
     monkeypatch.setenv("SABLE_NEXTCLOUD_URL", "https://cloud.example.org")
+    monkeypatch.setenv("SABLE_NEXTCLOUD_USER", "sable")
+    monkeypatch.setenv("SABLE_NEXTCLOUD_PASSWORD", "app-password-1234")
     return Config.from_env()
 
 
@@ -263,7 +263,8 @@ def sample_block() -> list[str]:
 async def test_the_logged_startup_banner_is_the_one_deployment_md_shows(caplog) -> None:
     # Labels only. The values are whatever the deployment is configured with, and
     # the sample is deliberately somebody else's configuration.
-    app = create_app(make_config())
+    # receive=False: the lifespan must not start polling a server that is not there.
+    app = create_app(make_config(), receive=False)
     with caplog.at_level(logging.INFO):
         async with app.router.lifespan_context(app):
             pass
@@ -276,6 +277,41 @@ async def test_the_logged_startup_banner_is_the_one_deployment_md_shows(caplog) 
         f"Add, remove or reorder the sample's lines to match - an operator checks "
         f"their own log against it line by line."
     )
+
+
+def sample_tools_line() -> str:
+    """The ``tools:`` line of the startup banner shown in deployment.md."""
+    for line in read(DEPLOYMENT).splitlines():
+        if line.startswith("tools:"):
+            return line
+    raise AssertionError("docs/deployment.md has no sample 'tools:' startup line")
+
+
+def test_the_tools_line_in_deployment_md_is_the_one_the_code_builds() -> None:
+    # The values are the ones the sample's own .ini block above it configures, so a
+    # change to the wording or order of tools_summary shows up here.
+    config = make_config(
+        llm=LLMConfig(
+            model="m",
+            api_key="k",
+            backend="openwebui",
+            base_url="https://ai.example.org/api",
+            tool_ids=["server:mcp:1", "server:mcp:2"],
+            features=["web_search"],
+            tool_rooms=["e5f6g7h8"],
+        )
+    )
+    assert sample_tools_line() == f"tools:          {tools_summary(config)}"
+
+
+def test_the_removed_echo_command_is_not_documented() -> None:
+    # The `!echo` command is gone: nothing an operator reads should still offer it.
+    # (The changelog is history and may name it; the removed settings are covered by
+    # test_no_file_documents_a_variable_the_code_never_reads.)
+    for path in [ENV_EXAMPLE, COMPOSE, *sorted(DOCS.glob("*.md"))]:
+        if path.name == "CHANGELOG.md":
+            continue
+        assert "!echo" not in read(path), f"{path.name} still mentions the removed !echo command"
 
 
 # --------------------------------------------------------------------------- #

@@ -10,6 +10,141 @@ is not worth publishing.
 Format: `## <version>`, optionally followed by a date. Anything until the next
 `##` heading is the body.
 
+## 0.8
+
+- **BREAKING: sable now runs as an ordinary Nextcloud user, not as a Talk bot.**
+  It used to be a webhook bot on Talk's Bot API: Nextcloud called `/webhook`,
+  every event was HMAC-signed, and replies were signed back with a shared
+  secret. That is gone. sable signs in as a user with an app password and
+  long-polls the chat API for the conversations that user is in, then posts,
+  reacts and uploads as the same user. The webhook, the signing code
+  (`signing.py`), the replay cache and the backend pin are removed, and so is
+  the requirement that Nextcloud be able to reach sable over HTTPS: sable only
+  needs outbound access to Nextcloud now, and its own port is for `/notify`,
+  `/hook/{name}` and `/healthz` alone.
+  Why: a user can read a message back and upload a file, which a bot cannot, and
+  nothing has to be installed in Nextcloud or reachable from it. What it costs is
+  in [purpose.md](purpose.md) and [security.md](security.md) - chiefly that the
+  credential is a user's app password, which cannot be scoped and reaches that
+  user's Files, Contacts and Calendar, so give sable an account that owns nothing
+  else; and that every long poll holds a request slot on Nextcloud for up to
+  `SABLE_POLL_TIMEOUT` seconds, which is why at most 50 conversations are
+  followed (the most recently active).
+  The Talk calls were checked against the official API documentation, which
+  caught one outright error: conversations are listed under `api/v4`, not `v1`,
+  so the first version of this change could not find any. Polls and the room
+  scan now send `noStatusUpdate=1`, so sable no longer flips its account online,
+  and removing a reaction sends the emoji in the request body as documented
+  (and in the query string too, for a server that reads only the URL).
+  The calls are listed in [configuration.md](configuration.md).
+  sable no longer follows conversations nobody addresses a bot in (the Talk
+  updates room, a former one-to-one, the account's note to self and the
+  "Let's get started!" sample), so those hold no request open. A long poll that
+  Nextcloud holds past its timeout is now logged once per streak, naming the
+  conversation and pointing at the PHP-FPM pool, instead of being reported as
+  "lost connection to Nextcloud". The stock pool of five workers is too small
+  for more than a few conversations: see
+  [deployment.md](deployment.md#give-nextcloud-enough-php-workers).
+  **Migrating:** (1) create a Nextcloud user for sable and an app password for it
+  under Settings > Security > Devices & sessions; (2) invite that user to each
+  conversation it should be in - a normal invitation, there is no bot switch;
+  (3) delete the old bot with `occ talk:bot:uninstall --id <id>` (`occ
+  talk:bot:list` shows the id); (4) set `SABLE_NEXTCLOUD_URL`,
+  `SABLE_NEXTCLOUD_USER` and `SABLE_NEXTCLOUD_PASSWORD`, all now required; and
+  (5) remove `SABLE_BOT_SECRET`, `SABLE_BOT_SECRET_PREVIOUS`, `SABLE_BOT_NAME`
+  and `SABLE_PIN_BACKEND`, which no longer exist. `SABLE_NEXTCLOUD_USER` and
+  `SABLE_NEXTCLOUD_PASSWORD` were the optional upload account before; the same
+  account now does everything, and `/notify` attachments are always available.
+  `SABLE_UPLOAD_PATH` and `SABLE_MAX_UPLOAD_BYTES` are unchanged. The old
+  upload account can be reused as the new one or retired; listing it in
+  `SABLE_IGNORE_USERS` is no longer needed, because sable ignores its own
+  messages.
+  Also different: people now address sable by @-mentioning its user id (picked
+  from Talk's list, or typed at the start of a message) rather than a configured
+  name, and one-to-one conversations have no special case. A conversation joined
+  after sable started is followed from its newest message at the next scan, so
+  nothing said before is replayed, and neither is anything said while sable was
+  down. `/healthz` reports `user` where it reported `bot`.
+- **New settings for reading chat.** `SABLE_POLL_TIMEOUT` (default 30) is how
+  many seconds each long poll may wait, clamped to Talk's maximum of 60 and an
+  error below 1. `SABLE_ROOM_REFRESH` (default 60) is how often the conversation
+  list is rescanned for rooms sable was added to or removed from, an error below
+  5. The startup banner gains a `receiving` line and loses `webhook URL`, `bot
+  name` and `backend pin`; it now reads `nextcloud: <url> as <user>`, and logs
+  `signed in to <url> as <id> (<display name>)` once the credentials are
+  confirmed.
+- **`SABLE_STARTUP_CHECK` now verifies the credentials.** It asks Nextcloud who
+  the account is (`cloud/user`) instead of fetching `status.php`, so a wrong URL,
+  an untrusted certificate or a rejected app password all show up at boot. A
+  plain `http://` URL to a host that is not local gets a warning, since the
+  password crosses the network unencrypted.
+- **The ⁉️ reaction works on a live server.** Talk delivers a reaction as a
+  system message through the chat poll, and sable reads the emoji and the id of
+  the reacted-to message from it, as tested against Nextcloud Talk on 2026-10-01.
+  Removing a reaction is still unexercised; see
+  [future.md](future.md#talk-features-not-yet-used).
+- **The ⁉️ reaction reads the message back from Talk instead of remembering it.**
+  It calls `GET /chat/{token}/{messageId}/context` (capability
+  `chat-get-context`), so it works on old messages and across restarts, and sable
+  keeps no cache of chat content. Replies: "I cannot find that message" for a
+  404, "That message has been deleted.", "That message has no text for me to
+  read."; a system message is silent, and a failed read is logged and reported.
+  Not yet checked against a live server: that `limit=1` includes the message
+  itself.
+- **BREAKING: access is now narrowed by room, by person and by tool, and several
+  settings changed meaning.** None of it is needed to keep a deployment running
+  except where marked; all of it is worth doing. Read
+  [how the access layers combine](configuration.md#how-the-access-layers-combine).
+  **Migrating:**
+  (1) set `SABLE_ALLOWED_ROOMS` to the conversation *tokens* sable should serve.
+  Empty still follows every room the account is in, but now with a startup
+  warning, since any user who can invite the account can then use it.
+  `SABLE_LEAVE_UNLISTED_ROOMS=true` also makes it leave the group and public
+  conversations that are neither listed nor a `/notify` or `/hook` destination.
+  (2) `SABLE_AI_ROOMS` takes tokens (or `*`) only; a display name is a startup
+  error, because anybody can name their own conversation after yours.
+  `SABLE_NOTIFY_ROOMS` aliases are unchanged.
+  (3) **Tools stop working until you act.** `tool_ids` and `features` in
+  `SABLE_LLM_EXTRA_BODY` are now a startup error: move them to
+  `SABLE_LLM_TOOL_IDS` and `SABLE_LLM_FEATURES`, and list the rooms where the
+  model may use them in the new `SABLE_LLM_TOOL_ROOMS`. Empty means off
+  everywhere, so tools configured without it are silently unused (with a
+  startup warning), and elsewhere the model is called without any.
+  (4) Optionally set `SABLE_LLM_USERS` to the user ids allowed to use the model
+  (administrators always are; empty means everyone). Somebody outside it is told
+  "You are not allowed to use the assistant." when they mention the bot or use
+  `!ai`, and ignored silently for plain AI-room messages and ⁉️ reactions.
+  (5) Drop `SABLE_ASK_ROOMS` and `SABLE_MESSAGE_CACHE`: the cache is gone, and
+  an old `.env` that still sets them is ignored without a warning.
+  (6) The `!echo` command is removed.
+  (7) Two new defaults apply on upgrade: `SABLE_RATE_LIMIT=20` (triggers per
+  person per minute; `0` turns it off) and `SABLE_MAX_QUEUED_REPLIES=20`
+  (replies allowed to wait for a slot past `SABLE_MAX_CONCURRENT_REPLIES`; beyond
+  that new work is dropped). And request bodies are now capped by the app itself:
+  `/notify` at `SABLE_MAX_UPLOAD_BYTES` x 4/3 + 64 KiB, `/hook/{name}` at
+  `SABLE_MAX_HOOK_BYTES` + 1 KiB, everything else at 64 KiB, refused with a 413
+  before the token is checked. A proxy in front should allow at least that much
+  for `/notify`.
+- **Hardening.** Token comparisons are constant-time on UTF-8 bytes, so a
+  non-ASCII token is a 401 rather than a 500. `/notify` answers 422 for a body
+  that is not a JSON object and 400 for invalid JSON, invalid UTF-8 or nesting
+  too deep; `/hook/{name}` treats odd bodies as text. The Open WebUI chat id is
+  percent-encoded in URL paths. Everything sable posts in answer to chat (model
+  answers, command replies, error reports) and every `/hook` message has `@all`,
+  `@"group/..."` and `@"team/..."` defanged with a zero-width space; one-person
+  mentions and `/notify` text are untouched. The startup banner gains `rooms:`, `model users:` and
+  `rate limit:` lines, `in rooms:` on `tools:`, and the queue bound on
+  `concurrency:`, and loses `ask rooms:`.
+- **Container hardening.** `compose.yaml` runs with a read-only root
+  filesystem, a 256 MB tmpfs on `/tmp` (where a multipart upload spools, so it
+  must exceed `SABLE_MAX_UPLOAD_BYTES`), all capabilities dropped,
+  `no-new-privileges`, `pids_limit: 256` and `mem_limit: 768m`. The documented
+  systemd unit gains `TasksMax=256`. See
+  [deployment.md](deployment.md#container-hardening).
+- **`!whoami` and the participant type.** The participant type was documented as
+  already arriving on the event; it does not, so `!whoami` never prints it. See
+  [future.md](future.md#limitations-with-a-known-fix).
+
 ## 0.7
 
 - **Successful health checks no longer fill the log.** The container's
@@ -39,7 +174,7 @@ Format: `## <version>`, optionally followed by a date. Anything until the next
   is required, both checked at startup, as is every feature name.
   Worth reading before turning it on: the tools run with the permissions of the
   account behind that API key, and anyone in a conversation can prompt the model
-  into calling one. Accepted risk 15 in `docs/security.md` covers it.
+  into calling one. Accepted risk 14 in `docs/security.md` covers it.
 - **The model is told what day it is.** The system prompt now ends with the
   current date, time and zone, set by `SABLE_TIMEZONE` or the host clock. This
   is not cosmetic: asked what gold was worth "right now", a model with no clock

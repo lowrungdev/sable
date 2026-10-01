@@ -105,7 +105,7 @@ async def test_the_request_carries_what_makes_the_loop_run() -> None:
     owui.install()
     client = make_client()
     try:
-        await client.complete(MESSAGES)
+        await client.complete(MESSAGES, tools=True)
     finally:
         await client.aclose()
 
@@ -134,13 +134,51 @@ async def test_the_request_carries_what_makes_the_loop_run() -> None:
 
 
 @respx.mock
+async def test_without_the_room_gate_no_tool_ids_and_no_features_are_sent() -> None:
+    """tools defaults to off: a call that was not told its room may use tools
+    gets none, whatever SABLE_LLM_TOOL_IDS and SABLE_LLM_FEATURES say."""
+    owui = Instance()
+    owui.install(tasks=False)  # a tools-off room must never poll
+    client = make_client()
+    try:
+        assert await client.complete(MESSAGES) == "$4,144.60 an ounce"
+        assert await client.complete(MESSAGES, tools=False) == "$4,144.60 an ounce"
+    finally:
+        await client.aclose()
+
+    bodies = [
+        json.loads(call.request.content)
+        for call in respx.calls
+        if call.request.url.path.endswith("/chat/completions")
+    ]
+    assert len(bodies) == 2
+    for body in bodies:
+        # The blocking variant: a session id would bring Open WebUI's knowledge,
+        # files, notes, channels and calendar tools with it, flag or no flag.
+        assert body.pop("id")  # a fresh assistant message id per question
+        assert body == {
+            "model": "gemma-focused",
+            "messages": MESSAGES,
+            "stream": True,
+            "chat_id": "chat-1",
+            "background_tasks": {
+                "title_generation": False,
+                "tags_generation": False,
+                "follow_up_generation": False,
+            },
+        }
+    assert owui.deleted, "chat discarding still works in blocking mode"
+    assert not any("/tasks/" in call.request.url.path for call in respx.calls)
+
+
+@respx.mock
 async def test_it_waits_for_the_loop_to_finish() -> None:
     owui = Instance()
     owui.pending = 3
     owui.install()
     client = make_client()
     try:
-        await client.complete(MESSAGES)
+        await client.complete(MESSAGES, tools=True)
     finally:
         await client.aclose()
     assert owui.polls == 4
@@ -189,7 +227,7 @@ async def test_a_loop_that_never_finishes_names_the_setting() -> None:
     client = make_client(timeout=0.0)
     try:
         with pytest.raises(LLMError, match="SABLE_LLM_TIMEOUT"):
-            await client.complete(MESSAGES)
+            await client.complete(MESSAGES, tools=True)
     finally:
         await client.aclose()
     assert owui.deleted, "a conversation is not left behind when the loop hangs"
@@ -289,3 +327,69 @@ async def test_extra_body_still_reaches_the_request() -> None:
         await client.aclose()
     body = json.loads(respx.calls[1].request.content)
     assert body["params"] == {"function_calling": "native"}
+
+
+# --------------------------------------------------------------------------- #
+# The chat id is the server's word, and goes into URL paths
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("chat_id", "quoted"),
+    [
+        ("a/b", "a%2Fb"),
+        ("../admin", "..%2Fadmin"),
+        ("x?y=1", "x%3Fy%3D1"),
+        ("x#frag", "x%23frag"),
+        ("two words", "two%20words"),
+    ],
+)
+@respx.mock
+async def test_a_chat_id_is_quoted_into_every_path(chat_id: str, quoted: str) -> None:
+    paths: list[tuple[str, str]] = []
+    assistant: dict[str, str] = {}
+
+    def route(request: httpx.Request) -> httpx.Response:
+        path = request.url.raw_path.decode()
+        paths.append((request.method, path))
+        if path.endswith("/v1/chats/new"):
+            assistant["id"] = json.loads(request.content)["chat"]["history"]["currentId"]
+            return httpx.Response(200, json={"id": chat_id})
+        if path.endswith("/chat/completions"):
+            return httpx.Response(200, json={"status": True})
+        if "/tasks/chat/" in path:
+            return httpx.Response(200, json={"task_ids": []})
+        if request.method == "GET":
+            message = {"id": assistant["id"], "content": "fine"}
+            return httpx.Response(
+                200, json={"chat": {"history": {"messages": {assistant["id"]: message}}}}
+            )
+        return httpx.Response(200, json=True)
+
+    respx.route(host="ai.example.org").mock(side_effect=route)
+    client = make_client()
+    try:
+        assert await client.complete(MESSAGES, tools=True) == "fine"
+    finally:
+        await client.aclose()
+
+    expected = {
+        ("GET", f"/api/tasks/chat/{quoted}"),
+        ("GET", f"/api/v1/chats/{quoted}"),
+        ("DELETE", f"/api/v1/chats/{quoted}"),
+    }
+    assert expected <= set(paths)
+    # And the id in the completion body is the real one, not the quoted form.
+    body = json.loads(respx.calls[1].request.content)
+    assert body["chat_id"] == chat_id
+
+
+@respx.mock
+async def test_a_blank_chat_id_is_refused() -> None:
+    respx.post(NEW_CHAT).mock(return_value=httpx.Response(200, json={"id": "  "}))
+    client = make_client()
+    try:
+        with pytest.raises(LLMError, match="no conversation"):
+            await client.complete(MESSAGES)
+    finally:
+        await client.aclose()

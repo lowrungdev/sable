@@ -1,4 +1,5 @@
-# sable — a Nextcloud Talk bot.  Full reference: docs/configuration.md
+# sable — a Nextcloud Talk assistant that runs as an ordinary user account.
+# Full reference: docs/configuration.md
 #
 # There are two places to put settings, and they stack:
 #
@@ -6,8 +7,9 @@
 #      for secrets, since this file is meant to be committed;
 #   2. the environment: block below, which OVERRIDES anything from .env.
 #
-# Only SABLE_BOT_SECRET is required. Every other variable is listed, commented
-# out, showing its default — uncomment to change it.
+# Only the three Nextcloud account settings (URL, USER, PASSWORD) are required.
+# Every other variable is listed, commented out, showing its default —
+# uncomment to change it.
 #
 # Quote every value. Compose coerces plain scalars to strings, but YAML itself
 # would read {} as an empty mapping and treat a leading ! as a type tag — which
@@ -22,6 +24,37 @@ services:
     image: sable:latest
     container_name: sable
     restart: unless-stopped
+
+    # ===================== Container hardening ==============================
+    # sable writes nothing to disk (docs/security.md) and needs no privileges, so
+    # the container is given none. PYTHONDONTWRITEBYTECODE is set in the image,
+    # and nothing writes under /home/sable.
+    #
+    # The root filesystem is read-only: a compromised process cannot plant or
+    # alter anything in the image.
+    read_only: true
+    tmpfs:
+      # The one writable place, held in RAM and gone on restart. Multipart
+      # uploads to /notify spool here, so it must be larger than
+      # SABLE_MAX_UPLOAD_BYTES (25 MB by default); 256m leaves room for several
+      # at once. Raise size= if you raise that setting above about 200 MB (a
+      # single upload must always fit), and remember it counts against mem_limit
+      # below.
+      - /tmp:size=256m
+    # No Linux capabilities: it listens on 8080 and makes outbound requests.
+    cap_drop:
+      - ALL
+    # setuid binaries and the like cannot gain privileges.
+    security_opt:
+      - no-new-privileges:true
+    # A runaway or a fork bomb is stopped well short of the host's limits.
+    pids_limit: 256
+    # Memory cap. mem_limit is the plain `docker compose up` form (deploy.resources
+    # is meant for swarm, and while recent Compose also honours it, mem_limit is
+    # the one that is always honoured). Must cover the /tmp tmpfs above when full.
+    mem_limit: 768m
+    # No `init: true`: sable starts no child processes, so there is nothing to
+    # reap, and uvicorn handles SIGTERM itself when it is PID 1.
 
     env_file:
       - path: .env
@@ -55,42 +88,64 @@ services:
       SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
 
       # ===================== REQUIRED =====================================
-      # The shared secret, identical to the one given to
-      # `occ talk:bot:install`. 40–128 characters: openssl rand -hex 32
-      # Read from .env or the shell, so the value stays out of this file.
-      SABLE_BOT_SECRET: "${SABLE_BOT_SECRET:?required — put it in .env (see docs/deployment.md)}"
+      # sable is an ordinary Nextcloud user: it reads chat, posts, reacts and
+      # uploads files as that account. Create one for it, invite it to the
+      # conversations it should be in, and give it an app password (Settings >
+      # Security > Devices & sessions). All three are read from .env or the
+      # shell, so the values stay out of this file.
+      #
+      # Your Nextcloud base URL, no trailing slash. Plain http:// to a host that
+      # is not local gets a startup warning.
+      SABLE_NEXTCLOUD_URL: "${SABLE_NEXTCLOUD_URL:?required — put it in .env (see docs/deployment.md)}"
 
-      # ===================== Talk bot identity ============================
-      # The secret being rotated away from — accepted on incoming webhooks and
-      # never used to sign what sable sends. Talk holds one secret per install,
-      # so a rotation is uninstall, install with the new value, restart, and
-      # every event in that window would 401 without this. Same 40–128 range,
-      # and it may not repeat the value above. Keep it in .env; clear it when
-      # the rotation is done.
-      # SABLE_BOT_SECRET_PREVIOUS: "${SABLE_BOT_SECRET_PREVIOUS:-}"
+      # The account's user id; it is also the name people @-mention.
+      SABLE_NEXTCLOUD_USER: "${SABLE_NEXTCLOUD_USER:?required — put it in .env (see docs/deployment.md)}"
 
-      # Your Nextcloud base URL, no trailing slash. Optional for the webhook
-      # path — each signed event carries the server URL in a header — but
-      # required for /notify, and without it backend pinning cannot run.
-      # Strongly recommended.
-      # SABLE_NEXTCLOUD_URL: "https://cloud.example.org"
+      # The app password, never the login password. It cannot be scoped: it
+      # reaches everything that user can, so use an account that owns nothing
+      # else.
+      SABLE_NEXTCLOUD_PASSWORD: "${SABLE_NEXTCLOUD_PASSWORD:?required — put it in .env (see docs/deployment.md)}"
 
-      # Name mention detection matches on; keep it in step with the name you
-      # installed the bot under.
-      # SABLE_BOT_NAME: "sable"
+      # ===================== Reading chat =================================
+      # Seconds each long poll may wait; 30 by default, clamped to Talk's 60,
+      # and under 1 is an error. Every poll holds a request slot on Nextcloud
+      # for up to this long, per conversation followed.
+      # SABLE_POLL_TIMEOUT: "30"
 
-      # Reject webhooks whose backend header is not SABLE_NEXTCLOUD_URL.
-      # Ignored when no URL is set.
-      # SABLE_PIN_BACKEND: "true"
+      # Seconds between looks at which conversations the account is in; under 5
+      # is an error.
+      # SABLE_ROOM_REFRESH: "60"
 
       # ===================== Chat behaviour ===============================
       # SABLE_COMMAND_PREFIX: "!"
 
+      # The conversations sable serves, as TOKENS (the last part of a
+      # conversation's URL, a1b2c3d4), comma-separated. Rooms not listed are
+      # never polled or answered in. EMPTY MEANS EVERY CONVERSATION THE ACCOUNT
+      # IS IN, with a startup warning: anybody who can invite the account into a
+      # room can use it. "*" and display names are startup errors.
+      # /notify and /hook destinations need not be listed.
+      # SABLE_ALLOWED_ROOMS: "a1b2c3d4,e5f6g7h8"
+
+      # With the list above set, leave the group and public conversations that
+      # are neither listed nor a /notify or /hook destination (at most 5 per
+      # scan). No effect without a list.
+      # SABLE_LEAVE_UNLISTED_ROOMS: "false"
+
       # Conversations where every message goes to the model, no mention needed.
-      # Conversation tokens (a1b2c3d4, the last part of the conversation's URL)
-      # or display names (AI), or * for all. Empty = mentions and !ai only.
-      # A token never changes; a moderator can rename a conversation.
-      # SABLE_AI_ROOMS: "AI,a1b2c3d4"
+      # Conversation TOKENS or "*" for every allowed room; a display name is a
+      # startup error, since anybody can name their own conversation after
+      # yours. Empty = mentions and !ai only.
+      # SABLE_AI_ROOMS: "a1b2c3d4"
+
+      # Nextcloud user ids allowed to make the model answer (mention, AI-room
+      # message, !ai, the reaction, custom commands that call it); the admins are
+      # always included. EMPTY = EVERYONE. Ids only, never display names.
+      # SABLE_LLM_USERS: "alice,bob"
+
+      # Triggers (a command, a mention, an AI-room message, the reaction) one
+      # person may set off per minute; the rest are ignored. "0" turns it off.
+      # SABLE_RATE_LIMIT: "20"
 
       # Post answers as threaded replies to the triggering message.
       # SABLE_REPLY_AS_REPLY: "false"
@@ -99,8 +154,8 @@ services:
       # SABLE_THINKING_REACTION: "👀"
 
       # React to any message with this and the bot answers that message, in a
-      # reply threaded under it. Empty disables the feature and its message
-      # cache. Needs --feature reaction on the bot install.
+      # reply threaded under it. The message is read back from Talk, so nothing
+      # is remembered. Empty disables the feature.
       # SABLE_ASK_REACTION: "⁉️"
 
       # Let only SABLE_ADMIN_USERS use that reaction. Otherwise anyone in the
@@ -109,27 +164,15 @@ services:
       # error — it would leave the feature usable by nobody.
       # SABLE_ASK_ADMINS_ONLY: "false"
 
-      # Conversations whose messages are cached for that reaction — tokens or
-      # display names, or "*", exactly like SABLE_AI_ROOMS.
-      # MIND THE ASYMMETRY: empty here means EVERY conversation, where an empty
-      # SABLE_AI_ROOMS means none. Deliberate — empty is what every deployment
-      # already has, and reading it as "no rooms" would switch the reaction off
-      # silently on upgrade. Naming the rooms that use it stops the others being
-      # cached, which costs less memory and holds less chat content.
-      # SABLE_ASK_ROOMS: "a1b2c3d4,Ops"
-
-      # Messages remembered per conversation so a reaction can name one; a
-      # reaction event carries the id, never the text. Expires with the history.
-      # SABLE_MESSAGE_CACHE: "200"
-
       # Reply "I have no !foo command" on an unknown command.
       # SABLE_UNKNOWN_COMMAND_HINT: "true"
 
       # Post failures into the conversation as well as logging them.
       # SABLE_REPORT_ERRORS: "true"
 
-      # Call Nextcloud's status.php at startup and log what answered, so a wrong
-      # URL or an untrusted certificate shows up at boot. Never fatal.
+      # Sign in at startup and log who Nextcloud says we are, so a wrong URL, an
+      # untrusted certificate or a bad app password shows up at boot. Never
+      # fatal.
       # SABLE_STARTUP_CHECK: "true"
 
       # Replies longer than this are clipped; Talk's own ceiling is 32000.
@@ -137,11 +180,15 @@ services:
 
       # Model calls allowed in flight at once; "0" means no ceiling. Each
       # trigger is a background task with no limit of its own, so a busy room or
-      # a burst of redelivered webhooks means that many completions open
-      # together, each holding SABLE_LLM_TIMEOUT. Talk rate-limits the replies
-      # sable sends, not the events it sends sable. Lower it for a local model
-      # that serves one request at a time.
+      # a burst of messages means that many completions open together, each
+      # holding SABLE_LLM_TIMEOUT. Nothing upstream paces the messages sable
+      # reads. Lower it for a local model that serves one request at a time.
       # SABLE_MAX_CONCURRENT_REPLIES: "8"
+
+      # Replies allowed to WAIT for a slot once that ceiling is reached; past
+      # it new work is dropped (a log warning at most every 30 seconds). "0"
+      # means nothing may wait. Irrelevant when the ceiling is "0".
+      # SABLE_MAX_QUEUED_REPLIES: "20"
 
       # Users to ignore completely - nothing they say or react to is acted on.
       # Matches a bare user id, a full actor id (users/alice) or a display name.
@@ -191,7 +238,9 @@ services:
 
       # JSON object merged into the request body last, for provider-specific
       # fields. Single-quote it so YAML does not read it as a mapping. It may
-      # not set stream or messages, which sable builds itself.
+      # not set stream or messages, which sable builds itself, nor tool_ids,
+      # features, tool_servers, terminal_id or session_id (see
+      # SABLE_LLM_TOOL_ROOMS): a startup error.
       # SABLE_LLM_EXTRA_BODY: '{"top_k": 40}'
 
       # ===================== Tools ========================================
@@ -209,6 +258,11 @@ services:
       # memory. Needs SABLE_LLM_BUILTIN_TOOLS on.
       # SABLE_LLM_FEATURES: "web_search"
 
+      # WHERE those two apply: conversation tokens, or "*". EMPTY = NOWHERE:
+      # tools are off in every room until one is named, and elsewhere the model
+      # is called without them. Use a dedicated room and set SABLE_LLM_USERS.
+      # SABLE_LLM_TOOL_ROOMS: "e5f6g7h8"
+
       # Off uses the blocking variant: no polling, and no built-in tools.
       # SABLE_LLM_BUILTIN_TOOLS: "true"
 
@@ -223,7 +277,7 @@ services:
 
       # ===================== Alerting endpoint ============================
       # Bearer token for POST /notify. EMPTY DISABLES THE ROUTE (404).
-      # Unrelated to the bot secret — generate a separate value, in .env.
+      # Unrelated to the app password — generate a separate value, in .env.
       # SABLE_NOTIFY_TOKEN: "${SABLE_NOTIFY_TOKEN:-}"
 
       # Aliases so callers never need conversation tokens.
@@ -242,21 +296,20 @@ services:
       # generically. {dotted.path} is substituted from the payload.
       # SABLE_HOOK_TEMPLATE_KOMODO: "**{level}** {data.type}: {data.data.name}"
 
-      # Largest webhook payload accepted, in bytes. Default 256 KiB.
+      # Largest webhook payload accepted, in bytes. Default 256 KiB. The app
+      # also refuses a request body over this + 1 KiB (413), before the token.
       # SABLE_MAX_HOOK_BYTES: "262144"
 
       # ===================== File attachments =============================
-      # The bot API cannot attach files, so /notify uploads them as an ordinary
-      # Nextcloud user instead. Both empty = /notify stays text-only. This
-      # account can read and write its own Files, so give it its own user and
-      # keep the password in .env.
-      # SABLE_NEXTCLOUD_USER: "sable-bot"
-      # SABLE_NEXTCLOUD_PASSWORD: "${SABLE_NEXTCLOUD_PASSWORD:-}"
-
+      # /notify can carry a file, uploaded as the account set above - nothing
+      # more to configure but where it goes and how big it may be.
+      #
       # Folder in that user's Files where attachments land before sharing.
       # SABLE_UPLOAD_PATH: "/sable"
 
-      # Largest attachment /notify accepts, in bytes. Default 25 MiB.
+      # Largest attachment /notify accepts, in bytes. Default 25 MiB. It also
+      # sets the largest /notify request body (this x 4/3 + 64 KiB, enforced
+      # before the token is checked). Keep it below the /tmp tmpfs above.
       # SABLE_MAX_UPLOAD_BYTES: "26214400"
 
       # ===================== The HTTP surface itself =======================
@@ -298,7 +351,7 @@ services:
       # debug prefix and mention matching.
       # SABLE_LOG_LEVEL: "INFO"
 
-      # The healthcheck below asks every 30 seconds, and uvicorn logs each one
+      # The image's healthcheck asks every 30 seconds, and uvicorn logs each one
       # — about 2,900 identical lines a day. They are dropped unless you turn
       # this on; a probe that FAILS is logged either way.
       # SABLE_LOG_HEALTH_CHECKS: "false"
@@ -310,9 +363,10 @@ services:
       # SABLE_TIMEZONE: "America/New_York"
 
     ports:
-      # Published to localhost only: put a TLS-terminating reverse proxy in
-      # front of this. Nextcloud will not send webhooks to plain HTTP unless an
-      # admin has allowed local/insecure remotes. See docs/deployment.md.
+      # Published to localhost only. Nextcloud never calls sable - it reads chat
+      # by making outbound requests - so this port serves only /notify, /hook
+      # and /healthz. Put a TLS-terminating reverse proxy in front of it if
+      # anything outside this host calls those. See docs/deployment.md.
       #
       # If the proxy also runs in Docker, delete this block, share a network and
       # let it reach sable:8080 directly.

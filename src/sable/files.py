@@ -1,17 +1,13 @@
 """Uploading a file and sharing it into a conversation.
 
-The Talk bot API can post messages and reactions and nothing else - there is no
-endpoint for attaching a file, and bot signature authentication is not accepted
-anywhere near the ones that could. Getting a file into a chat therefore takes a
-Nextcloud *user* account and two steps:
+Attaching a file to a chat takes two steps, both as the same Nextcloud user
+account sable chats as:
 
 1. ``PUT`` the bytes into that user's own Files over WebDAV;
 2. share the uploaded path into the conversation, ``shareType`` 10, which is what
    produces the chat message.
 
-That second credential can do everything the user can, so it is optional, used
-only on the /notify path, and only when a file is actually attached. Everything
-else in sable keeps using the bot secret.
+Used only on the /notify path, and only when a file is actually attached.
 """
 
 from __future__ import annotations
@@ -247,7 +243,7 @@ class FilesClient:
                 path, room_token, caption=caption, silent=silent, reply_to=reply_to
             )
         except FilesError:
-            # Otherwise the file sits in the bot user's Files, shared with nobody.
+            # Otherwise the file sits in the account's Files, shared with nobody.
             await self.delete(path)
             raise
         return SharedFile(

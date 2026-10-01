@@ -60,9 +60,8 @@ class Context:
         Commands named in SABLE_ADMIN_COMMANDS are already gated before the
         handler runs.
 
-        Asks the bot rather than the config, so a bot actor is refused here too:
-        an actor typed ``Application`` with an id like ``users/maser`` does
-        resolve an administrator's user id, and this is what !help filters on.
+        Asks the bot rather than the config, so a bot actor is refused here too,
+        whatever id it carries; this is what !help filters on.
         """
         return self.bot.is_admin_actor(self.event)
 
@@ -161,7 +160,11 @@ async def help_command(ctx: Context) -> str:
             lines.append("_Administrators only._")
         return "\n".join(lines)
 
+    model_ok = ctx.bot.can_use_model(ctx.event)
+
     def can_run(command: Command) -> bool:
+        if command.name == "ai" and not model_ok:
+            return False
         return ctx.is_admin or not ctx.bot.admin_only(command)
 
     # A command somebody cannot run is noise in their list. Nothing is kept
@@ -173,11 +176,12 @@ async def help_command(ctx: Context) -> str:
         if can_run(c)
     ]
     body = "\n".join(lines)
-    if ctx.bot.llm_enabled:
+    if ctx.bot.llm_enabled and model_ok:
         # A mention reaches the model whatever SABLE_ADMIN_COMMANDS says: only
-        # the command is gated, so only the command is conditional here.
+        # the command is gated, so only the command is conditional here. Whoever
+        # SABLE_LLM_USERS leaves out is not told about either way in.
         ai = ctx.bot.registry.get("ai")
-        ways = f"Mention me (`@{ctx.bot.config.bot_name}`)"
+        ways = f"Mention me (`@{ctx.bot.user_id}`)"
         if ai is not None and can_run(ai):
             ways += f" or use `{prefix}ai <question>`"
         body += f"\n\n{ways} to talk to the model."
@@ -198,13 +202,6 @@ async def whoami(ctx: Context) -> str:
         f"{f' with participant type {actor.participant_type}' if actor.participant_type else ''}, "
         f"in conversation `{ctx.event.room_token}`."
     )
-
-
-@registry.command("echo", help="Repeat what you said.", usage="echo <text>")
-async def echo(ctx: Context) -> str:
-    if not ctx.args:
-        raise CommandError("Give me something to echo.")
-    return ctx.args
 
 
 @registry.command(

@@ -31,12 +31,23 @@ import logging
 import time
 import uuid
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
 from .config import BUILTIN_FEATURES, LLMConfig
 from .llm import LLMError, Message
 from .state import ConnectionState
+
+
+def _segment(value: str) -> str:
+    """One URL path segment, safe to splice into a path.
+
+    The chat id comes back from the server and goes straight into later paths;
+    an id holding ``/``, ``..``, ``?`` or ``#`` would otherwise reach a different
+    endpoint than the one meant. Nothing is left unquoted, ``/`` included.
+    """
+    return quote(str(value), safe="")
 
 log = logging.getLogger(__name__)
 
@@ -139,12 +150,27 @@ class OpenWebUIClient:
         }
         created = await self._call("POST", "/v1/chats/new", json=payload)
         chat_id = (created or {}).get("id")
-        if not chat_id:
+        if not chat_id or not str(chat_id).strip():
             raise LLMError("Open WebUI created no conversation to answer in")
         return str(chat_id), assistant_id
 
+    def _async_session(self, tools: bool) -> bool:
+        """Does this request carry a session id (built-in tools, polled)?
+
+        ``tools`` is the per-conversation gate (SABLE_LLM_TOOL_ROOMS). A session
+        also brings Open WebUI's knowledge, files, notes, channels and calendar
+        tools, which need no flag, so a conversation that may not have tools
+        gets the blocking variant: no session, no polling, no built-ins.
+        """
+        return tools and self.config.builtin_tools
+
     def _completion_body(
-        self, messages: list[Message], model: str, chat_id: str, assistant_id: str
+        self,
+        messages: list[Message],
+        model: str,
+        chat_id: str,
+        assistant_id: str,
+        tools: bool = False,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {
             "model": model,
@@ -160,14 +186,14 @@ class OpenWebUIClient:
                 "follow_up_generation": False,
             },
         }
-        if self.config.builtin_tools:
+        if self._async_session(tools):
             # Any non-empty value. This is what puts web search and the rest in
             # front of the model - and what makes the request asynchronous.
             body["session_id"] = f"sable-{uuid.uuid4()}"
             body["features"] = {
                 name: name in self.config.features for name in sorted(BUILTIN_FEATURES)
             }
-        if self.config.tool_ids:
+        if tools and self.config.tool_ids:
             body["tool_ids"] = list(self.config.tool_ids)
         if self.config.temperature is not None:
             body["temperature"] = self.config.temperature
@@ -179,7 +205,7 @@ class OpenWebUIClient:
     async def _drain(self, chat_id: str, deadline: float) -> None:
         """Wait for the loop to finish, or say how long we waited."""
         while True:
-            tasks = await self._call("GET", f"/tasks/chat/{chat_id}") or {}
+            tasks = await self._call("GET", f"/tasks/chat/{_segment(chat_id)}") or {}
             if not tasks.get("task_ids"):
                 return
             if time.monotonic() >= deadline:
@@ -190,7 +216,7 @@ class OpenWebUIClient:
             await asyncio.sleep(min(self.config.poll_interval, max(0.0, deadline - time.monotonic())))
 
     async def _read_answer(self, chat_id: str, assistant_id: str) -> str:
-        record = await self._call("GET", f"/v1/chats/{chat_id}") or {}
+        record = await self._call("GET", f"/v1/chats/{_segment(chat_id)}") or {}
         chat = record.get("chat") if isinstance(record, dict) else None
         messages = ((chat or {}).get("history") or {}).get("messages") or {}
         message = messages.get(assistant_id) or {}
@@ -206,7 +232,12 @@ class OpenWebUIClient:
 
     # --- the whole thing ---------------------------------------------------
 
-    async def complete(self, messages: list[Message], *, model: str | None = None) -> str:
+    async def complete(
+        self, messages: list[Message], *, model: str | None = None, tools: bool = False
+    ) -> str:
+        """``tools`` says whether this question may be offered tool_ids and
+        features. Off unless the caller (the bot, for a room in
+        SABLE_LLM_TOOL_ROOMS) turns it on."""
         used_model = model or self.config.model
         if not used_model:
             raise LLMError("no model configured (set SABLE_LLM_MODEL)")
@@ -220,18 +251,18 @@ class OpenWebUIClient:
 
         chat_id, assistant_id = await self._create_chat(used_model, prompt)
         try:
-            body = self._completion_body(messages, used_model, chat_id, assistant_id)
+            body = self._completion_body(messages, used_model, chat_id, assistant_id, tools)
             log.debug(
                 "asking %s through Open WebUI (chat %s, %d messages, tools: %s)",
                 used_model,
                 chat_id,
                 len(messages),
-                ", ".join(self.config.tool_ids) or "none",
+                ", ".join(self.config.tool_ids) if tools and self.config.tool_ids else "none",
             )
             await self._call("POST", "/chat/completions", json=body)
             # Without a session id the call above already blocked until the loop
             # finished, and there is nothing left to poll for.
-            if self.config.builtin_tools:
+            if self._async_session(tools):
                 await self._drain(chat_id, deadline)
             answer = await self._read_answer(chat_id, assistant_id)
         finally:
@@ -249,7 +280,7 @@ class OpenWebUIClient:
     async def _discard(self, chat_id: str) -> None:
         """Delete the conversation. Never fatal: the answer is already in hand."""
         try:
-            await self._call("DELETE", f"/v1/chats/{chat_id}")
+            await self._call("DELETE", f"/v1/chats/{_segment(chat_id)}")
         except LLMError as exc:
             log.warning("could not delete the conversation %s: %s", chat_id, exc)
 

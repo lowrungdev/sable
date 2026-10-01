@@ -1,4 +1,4 @@
-"""sable - a Nextcloud Talk bot."""
+"""sable - a Nextcloud Talk assistant that runs as an ordinary user account."""
 
 from importlib.metadata import PackageNotFoundError, version as _distribution_version
 

@@ -17,53 +17,104 @@ swap the class for one backed by Redis or SQLite; it has three methods and `Bot`
 constructor argument, so nothing else changes. Worth doing when people start noticing that a
 deploy loses context mid-conversation.
 
-**One process only.** History, the message cache, the redelivery cache and the replay cache all
-live in memory, so running two workers would split them: replies would forget context depending
-on which worker answered, and a redelivered webhook could be handled twice. The replay cache is
-the one that costs more than context — a webhook whose random one worker has already refused
-is new to the other, so the 401 becomes a coin toss and the protection is only as good as the
-load balancer's stickiness. Moving that state into a shared store makes horizontal scaling real.
-For a bot handling a few webhooks a minute that is a long way off, so the constraint is
-documented rather than treated as a bug. It is also the reason not to reach for two workers as a
+**One process only.** History, the redelivery cache, the rate limiter and the position in each
+conversation all live in memory, so running two workers would split them: replies would forget
+context depending on which worker answered. Two processes signed in as the same account are
+worse, since each long-polls every conversation and answers every message, so a question gets two
+replies. Moving that state into a shared store, and deciding which worker owns which
+conversation, makes horizontal scaling real. For a chat assistant that is a long way off, so the
+constraint is documented rather than treated as a bug. It is also the reason not to reach for two workers as a
 throughput fix: `SABLE_MAX_CONCURRENT_REPLIES` raises the ceiling within one process without
 splitting anything.
 
-**No rate limiting on `/notify`.** Nothing stops a misconfigured alertmanager posting a thousand
-messages. Talk will start returning 429 and the bot will log failures, but the noise has already
-happened. A token bucket per room, or rate limiting at the proxy, fixes it. Something upstream
-will misbehave eventually. Note what this is *not*: `SABLE_MAX_CONCURRENT_REPLIES` caps how many
-model calls run at once, which bounds the resources a flood consumes, but it queues the work
-rather than shedding it. A thousand alerts still become a thousand messages, just more slowly.
+**No rate limiting on `/notify` and `/hook`.** Nothing stops a misconfigured alertmanager posting a
+thousand messages. Nextcloud may eventually answer 429 and the bot will log failures, but the noise
+has already happened. A token bucket per room, or rate limiting at the proxy, fixes it. Something
+upstream will misbehave eventually. Note what the existing limits are *not*: `SABLE_RATE_LIMIT`
+bounds how often one person can set the bot off in chat, and `SABLE_MAX_CONCURRENT_REPLIES` with
+`SABLE_MAX_QUEUED_REPLIES` bound the model calls in flight and waiting, but neither touches the
+alerting routes, whose only protection is the size cap on each body.
 
 **Command authorization is global, not per room.** `SABLE_ADMIN_COMMANDS` and `SABLE_ADMIN_USERS`
 say who may run what across every conversation the bot is in. What they cannot say is "maser may
 deploy, but only from the ops room", or defer to Talk's own notion of a moderator — which is
-the thing an operator reaches for next. The participant type already arrives on the event
-(`event.actor.participant_type`), so a rule expressed against it is a small change; it is not
-there yet because it is one more thing to get wrong for a bot whose admin list is usually two
-names. Revisit when the first per-room rule is actually wanted.
+the thing an operator reaches for next. `Actor.participant_type` exists in
+[`events.py`](../src/sable/events.py), but nothing fills it in, and in user-account mode the chat
+messages and reaction events sable reads are reported not to carry the sender's participant type
+(not re-checked against a live server), so it is always empty and the clause of `!whoami` that
+would print it never fires. A rule against Talk's
+moderator role would need a lookup (the conversation's participant list) per decision, which is not
+a small change, and it is not there because it is one more thing to get wrong for a bot whose admin
+list is usually two names. Revisit when the first per-room rule is actually wanted. The same goes
+for `SABLE_LLM_USERS` and `SABLE_ALLOWED_ROOMS`, which are also global lists of ids and tokens.
 
 ## Talk features not yet used
+
+**Adding a reaction is confirmed; taking one back is not.** The ⁉️ feature was tried against a
+live Nextcloud on 2026-10-01 and works: Talk delivers the reaction as a `reaction` system
+message through the same chat poll as everything else, with the reacted-to message in `parent`,
+and `_reaction()` recovers the emoji. The Talk documentation had suggested that message might be
+replaced before a poll saw it, and that its text might be a `{reaction}` placeholder; neither
+got in the way. What has not been exercised is removal. A reaction a person takes back arrives
+as `reaction_deleted`, which is not parsed, while `reaction_revoked` is a moderator removing
+someone else's and is parsed as `Undo`; nothing acts on either. If a feature ever needs to,
+that is the place to start, in `parse_message` in [`events.py`](../src/sable/events.py).
 
 Reactions are handled for one emoji: ⁉️ sends the message it is attached to to the model. Any
 other reaction is parsed and ignored, so a second behaviour — an approval flow where a thumbs-up
 from the right person does something — is a branch in `Bot.handle` next to the existing one.
-Joining and leaving a conversation are parsed and only logged; a greeting when the bot is
-enabled would go in the same place.
+Joining and leaving a conversation are not parsed at all; a greeting when sable is invited would
+hang off `Poller.scan`, which is where it learns of a new conversation.
 
-The bot API's `sendMessage` accepts `threadTitle` and `threadId`, which
-[`talk.py`](../src/sable/talk.py) does not pass. Replying in a thread rather than inline would
-suit the assistant in busy rooms, and the parameters are already there.
+The chat API's message posting accepts a thread id, which [`talk.py`](../src/sable/talk.py) does
+not pass. Replying in a thread rather than inline would suit the assistant in busy rooms.
 
-The message cache is the weak point of the ⁉️ feature. It is in memory, bounded by
-`SABLE_MESSAGE_CACHE` and expiring with `SABLE_HISTORY_TTL`, so reacting to anything older gets
-"I do not have that message". Making it reliable means persistence, which is the same question
-as durable history above.
+The ⁉️ feature reads the message it points at back from Talk, one call per reaction, through the
+context endpoint (`GET /chat/{token}/{messageId}/context`, capability `chat-get-context`), since
+Talk has no single-message endpoint. That replaced an in-memory message cache, so it works on old
+messages and across restarts and holds no chat content. What is not checked against a live server
+is whether the call with `limit=1` includes the message itself: the Talk documentation does not
+say, and `TalkClient.message` picks the entry whose id matches and treats none as "not found". If a
+server answers with the neighbours only, every reaction would get "I cannot find that message", and
+the fix is a larger `limit` in that one call.
 
-File attachments are done, in a hybrid shape: the webhook bot still receives, and a separate
-Nextcloud user account uploads over WebDAV and shares into the conversation, on the `/notify`
-path only. The other direction is not done — sable cannot read a file somebody posts, which
-would need that same account to fetch it, and nothing has asked for it yet.
+File attachments are done, as the same account that posts: it uploads over WebDAV and shares into
+the conversation, on the `/notify` path. The other direction is not done — sable cannot read a
+file somebody posts, which the account could now do, and nothing has asked for it yet.
+
+**A file posted to a locked conversation fails with a misleading error.** A read-only (locked)
+conversation makes the share step of `/notify` answer 404 `Conversation not found`, apparently
+because Talk's file-share handler treats it as missing rather than refusing with 403. sable uploads
+the file, gets the 404, deletes the upload and returns 400, with nothing in the message that points at
+the lock. Nothing in `src/` reads the room's `readOnly` field. The fix is to look the room up with
+`GET /api/v4/room/{token}` before uploading and answer with a clear "conversation is read-only", at
+the cost of one extra call per file post; failing that, the 404 message could name a lock as a likely
+cause. Not done because the failure is rare and obvious once you know it. The link to the lock is
+inferred from the symptom, not checked against Talk's source.
+
+**Messages sent while sable is down are not answered.** Positions in each conversation are kept in
+memory, and a conversation is followed from its newest message when sable starts, so anything
+said during a restart or an outage is skipped rather than caught up on. Persisting the last
+message id per conversation would close it, at the price of a state file and of deciding how old
+a missed question may be before answering it would be strange.
+
+**Long-poll load on Nextcloud.** One held request per conversation, up to 50 of them, is the cost of
+the user-account model, and it is the thing to watch on a small server. It has already bitten:
+against the stock Nextcloud container, whose PHP pool is five workers, seven polls took 41 to 90
+seconds instead of 30, and a raised pool fixed it (see
+[deployment.md](deployment.md#give-nextcloud-enough-php-workers)). If it still hurts, the options
+are a longer `SABLE_POLL_TIMEOUT`, fewer conversations, or a different shape.
+
+The shape worth building is polling the conversation list instead of holding a request per
+conversation: `GET /api/v4/room?modifiedSince=…` every few seconds returns only conversations
+with newer activity, last message included, and a one-second chat poll then fetches what is new
+from just those. That holds nothing open, at the cost of a few seconds of latency and one cheap
+request per interval, and it would replace `SABLE_POLL_TIMEOUT` and `SABLE_ROOM_REFRESH` with a
+single interval. It is **not** implemented, and it rests on something not yet verified: whether
+a reaction moves a conversation's `lastMessage`, which the ⁉️ feature would need (the feature
+works today because every conversation has its own poll, which sees the reaction directly). Talk's webhook
+Bot API is the other way out, which costs an idle server nothing, at the price of everything the
+[user-account model](purpose.md#what-it-deliberately-doesnt-do) was chosen to avoid.
 
 ## Assistant features
 
@@ -71,9 +122,11 @@ Tool calling is borrowed, not implemented: `SABLE_LLM_BACKEND=openwebui` hands t
 WebUI, which owns the tool registry and the credentials. sable running its own loop would mean
 becoming an MCP client and holding those credentials here, which is a different project and a
 much larger blast radius. The gap that borrowing leaves is authorization — Open WebUI decides
-what the account may reach, and sable cannot say "only maser may call this one". If that
-becomes a real need, an allowlist of tool names checked against `ctx.is_admin` before the
-question is sent is the smaller half of the fix; the other half is that the model, not sable,
+what the account may reach, and sable cannot say "only maser may call this one". What sable can say
+is where (`SABLE_LLM_TOOL_ROOMS`) and who may ask at all (`SABLE_LLM_USERS`), which is coarser: a
+person either may use the model or may not, and every tool configured is on in every tools room. If
+finer control becomes a real need, an allowlist of tool names checked against `ctx.is_admin` before
+the question is sent is the smaller half of the fix; the other half is that the model, not sable,
 chooses the tool.
 
 Retrieval is untouched, and the interesting question there is what corpus, and whether Nextcloud
@@ -139,11 +192,12 @@ throwaway instance would catch API drift that mocks cannot.
 
 Logs are the only audit trail; see [security.md](security.md#accepted-risks).
 
-`sable --check` prints less than the startup block does, and the gap keeps widening: seven
-settings against the block's nineteen. It has never named attachments, hooks or the ignore list,
-and now also misses the concurrency ceiling, the cached rooms, the API docs, the health check,
-the proxy trust, the backend pin, the time zone and every tool the model can reach — most of
-what somebody runs `--check` to confirm before deploying. Either it grows to match the block or
+`sable --check` prints less than the startup block does, and the gap keeps widening: eight
+settings against the block's twenty (twenty-one with the tools line). It has never named
+attachments, hooks or the ignore list, and now also misses the allowed rooms, who may use the
+model, the rate limit, the concurrency ceiling and queue, the ask reaction, the API docs, the
+health check, the proxy trust and every tool the model can reach — most of what somebody runs
+`--check` to confirm before deploying, and none of the access settings that matter most. Either it grows to match the block or
 it stops claiming to show the resolved configuration; feeding both from the same summary helpers
 would keep them from drifting again, and `tests/test_docs.py` already pins the block's shape.
 

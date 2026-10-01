@@ -13,7 +13,8 @@ import pytest
 
 from sable.config import TOKEN_RE, Config, ConfigError
 
-SECRET = "s" * 40
+URL = "https://cloud.example.org"
+PASSWORD = "app-password-1234"
 ROOM = "abcd1234"
 
 Load = Callable[..., Config]
@@ -26,10 +27,10 @@ def load(monkeypatch: pytest.MonkeyPatch) -> Load:
         if key.startswith("SABLE_"):
             monkeypatch.delenv(key, raising=False)
 
-    def _load(*, nextcloud: bool = True, **env: str) -> Config:
-        monkeypatch.setenv("SABLE_BOT_SECRET", SECRET)
-        if nextcloud:
-            monkeypatch.setenv("SABLE_NEXTCLOUD_URL", "https://cloud.example.org")
+    def _load(**env: str) -> Config:
+        monkeypatch.setenv("SABLE_NEXTCLOUD_URL", URL)
+        monkeypatch.setenv("SABLE_NEXTCLOUD_USER", "sable")
+        monkeypatch.setenv("SABLE_NEXTCLOUD_PASSWORD", PASSWORD)
         for key, value in env.items():
             monkeypatch.setenv(key, value)
         return Config.from_env()
@@ -37,12 +38,102 @@ def load(monkeypatch: pytest.MonkeyPatch) -> Load:
     return _load
 
 
-def test_the_minimum_is_a_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_minimum_is_a_url_a_user_and_an_app_password(load: Load) -> None:
+    config = load()
+    assert config.nextcloud_url == URL
+    assert config.nextcloud_user == "sable"
+    assert config.nextcloud_password == PASSWORD
+
+
+@pytest.mark.parametrize(
+    "missing",
+    ["SABLE_NEXTCLOUD_URL", "SABLE_NEXTCLOUD_USER", "SABLE_NEXTCLOUD_PASSWORD"],
+)
+def test_each_of_the_three_account_settings_is_required(
+    load: Load, monkeypatch: pytest.MonkeyPatch, missing: str
+) -> None:
+    load()
+    monkeypatch.delenv(missing)
+    with pytest.raises(ConfigError, match=f"{missing} required"):
+        Config.from_env()
+
+
+def test_nothing_set_names_all_three(monkeypatch: pytest.MonkeyPatch, load: Load) -> None:
     for key in list(os.environ):
         if key.startswith("SABLE_"):
             monkeypatch.delenv(key, raising=False)
-    with pytest.raises(ConfigError, match="SABLE_BOT_SECRET is required"):
+    with pytest.raises(ConfigError) as excinfo:
         Config.from_env()
+    for name in ("SABLE_NEXTCLOUD_URL", "SABLE_NEXTCLOUD_USER", "SABLE_NEXTCLOUD_PASSWORD"):
+        assert name in str(excinfo.value)
+
+
+def test_a_blank_value_counts_as_missing(load: Load) -> None:
+    with pytest.raises(ConfigError, match="SABLE_NEXTCLOUD_PASSWORD required"):
+        load(SABLE_NEXTCLOUD_PASSWORD="   ")
+
+
+def test_the_url_needs_a_scheme(load: Load) -> None:
+    with pytest.raises(ConfigError, match="must start with http"):
+        load(SABLE_NEXTCLOUD_URL="cloud.example.org")
+
+
+def test_a_trailing_slash_on_the_url_is_dropped(load: Load) -> None:
+    assert load(SABLE_NEXTCLOUD_URL=URL + "/").nextcloud_url == URL
+
+
+def test_the_password_is_not_in_the_repr(load: Load) -> None:
+    assert PASSWORD not in repr(load())
+
+
+def test_plain_http_to_another_host_is_doubted(load: Load) -> None:
+    config = load(SABLE_NEXTCLOUD_URL="http://nextcloud.internal")
+    assert any("plain http://" in w for w in config.warnings)
+    assert not any("plain http://" in w for w in load().warnings)
+    assert not load(
+        SABLE_NEXTCLOUD_URL="http://localhost:8080", SABLE_ALLOWED_ROOMS=ROOM
+    ).warnings
+
+
+# --------------------------------------------------------------------------- #
+# Reading chat by long polling
+# --------------------------------------------------------------------------- #
+
+
+def test_the_poll_defaults(load: Load) -> None:
+    config = load()
+    assert config.poll_timeout == 30
+    assert config.room_refresh == 60
+
+
+def test_the_poll_timeout_is_clamped_to_what_talk_allows(load: Load) -> None:
+    config = load(SABLE_POLL_TIMEOUT="300")
+    assert config.poll_timeout == 60
+    assert any("SABLE_POLL_TIMEOUT" in w for w in config.warnings)
+    assert load(SABLE_POLL_TIMEOUT="60").poll_timeout == 60
+    assert load(SABLE_POLL_TIMEOUT="10").poll_timeout == 10
+
+
+def test_a_poll_timeout_below_one_is_refused(load: Load) -> None:
+    with pytest.raises(ConfigError, match="SABLE_POLL_TIMEOUT must be at least 1"):
+        load(SABLE_POLL_TIMEOUT="0")
+
+
+def test_a_poll_timeout_must_be_a_number(load: Load) -> None:
+    with pytest.raises(ConfigError, match="SABLE_POLL_TIMEOUT must be an integer"):
+        load(SABLE_POLL_TIMEOUT="soon")
+
+
+def test_the_room_refresh_is_configurable_but_not_a_hot_loop(load: Load) -> None:
+    assert load(SABLE_ROOM_REFRESH="5").room_refresh == 5
+    with pytest.raises(ConfigError, match="SABLE_ROOM_REFRESH must be at least 5"):
+        load(SABLE_ROOM_REFRESH="1")
+
+
+def test_the_retired_bot_api_settings_are_simply_ignored(load: Load) -> None:
+    """Nothing reads them any more, so a leftover in an .env file is harmless."""
+    config = load(SABLE_BOT_SECRET="s" * 40, SABLE_PIN_BACKEND="true", SABLE_BOT_NAME="x")
+    assert config.nextcloud_user == "sable"
 
 
 # --------------------------------------------------------------------------- #
@@ -116,15 +207,6 @@ def test_a_token_without_a_hook_is_refused(load: Load) -> None:
 def test_a_template_without_a_hook_is_refused(load: Load) -> None:
     with pytest.raises(ConfigError, match="SABLE_HOOK_TEMPLATE_KOMODO"):
         load(SABLE_HOOK_TEMPLATE_KOMODO="{level}")
-
-
-def test_hooks_need_somewhere_to_post_to(load: Load) -> None:
-    with pytest.raises(ConfigError, match="SABLE_NEXTCLOUD_URL is required"):
-        load(
-            nextcloud=False,
-            SABLE_HOOKS=f"komodo={ROOM}",
-            SABLE_HOOK_TOKEN_KOMODO="t",
-        )
 
 
 def test_hook_names_are_case_insensitive(load: Load) -> None:
@@ -281,35 +363,18 @@ def test_admins_without_admin_commands_are_allowed(load: Load) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Rotating the bot secret without a window of 401s
+# Hooks and alerting no longer need a separate URL
 # --------------------------------------------------------------------------- #
 
 
-def test_there_is_only_one_secret_to_try_by_default(load: Load) -> None:
-    config = load()
-    assert config.bot_secret_previous == ""
-    assert config.inbound_secrets == (SECRET,)
-
-
-def test_a_rotation_offers_the_current_secret_first(load: Load) -> None:
-    """Order is the point: the old secret is a fallback for events signed before
-    the reinstall, not something to check first once the new one is live."""
-    old = "o" * 40
-    config = load(SABLE_BOT_SECRET_PREVIOUS=old)
-    assert config.bot_secret_previous == old
-    assert config.inbound_secrets == (SECRET, old)
-
-
-def test_the_previous_secret_is_held_to_the_same_length_rule(load: Load) -> None:
-    with pytest.raises(ConfigError, match="SABLE_BOT_SECRET_PREVIOUS must be 40-128"):
-        load(SABLE_BOT_SECRET_PREVIOUS="short")
-
-
-def test_the_previous_secret_repeating_the_current_one_is_refused(load: Load) -> None:
-    """Nothing has been rotated, so it can only be a copy-paste of the value above
-    it - and accepting it would read as a rotation in progress that is not."""
-    with pytest.raises(ConfigError, match="same value as SABLE_BOT_SECRET"):
-        load(SABLE_BOT_SECRET_PREVIOUS=SECRET)
+def test_alerting_and_hooks_need_nothing_beyond_the_account(load: Load) -> None:
+    config = load(
+        SABLE_NOTIFY_TOKEN="t",
+        SABLE_HOOKS=f"komodo={ROOM}",
+        SABLE_HOOK_TOKEN_KOMODO="k",
+    )
+    assert config.notify_enabled
+    assert config.hook_room("komodo") == ROOM
 
 
 # --------------------------------------------------------------------------- #
@@ -335,26 +400,11 @@ def test_restricting_the_reaction_without_an_admin_is_refused(load: Load) -> Non
         load(SABLE_ASK_ADMINS_ONLY="true")
 
 
-def test_every_room_is_cached_when_no_rooms_are_named(load: Load) -> None:
-    """The asymmetry with SABLE_AI_ROOMS, where empty means none. Empty here has
-    to keep meaning all of them, or upgrading would silently stop the reaction
-    working in every conversation an existing deployment has."""
-    config = load()
-    assert config.ask_rooms == []
-    assert config.ask_room_allowed(ROOM, "Anything")
-    assert not config.ai_room_allowed(ROOM, "Anything")
-
-
-def test_naming_rooms_confines_the_cache_to_them(load: Load) -> None:
-    config = load(SABLE_ASK_ROOMS=f"{ROOM}, Ops ")
-    assert config.ask_rooms == [ROOM, "Ops"]
-    assert config.ask_room_allowed(ROOM)
-    assert config.ask_room_allowed("e5f6g7h8", "ops")
-    assert not config.ask_room_allowed("e5f6g7h8", "Random")
-
-
-def test_a_star_caches_every_room_as_an_empty_list_does(load: Load) -> None:
-    assert load(SABLE_ASK_ROOMS="*").ask_room_allowed("e5f6g7h8", "Random")
+def test_the_removed_cache_settings_are_simply_ignored(load: Load) -> None:
+    """sable reads a message back from Talk now. An old .env still naming the
+    cache is harmless: it is not a setting any more."""
+    config = load(SABLE_ASK_ROOMS=ROOM, SABLE_MESSAGE_CACHE="50")
+    assert not hasattr(config, "ask_rooms") and not hasattr(config, "message_cache")
 
 
 # --------------------------------------------------------------------------- #
@@ -376,6 +426,17 @@ def test_a_negative_ceiling_is_refused(load: Load) -> None:
     emphatic version of it."""
     with pytest.raises(ConfigError, match="SABLE_MAX_CONCURRENT_REPLIES cannot be negative"):
         load(SABLE_MAX_CONCURRENT_REPLIES="-1")
+
+
+def test_the_reply_queue_defaults_to_twenty_and_can_be_changed(load: Load) -> None:
+    assert load().max_queued_replies == 20
+    assert load(SABLE_MAX_QUEUED_REPLIES="0").max_queued_replies == 0
+    assert load(SABLE_MAX_QUEUED_REPLIES="5").max_queued_replies == 5
+
+
+def test_a_negative_reply_queue_is_refused(load: Load) -> None:
+    with pytest.raises(ConfigError, match="SABLE_MAX_QUEUED_REPLIES cannot be negative"):
+        load(SABLE_MAX_QUEUED_REPLIES="-1")
 
 
 # --------------------------------------------------------------------------- #
@@ -422,8 +483,8 @@ def test_extra_body_may_not_override_the_fields_sable_builds(load: Load) -> None
 
 
 def test_extra_body_still_takes_provider_specific_fields(load: Load) -> None:
-    config = load(SABLE_LLM_EXTRA_BODY='{"tool_ids": ["server:mcp:1"], "top_k": 40}')
-    assert config.llm.extra_body == {"tool_ids": ["server:mcp:1"], "top_k": 40}
+    config = load(SABLE_LLM_EXTRA_BODY='{"top_k": 40}')
+    assert config.llm.extra_body == {"top_k": 40}
 
 
 # --------------------------------------------------------------------------- #
@@ -471,7 +532,7 @@ def test_a_base_url_without_api_is_doubted_but_allowed(load: Load) -> None:
 
 
 def test_a_base_url_under_api_says_nothing(load: Load) -> None:
-    assert load(**OWUI).warnings == ()
+    assert load(**OWUI, SABLE_ALLOWED_ROOMS=ROOM).warnings == ()
 
 
 def test_an_unknown_builtin_feature_is_refused(load: Load) -> None:
@@ -494,3 +555,173 @@ def test_builtin_features_need_a_session(load: Load) -> None:
 def test_a_zero_poll_interval_is_refused(load: Load) -> None:
     with pytest.raises(ConfigError, match="SABLE_LLM_POLL_INTERVAL"):
         load(**OWUI, SABLE_LLM_POLL_INTERVAL="0")
+
+
+# --------------------------------------------------------------------------- #
+# SABLE_ALLOWED_ROOMS, SABLE_LEAVE_UNLISTED_ROOMS, SABLE_AI_ROOMS
+# --------------------------------------------------------------------------- #
+
+OTHER = "wxyz9876"
+
+
+def test_unset_allowed_rooms_means_every_room_and_says_so(load: Load) -> None:
+    config = load()
+    assert config.allowed_rooms == []
+    assert config.room_allowed(ROOM) and config.room_allowed(OTHER)
+    assert any("SABLE_ALLOWED_ROOMS is empty" in w for w in config.warnings)
+
+
+def test_allowed_rooms_confines_the_account_and_is_quiet(load: Load) -> None:
+    config = load(SABLE_ALLOWED_ROOMS=f"{ROOM}, {OTHER}")
+    assert config.allowed_rooms == [ROOM, OTHER]
+    assert config.room_allowed(ROOM)
+    assert not config.room_allowed("zzzz0000")
+    assert not any("SABLE_ALLOWED_ROOMS" in w for w in config.warnings)
+
+
+@pytest.mark.parametrize("entry", ["Team chat", "ABCD1234", "*", "abc"])
+def test_allowed_rooms_takes_tokens_only(load: Load, entry: str) -> None:
+    with pytest.raises(ConfigError, match="SABLE_ALLOWED_ROOMS"):
+        load(SABLE_ALLOWED_ROOMS=entry)
+
+
+def test_a_non_token_in_allowed_rooms_explains_why(load: Load) -> None:
+    with pytest.raises(ConfigError, match="not a conversation token.*name their own"):
+        load(SABLE_ALLOWED_ROOMS="Team chat")
+
+
+def test_leaving_unlisted_rooms_is_off_by_default(load: Load) -> None:
+    assert load(SABLE_ALLOWED_ROOMS=ROOM).leave_unlisted_rooms is False
+    assert load(SABLE_ALLOWED_ROOMS=ROOM, SABLE_LEAVE_UNLISTED_ROOMS="true").leave_unlisted_rooms
+
+
+def test_leaving_without_a_list_is_doubted(load: Load) -> None:
+    config = load(SABLE_LEAVE_UNLISTED_ROOMS="true")
+    assert any("SABLE_LEAVE_UNLISTED_ROOMS has no effect" in w for w in config.warnings)
+
+
+def test_destinations_are_the_notify_aliases_and_hook_rooms(load: Load) -> None:
+    config = load(
+        SABLE_NOTIFY_ROOMS=f"ops={OTHER}",
+        SABLE_HOOKS="grafana=ops,sentry=thrd0003",
+        SABLE_HOOK_TOKEN_GRAFANA="a",
+        SABLE_HOOK_TOKEN_SENTRY="b",
+    )
+    assert config.destination_rooms == {OTHER, "thrd0003"}
+
+
+def test_ai_rooms_take_tokens_or_a_star(load: Load) -> None:
+    assert load(SABLE_AI_ROOMS=f"{ROOM}, {OTHER}").ai_rooms == [ROOM, OTHER]
+    assert load(SABLE_AI_ROOMS="*").ai_rooms == ["*"]
+
+
+def test_a_display_name_in_ai_rooms_is_refused_with_the_reason(load: Load) -> None:
+    with pytest.raises(ConfigError, match="SABLE_AI_ROOMS.*not a conversation token.*name their own"):
+        load(SABLE_AI_ROOMS="Team chat")
+
+
+def test_an_ai_room_must_be_allowed_to_matter(load: Load) -> None:
+    config = load(SABLE_ALLOWED_ROOMS=ROOM, SABLE_AI_ROOMS=f"*,{OTHER}")
+    assert any("SABLE_AI_ROOMS lists " + OTHER in w for w in config.warnings)
+    assert config.ai_room_allowed(ROOM)
+    assert not config.ai_room_allowed(OTHER)
+
+
+def test_a_star_covers_every_room_when_nothing_is_allow_listed(load: Load) -> None:
+    config = load(SABLE_AI_ROOMS="*")
+    assert config.ai_room_allowed(ROOM) and config.ai_room_allowed(OTHER)
+
+
+def test_no_ai_rooms_means_none(load: Load) -> None:
+    assert not load().ai_room_allowed(ROOM)
+
+
+# --------------------------------------------------------------------------- #
+# SABLE_LLM_USERS
+# --------------------------------------------------------------------------- #
+
+
+def test_everybody_may_use_the_model_until_users_are_named(load: Load) -> None:
+    config = load()
+    assert config.llm_users == []
+    assert config.is_llm_user("alice") and config.is_llm_user("")
+
+
+def test_named_users_and_admins_may_use_the_model(load: Load) -> None:
+    config = load(SABLE_LLM_USERS="alice, Users/Bob", SABLE_ADMIN_USERS="maser")
+    assert config.is_llm_user("alice") and config.is_llm_user("BOB")
+    assert config.is_llm_user("maser")
+    assert not config.is_llm_user("carol")
+    assert not config.is_llm_user("")
+
+
+def test_the_model_user_list_matches_ids_never_display_names(load: Load) -> None:
+    config = load(SABLE_LLM_USERS="Alice Smith")
+    assert not config.is_llm_user("")
+
+
+def test_an_open_model_with_tools_is_warned_about(load: Load) -> None:
+    env = {**OWUI, "SABLE_LLM_MODEL": "m", "SABLE_LLM_TOOL_IDS": "server:mcp:1",
+           "SABLE_LLM_TOOL_ROOMS": ROOM}
+    assert any("SABLE_LLM_USERS is empty" in w for w in load(**env).warnings)
+    assert not any("SABLE_LLM_USERS" in w for w in load(**env, SABLE_LLM_USERS="alice").warnings)
+    # No tools anywhere, nothing to warn about.
+    plain = {**OWUI, "SABLE_LLM_MODEL": "m"}
+    assert not any("SABLE_LLM_USERS" in w for w in load(**plain).warnings)
+
+
+# --------------------------------------------------------------------------- #
+# SABLE_LLM_TOOL_ROOMS and the EXTRA_BODY back door
+# --------------------------------------------------------------------------- #
+
+
+def test_tools_are_off_everywhere_by_default(load: Load) -> None:
+    config = load(**OWUI)
+    assert config.llm.tool_rooms == []
+    assert not config.llm.tools_in(ROOM)
+
+
+def test_tool_rooms_name_where_tools_may_be_used(load: Load) -> None:
+    config = load(**OWUI, SABLE_LLM_TOOL_ROOMS=ROOM)
+    assert config.llm.tools_in(ROOM) and not config.llm.tools_in(OTHER)
+    assert load(**OWUI, SABLE_LLM_TOOL_ROOMS="*").llm.tools_in(OTHER)
+    assert not config.llm.tools_in("")
+
+
+def test_a_display_name_in_tool_rooms_is_refused(load: Load) -> None:
+    with pytest.raises(ConfigError, match="SABLE_LLM_TOOL_ROOMS.*not a conversation token"):
+        load(**OWUI, SABLE_LLM_TOOL_ROOMS="Team chat")
+
+
+@pytest.mark.parametrize(
+    "extra", [{"SABLE_LLM_TOOL_IDS": "server:mcp:1"}, {"SABLE_LLM_FEATURES": "web_search"}]
+)
+def test_tools_with_no_room_to_use_them_are_warned_about(load: Load, extra: dict) -> None:
+    config = load(**OWUI, **extra)
+    assert any("no conversation may use them" in w for w in config.warnings)
+    with_room = load(**OWUI, **extra, SABLE_LLM_TOOL_ROOMS=ROOM)
+    assert not any("no conversation may use them" in w for w in with_room.warnings)
+
+
+@pytest.mark.parametrize(
+    "key", ["tool_ids", "features", "tool_servers", "terminal_id", "session_id"]
+)
+def test_extra_body_cannot_carry_tools_past_the_room_gate(load: Load, key: str) -> None:
+    with pytest.raises(ConfigError, match=rf"SABLE_LLM_EXTRA_BODY must not set {key}.*SABLE_LLM_TOOL_ROOMS"):
+        load(SABLE_LLM_EXTRA_BODY='{"%s": []}' % key)
+
+
+# --------------------------------------------------------------------------- #
+# SABLE_RATE_LIMIT
+# --------------------------------------------------------------------------- #
+
+
+def test_the_rate_limit_defaults_to_twenty_a_minute(load: Load) -> None:
+    assert load().rate_limit == 20
+    assert load(SABLE_RATE_LIMIT="5").rate_limit == 5
+    assert load(SABLE_RATE_LIMIT="0").rate_limit == 0
+
+
+def test_a_negative_rate_limit_is_refused(load: Load) -> None:
+    with pytest.raises(ConfigError, match="SABLE_RATE_LIMIT cannot be negative"):
+        load(SABLE_RATE_LIMIT="-1")

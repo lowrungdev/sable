@@ -36,7 +36,7 @@ def load_dotenv(path: Path) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="sable", description="A Nextcloud Talk bot.")
+    parser = argparse.ArgumentParser(prog="sable", description="A Nextcloud Talk assistant that runs as a user account.")
     parser.add_argument("--env-file", default=".env", type=Path, help="defaults to ./.env")
     parser.add_argument("--host", help="overrides SABLE_HOST")
     parser.add_argument("--port", type=int, help="overrides SABLE_PORT")
@@ -68,8 +68,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.check:
         print(
             f"sable {__version__} config OK\n"
-            f"  bot name:   {config.bot_name}\n"
-            f"  nextcloud:  {config.nextcloud_url or '(from webhook header)'}\n"
+            f"  nextcloud:  {config.nextcloud_url}\n"
+            f"  account:    {config.nextcloud_user} (password set)\n"
+            f"  polling:    {config.poll_timeout}s long polls, rooms rescanned every {config.room_refresh}s\n"
             f"  prefix:     {config.command_prefix}\n"
             f"  model:      {config.llm.model or '(disabled)'} @ {config.llm.base_url}\n"
             f"  ai rooms:   {', '.join(config.ai_rooms) or '(mentions only)'}\n"
@@ -78,6 +79,9 @@ def main(argv: list[str] | None = None) -> int:
             f"  notify:     {'enabled' if config.notify_enabled else 'disabled'}"
             f"{' aliases: ' + ', '.join(config.notify_rooms) if config.notify_rooms else ''}"
         )
+        for warning in config.warnings:
+            # The same doubts the server logs after its banner.
+            print(f"warning: {warning}")
         return 0
 
     import uvicorn
