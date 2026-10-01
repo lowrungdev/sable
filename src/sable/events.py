@@ -62,7 +62,7 @@ class Actor:
     @property
     def is_bot(self) -> bool:
         """True for other bots - never react to these, or you loop."""
-        return self.type == "bots" or self.id.startswith("bots/")
+        return self.type in ("bot", "bots") or self.id.startswith("bots/")
 
     @property
     def is_guest(self) -> bool:

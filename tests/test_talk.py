@@ -9,11 +9,11 @@ import respx
 from conftest import BACKEND, PASSWORD, ROOM, TALK, USER
 
 from sable.state import ConnectionState
-from sable.talk import API_BASE, TalkClient, TalkError
+from sable.talk import API_BASE, ROOMS_API_BASE, TalkClient, TalkError
 
 CHAT_URL = f"{TALK}/chat/{ROOM}"
 REACTION_URL = f"{TALK}/reaction/{ROOM}/100"
-ROOM_URL = f"{TALK}/room"
+ROOM_URL = f"{BACKEND}{ROOMS_API_BASE}/room"
 USER_URL = f"{BACKEND}/ocs/v2.php/cloud/user"
 
 
@@ -125,6 +125,7 @@ async def test_react_and_unreact_shapes() -> None:
         await client.aclose()
 
     assert json.loads(add.calls.last.request.content) == {"reaction": "👀"}
+    assert json.loads(remove.calls.last.request.content) == {"reaction": "👀"}
     assert remove.calls.last.request.url.params["reaction"] == "👀"
     for route in (add, remove):
         assert route.calls.last.request.headers["authorization"].startswith("Basic ")
@@ -133,7 +134,7 @@ async def test_react_and_unreact_shapes() -> None:
 
 @respx.mock
 async def test_reacting_twice_and_unreacting_what_is_gone_are_not_errors() -> None:
-    respx.post(REACTION_URL).mock(return_value=httpx.Response(409))
+    respx.post(REACTION_URL).mock(return_value=ocs({}, 200))
     respx.delete(REACTION_URL).mock(return_value=httpx.Response(404))
     client = make()
     try:
@@ -200,10 +201,13 @@ async def test_whoami_refuses_an_answer_that_names_nobody() -> None:
 
 @respx.mock
 async def test_rooms_lists_the_conversations() -> None:
-    respx.get(ROOM_URL).mock(return_value=ocs([{"token": "abcd1234"}, "junk", {"token": "wxyz9876"}]))
+    route = respx.get(ROOM_URL).mock(
+        return_value=ocs([{"token": "abcd1234"}, "junk", {"token": "wxyz9876"}])
+    )
     client = make()
     try:
         assert [r["token"] for r in await client.rooms()] == ["abcd1234", "wxyz9876"]
+        assert route.calls.last.request.url.params["noStatusUpdate"] == "1"
     finally:
         await client.aclose()
 
@@ -224,6 +228,7 @@ async def test_poll_asks_for_what_is_new_and_advances_the_cursor() -> None:
 
     params = route.calls.last.request.url.params
     assert params["lookIntoFuture"] == "1"
+    assert params["noStatusUpdate"] == "1"
     assert params["lastKnownMessageId"] == "10"
     assert params["timeout"] == "25"
     assert params["limit"] == "100"
@@ -322,3 +327,7 @@ async def test_the_connection_state_follows_the_calls(caplog) -> None:
         assert state.up is True
     finally:
         await client.aclose()
+
+
+def test_conversations_are_listed_under_v4() -> None:
+    assert ROOMS_API_BASE == "/ocs/v2.php/apps/spreed/api/v4"

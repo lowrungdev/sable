@@ -30,6 +30,12 @@ Format: `## <version>`, optionally followed by a date. Anything until the next
   else; and that every long poll holds a request slot on Nextcloud for up to
   `SABLE_POLL_TIMEOUT` seconds, which is why at most 50 conversations are
   followed (the most recently active).
+  The Talk calls were checked against the official API documentation, which
+  caught one outright error: conversations are listed under `api/v4`, not `v1`,
+  so the first version of this change could not find any. Polls and the room
+  scan now send `noStatusUpdate=1`, so sable no longer flips its account online,
+  and removing a reaction sends the emoji in the request body as documented.
+  The calls are listed in [configuration.md](configuration.md).
   **Migrating:** (1) create a Nextcloud user for sable and an app password for it
   under Settings > Security > Devices & sessions; (2) invite that user to each
   conversation it should be in - a normal invitation, there is no bot switch;

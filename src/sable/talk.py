@@ -2,7 +2,8 @@
 
 sable logs in like any other Nextcloud user: HTTP Basic auth with an app
 password, and the ``OCS-APIRequest`` header OCS endpoints insist on. Everything
-goes through the regular chat API under ``/ocs/v2.php/apps/spreed/api/v1`` -
+goes through the regular chat API under ``/ocs/v2.php/apps/spreed/api/v1`` (conversations
+are listed under ``api/v4``) -
 listing conversations, long-polling them for new messages, posting, reacting.
 """
 
@@ -18,6 +19,9 @@ from .state import ConnectionState
 log = logging.getLogger(__name__)
 
 API_BASE = "/ocs/v2.php/apps/spreed/api/v1"
+
+#: Conversations are listed by v4; v1 answers /room with a 404 (OCS status 998).
+ROOMS_API_BASE = "/ocs/v2.php/apps/spreed/api/v4"
 
 #: Not under the Talk base: who the credentials belong to.
 USER_ENDPOINT = "/ocs/v2.php/cloud/user"
@@ -152,7 +156,13 @@ class TalkClient:
 
     async def rooms(self) -> list[dict]:
         """Every conversation this account is in."""
-        response = await self._talk("GET", "/room")
+        # noStatusUpdate: listing conversations must not flip the account online.
+        response = await self._send(
+            "GET",
+            f"{self.base_url}{ROOMS_API_BASE}/room",
+            "/room",
+            params={"noStatusUpdate": 1},
+        )
         data = _ocs_data(response)
         return [room for room in data if isinstance(room, dict)] if isinstance(data, list) else []
 
@@ -161,7 +171,12 @@ class TalkClient:
         response = await self._talk(
             "GET",
             f"/chat/{room_token}",
-            params={"lookIntoFuture": 0, "limit": 1, "setReadMarker": 0},
+            params={
+                "lookIntoFuture": 0,
+                "limit": 1,
+                "setReadMarker": 0,
+                "noStatusUpdate": 1,
+            },
             ok=frozenset({304}),
         )
         if response.status_code == 304:
@@ -190,6 +205,7 @@ class TalkClient:
                 "limit": POLL_LIMIT,
                 "setReadMarker": 0,
                 "includeLastKnown": 0,
+                "noStatusUpdate": 1,
             },
             timeout=timeout + POLL_SLACK,
             ok=frozenset({304}),
@@ -249,9 +265,8 @@ class TalkClient:
         await self._talk(
             "POST",
             f"/reaction/{room_token}/{message_id}",
+            # Talk answers 200, not an error, when the reaction is already there.
             payload={"reaction": reaction},
-            # 409 is Talk saying we had already reacted with it.
-            ok=frozenset({409}),
         )
 
     async def unreact(self, room_token: str, message_id: int, reaction: str) -> None:
@@ -259,6 +274,9 @@ class TalkClient:
         await self._talk(
             "DELETE",
             f"/reaction/{room_token}/{message_id}",
+            # The docs put the emoji in the body; the query copy covers a server
+            # that reads DELETE parameters only from the URL.
+            payload={"reaction": reaction},
             params={"reaction": reaction},
             ok=frozenset({404}),
         )

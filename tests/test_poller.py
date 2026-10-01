@@ -10,7 +10,9 @@ from typing import AsyncIterator, Callable
 import httpx
 import pytest
 import respx
+from sable.talk import ROOMS_API_BASE
 from conftest import (
+    BACKEND,
     ROOM,
     TALK,
     USER,
@@ -25,7 +27,7 @@ from sable.bot import Bot
 from sable.poller import MAX_POLLED_ROOMS, Poller
 
 OTHER = "wxyz9876"
-ROOM_URL = f"{TALK}/room"
+ROOM_URL = f"{BACKEND}{ROOMS_API_BASE}/room"
 
 
 def chat_url(room: str = ROOM) -> str:

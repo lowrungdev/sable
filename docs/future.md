@@ -48,7 +48,12 @@ names. Revisit when the first per-room rule is actually wanted.
 delivers reactions as `reaction` system messages through the same chat poll that delivers
 everything else, with the reacted-to message in `parent`. That is how the code reads them, and
 the tests feed it exactly that shape, but it has **not been verified against a live Nextcloud**.
-Until it has, treat the reaction as unproven: if it does nothing, `SABLE_LOG_LEVEL=DEBUG` will show
+The Talk documentation says the `reaction` system message is replaced after the action
+completes, so a poll may never see it, and that its text is a `{reaction}` placeholder rather than
+the emoji; `_reaction()` reads the emoji from `message` and from `messageParameters`, and neither
+is confirmed. A reaction a person removes themselves arrives as `reaction_deleted`, which is not
+parsed, while `reaction_revoked` is a moderator removing someone else's. Until it has been
+checked, treat the reaction as unproven: if it does nothing, `SABLE_LOG_LEVEL=DEBUG` will show
 no `received Like` line, and the fix is in `parse_message` in
 [`events.py`](../src/sable/events.py) or in how the poller asks for messages. Checking it is the
 first thing to do against a real server.

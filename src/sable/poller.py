@@ -181,8 +181,8 @@ class Poller:
             except asyncio.CancelledError:
                 raise
             except TalkError as exc:
-                if exc.status in (403, 404):
-                    # Removed from the conversation, or it was deleted, between two
+                if exc.status in (403, 404, 412):
+                    # Removed from the conversation, it was deleted, or a lobby shut us out (412), between two
                     # scans. The next scan settles whether it is still ours.
                     log.info(
                         "conversation %s is no longer readable (HTTP %s); "

@@ -94,6 +94,25 @@ message is seen, since a poll returns the moment one arrives.
 What that buys is direction: sable needs to reach Nextcloud, and Nextcloud never needs to reach
 sable.
 
+#### The Talk calls it makes
+
+All of them are checked against the [Nextcloud Talk API documentation](https://nextcloud-talk.readthedocs.io/en/latest/),
+and `Agents/API/talk-user-api-reference.md` in the repository keeps the details and the list of
+what is still unverified. Note that **conversations and chat live under different API versions**.
+
+| Call | Endpoint | Documented at |
+| --- | --- | --- |
+| Who am I | `GET /ocs/v2.php/cloud/user` | Nextcloud OCS |
+| List conversations | `GET /ocs/v2.php/apps/spreed/api/v4/room` (`noStatusUpdate=1`) | [conversation](https://nextcloud-talk.readthedocs.io/en/latest/conversation/) |
+| Wait for messages | `GET /ocs/v2.php/apps/spreed/api/v1/chat/{token}` with `lookIntoFuture=1`, `timeout`, `lastKnownMessageId`, `setReadMarker=0`, `noStatusUpdate=1`; 304 means nothing new | [chat](https://nextcloud-talk.readthedocs.io/en/latest/chat/) |
+| Post | `POST .../api/v1/chat/{token}` | [chat](https://nextcloud-talk.readthedocs.io/en/latest/chat/) |
+| React, un-react | `POST` and `DELETE .../api/v1/reaction/{token}/{messageId}`, emoji in the body | [reaction](https://nextcloud-talk.readthedocs.io/en/latest/reaction/) |
+| Attach a file | WebDAV `PUT`, then `POST /ocs/v2.php/apps/files_sharing/api/v1/shares` with `shareType=10` | [chat](https://nextcloud-talk.readthedocs.io/en/latest/chat/) |
+
+`noStatusUpdate=1` keeps sable's polling from marking its account as online, and `setReadMarker=0`
+keeps it from marking conversations as read. Reacting needs the account to hold the reaction
+permission in that conversation, or Talk answers 403; a failed reaction is logged and ignored.
+
 ## Chat behaviour
 
 | Variable | Default | Notes |
