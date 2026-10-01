@@ -26,7 +26,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Run the test suite
+      - name: Install uv and the locked dependencies
         run: |
           set -eu
           python3 --version
@@ -34,6 +34,17 @@ jobs:
           /tmp/uv/bin/pip install --quiet uv==0.12.19
           /tmp/uv/bin/uv --version
           # --locked installs exactly what uv.lock pins, and fails if the lock
-          # no longer matches pyproject.toml.
+          # no longer matches pyproject.toml. The dev extra carries ruff and mypy.
           /tmp/uv/bin/uv sync --locked --extra dev
-          /tmp/uv/bin/uv run --locked pytest -q
+
+      - name: Lint
+        run: /tmp/uv/bin/uv run --locked ruff check .
+
+      - name: Check the formatting
+        run: /tmp/uv/bin/uv run --locked ruff format --check .
+
+      - name: Check the types
+        run: /tmp/uv/bin/uv run --locked mypy
+
+      - name: Run the test suite
+        run: /tmp/uv/bin/uv run --locked pytest -q

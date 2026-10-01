@@ -6,6 +6,7 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from typing import cast
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -55,6 +56,7 @@ def now(timezone: str = "") -> str:
     label = timezone or moment.tzname() or "local time"
     return f"{moment:%A %d %B %Y, %H:%M} ({label})"
 
+
 #: Said to somebody outside SABLE_LLM_USERS who addressed the model directly.
 NOT_ALLOWED = "You are not allowed to use the assistant."
 
@@ -69,7 +71,7 @@ class _Route:
     command: tuple[str, str] | None = None
 
 
-class ModelNotAllowed(CommandError):
+class ModelNotAllowed(CommandError):  # noqa: N818 - public name, read as a refusal rather than an error
     """The sender may not make the model answer. A CommandError so that a command
     which reaches the model says so in the room, once, like any refusal."""
 
@@ -101,7 +103,9 @@ class Bot:
         self.nextcloud = ConnectionState("Nextcloud")
         self._owns_http = http_client is None
         self._http = http_client or httpx.AsyncClient(timeout=30.0)
-        self._llm = llm if llm is not None else llm_client(config.llm, self._http)
+        self._llm: LLMClient | OpenWebUIClient = (
+            llm if llm is not None else llm_client(config.llm, self._http)
+        )
         #: The one account sable is. Everything posted under its id is ours.
         self.talk = TalkClient(
             config.nextcloud_url,
@@ -120,16 +124,10 @@ class Bot:
         """Learn who we are, and rebuild what recognises a mention of us."""
         self.user_id = user_id
         self.display_name = clean_name(display_name)
-        names = sorted(
-            {n for n in (self.user_id, self.display_name) if n}, key=len, reverse=True
-        )
+        names = sorted({n for n in (self.user_id, self.display_name) if n}, key=len, reverse=True)
         alternatives = "|".join(re.escape(n) for n in names)
-        self._mention_re = re.compile(
-            rf"^@?(?:{alternatives})\b[,:;]?\s*", re.IGNORECASE
-        )
-        self._mention_anywhere_re = re.compile(
-            rf"(?<!\w)@(?:{alternatives})\b", re.IGNORECASE
-        )
+        self._mention_re = re.compile(rf"^@?(?:{alternatives})\b[,:;]?\s*", re.IGNORECASE)
+        self._mention_anywhere_re = re.compile(rf"(?<!\w)@(?:{alternatives})\b", re.IGNORECASE)
 
     async def aclose(self) -> None:
         await self._llm.aclose()
@@ -239,11 +237,7 @@ class Bot:
     def is_self(self, event: TalkEvent) -> bool:
         """Did we write this ourselves? Acting on it would mean answering ourselves."""
         mine = self.user_id.casefold()
-        return (
-            bool(mine)
-            and event.actor.type == "users"
-            and event.actor.user_id.casefold() == mine
-        )
+        return bool(mine) and event.actor.type == "users" and event.actor.user_id.casefold() == mine
 
     # -- routing ----------------------------------------------------------- #
 
@@ -282,7 +276,9 @@ class Bot:
         if not self.config.room_allowed(event.room_token):
             # The poller never follows these; this holds wherever else an event
             # might come from.
-            log.debug("ignoring %s in %s - not in SABLE_ALLOWED_ROOMS", event.type, event.room_token)
+            log.debug(
+                "ignoring %s in %s - not in SABLE_ALLOWED_ROOMS", event.type, event.room_token
+            )
             return False
         if self.config.is_ignored(event.actor.id, event.actor.name):
             # Their words never reach the model, not even by somebody else
@@ -329,8 +325,7 @@ class Bot:
 
         if command is None and not mentioned and not in_ai_room:
             log.debug(
-                "message in %s (%r) was not for me - no prefix, no mention, and "
-                "not an AI room",
+                "message in %s (%r) was not for me - no prefix, no mention, and not an AI room",
                 event.room_token,
                 event.room_name,
             )
@@ -339,8 +334,9 @@ class Bot:
 
     def would_handle(self, event: TalkEvent) -> bool:
         """Would ``handle`` do any work for this event? Synchronous and free of
-        side effects: it consumes no rate-limit token. The poller asks before spawning, so that chatter, our own replies
-        and other bots never occupy a reply slot."""
+        side effects: it consumes no rate-limit token. The poller asks before
+        spawning, so that chatter, our own replies and other bots never occupy a
+        reply slot."""
         return self._screen(event) and self._route(event) is not None
 
     async def handle(self, event: TalkEvent) -> None:
@@ -357,7 +353,7 @@ class Bot:
             return
         if route.kind == "reaction":
             await self._run_reaction_query(event)
-        elif route.kind == "command":
+        elif route.command is not None:
             await self._run_command(event, *route.command)
         else:
             await self._run_llm_reply(event, route.remainder, explicit=route.mentioned)
@@ -388,8 +384,7 @@ class Bot:
             if self.config.unknown_command_hint:
                 await self._safe_reply(
                     event,
-                    f"I have no `{name}` command. "
-                    f"Try `{self.config.command_prefix}help`.",
+                    f"I have no `{name}` command. Try `{self.config.command_prefix}help`.",
                 )
             return
 
@@ -402,8 +397,7 @@ class Bot:
             )
             await self._safe_reply(
                 event,
-                f"`{self.config.command_prefix}{command.name}` is for "
-                "administrators only.",
+                f"`{self.config.command_prefix}{command.name}` is for administrators only.",
             )
             return
 
@@ -447,8 +441,7 @@ class Bot:
             # nothing wrong. Nothing of ours is showing either, the thinking
             # reaction never having gone on, so there is nothing to take back.
             log.warning(
-                "refused the %s reaction on message %s in %s for %s - not in "
-                "SABLE_ADMIN_USERS",
+                "refused the %s reaction on message %s in %s for %s - not in SABLE_ADMIN_USERS",
                 self.config.ask_reaction,
                 event.message_id,
                 event.room_token,
@@ -457,8 +450,7 @@ class Bot:
             return
         if not self.can_use_model(event):
             log.info(
-                "ignoring the %s reaction on message %s in %s from %s - not in "
-                "SABLE_LLM_USERS",
+                "ignoring the %s reaction on message %s in %s from %s - not in SABLE_LLM_USERS",
                 self.config.ask_reaction,
                 event.message_id,
                 event.room_token,
@@ -496,13 +488,16 @@ class Bot:
         target = parse_message(raw, room_token=event.room_token) if kind == "comment" else None
         if target is None:
             # A system message, a join or a rename: nothing anybody wrote to ask about.
-            log.debug("the %s reaction on %s message %s: nothing to answer",
-                      self.config.ask_reaction, kind or "unknown", event.message_id)
+            log.debug(
+                "the %s reaction on %s message %s: nothing to answer",
+                self.config.ask_reaction,
+                kind or "unknown",
+                event.message_id,
+            )
             return
         if self.config.is_ignored(target.actor.id, target.actor.name):
             log.debug(
-                "not answering about message %s - its author is listed in "
-                "SABLE_IGNORE_USERS",
+                "not answering about message %s - its author is listed in SABLE_IGNORE_USERS",
                 event.message_id,
             )
             return
@@ -620,9 +615,9 @@ class Bot:
         try:
             if self.config.llm.agentic:
                 # Tools only where SABLE_LLM_TOOL_ROOMS says so.
-                answer = await self._llm.complete(
-                    messages, tools=self.config.llm.tools_in(room)
-                )
+                # llm_client() returns an OpenWebUIClient whenever llm.agentic is set.
+                llm = cast(OpenWebUIClient, self._llm)
+                answer = await llm.complete(messages, tools=self.config.llm.tools_in(room))
             else:
                 answer = await self._llm.complete(messages)
         finally:
@@ -677,9 +672,7 @@ class Bot:
         self, room_token: str, message: str, *, silent: bool = False, reply_to: int = 0
     ) -> int:
         """Post into a conversation without an incoming event (alerting path)."""
-        return await self.talk.send_message(
-            room_token, message, silent=silent, reply_to=reply_to
-        )
+        return await self.talk.send_message(room_token, message, silent=silent, reply_to=reply_to)
 
     async def _safe_reply(
         self, event: TalkEvent, message: str, *, reply_to: int | None = None

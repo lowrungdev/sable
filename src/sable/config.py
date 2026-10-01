@@ -12,6 +12,7 @@ import ipaddress
 import json
 import os
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -35,13 +36,11 @@ LLM_BACKENDS = frozenset({"openai", "openwebui"})
 
 #: Open WebUI's togglable built-in tools. The others it offers - knowledge,
 #: files, notes, channels, calendar - need no flag and come with the session.
-BUILTIN_FEATURES = frozenset(
-    {"web_search", "code_interpreter", "image_generation", "memory"}
-)
+BUILTIN_FEATURES = frozenset({"web_search", "code_interpreter", "image_generation", "memory"})
 
 #: Said whenever a token turns out not to be one.
 TOKEN_HINT = (
-    "a conversation token is the lowercase string at the end of the "
+    "a conversation token is the lowercase string at the end of the "  # noqa: S105 - help text, not a secret
     "conversation's URL (.../call/abcd1234), not the name of the room"
 )
 
@@ -54,9 +53,7 @@ DEFAULT_TRUSTED_PROXIES = ("127.0.0.1", "::1")
 
 #: Request-body keys that switch tools on. They have their own settings, gated
 #: per conversation, and SABLE_LLM_EXTRA_BODY is merged after that gate.
-TOOL_BODY_KEYS = frozenset(
-    {"tool_ids", "features", "tool_servers", "terminal_id", "session_id"}
-)
+TOOL_BODY_KEYS = frozenset({"tool_ids", "features", "tool_servers", "terminal_id", "session_id"})
 
 
 class ConfigError(ValueError):
@@ -115,7 +112,7 @@ def _csv(name: str) -> list[str]:
     return [part.strip() for part in _str(name).split(",") if part.strip()]
 
 
-def _csv_or(name: str, default: list[str]) -> list[str]:
+def _csv_or(name: str, default: Sequence[str]) -> list[str]:
     """Like :func:`_csv`, but telling an unset variable from an empty one apart:
     setting it to nothing is a choice (trust nobody) and must not read as absent."""
     if name not in os.environ:
@@ -352,9 +349,7 @@ class Config:
     #: addresses, CIDR ranges, or ``*`` for any client. Empty trusts nobody.
     #: Nothing in sable reads the client address, so this decides whether the
     #: access log tells the truth, not who gets in.
-    trusted_proxies: list[str] = field(
-        default_factory=lambda: list(DEFAULT_TRUSTED_PROXIES)
-    )
+    trusted_proxies: list[str] = field(default_factory=lambda: list(DEFAULT_TRUSTED_PROXIES))
 
     # --- things that look wrong but might not be ----------------------------
     #: Settings that are probably a mistake but that sable cannot rule out, so
@@ -370,7 +365,7 @@ class Config:
     timezone: str = ""
 
     # --- process -----------------------------------------------------------
-    host: str = "0.0.0.0"
+    host: str = "0.0.0.0"  # noqa: S104 - a container service must listen on all interfaces
     port: int = 8080
     log_level: str = "INFO"
     #: Log an access line for every successful probe. Off by default: the
@@ -413,11 +408,7 @@ class Config:
         if not self.ignore_users:
             return False
         bare = actor_id.split("/", 1)[1] if "/" in actor_id else actor_id
-        candidates = {
-            value.casefold()
-            for value in (actor_id, bare, name.strip())
-            if value
-        }
+        candidates = {value.casefold() for value in (actor_id, bare, name.strip()) if value}
         return any(entry.strip().casefold() in candidates for entry in self.ignore_users)
 
     @property
@@ -458,9 +449,7 @@ class Config:
         if not user_id or not entries:
             return False
         wanted = user_id.casefold()
-        return any(
-            entry.strip().casefold().removeprefix("users/") == wanted for entry in entries
-        )
+        return any(entry.strip().casefold().removeprefix("users/") == wanted for entry in entries)
 
     def is_admin_user(self, user_id: str) -> bool:
         """May this Nextcloud user run the admin commands?
@@ -535,9 +524,7 @@ class Config:
             )
         poll_timeout = _int("SABLE_POLL_TIMEOUT", 30)
         if poll_timeout < 1:
-            raise ConfigError(
-                f"SABLE_POLL_TIMEOUT must be at least 1 second (got {poll_timeout})"
-            )
+            raise ConfigError(f"SABLE_POLL_TIMEOUT must be at least 1 second (got {poll_timeout})")
         room_refresh = _int("SABLE_ROOM_REFRESH", 60)
         if room_refresh < 5:
             raise ConfigError(
@@ -598,9 +585,7 @@ class Config:
             llm_users=_csv("SABLE_LLM_USERS"),
             notify_token=_str("SABLE_NOTIFY_TOKEN"),
             notify_rooms=_mapping("SABLE_NOTIFY_ROOMS"),
-            hooks={
-                name.lower(): room for name, room in _mapping("SABLE_HOOKS").items()
-            },
+            hooks={name.lower(): room for name, room in _mapping("SABLE_HOOKS").items()},
             hook_tokens=_prefixed("SABLE_HOOK_TOKEN_"),
             hook_templates=_prefixed("SABLE_HOOK_TEMPLATE_"),
             max_hook_bytes=_int("SABLE_MAX_HOOK_BYTES", 256 * 1024),
@@ -610,7 +595,7 @@ class Config:
             trusted_proxies=_csv_or("SABLE_TRUSTED_PROXIES", DEFAULT_TRUSTED_PROXIES),
             health_token=_str("SABLE_HEALTH_TOKEN"),
             timezone=_str("SABLE_TIMEZONE"),
-            host=_str("SABLE_HOST", "0.0.0.0"),
+            host=_str("SABLE_HOST", "0.0.0.0"),  # noqa: S104 - same default as above
             port=_int("SABLE_PORT", 8080),
             log_level=_str("SABLE_LOG_LEVEL", "INFO").upper(),
             log_health_checks=_bool("SABLE_LOG_HEALTH_CHECKS", False),

@@ -4,12 +4,13 @@ import asyncio
 import base64
 import json
 import logging
+from collections.abc import AsyncIterator
 from urllib.parse import parse_qs
-from typing import AsyncIterator
 
 import httpx
 import pytest
 import respx
+
 from conftest import (
     BACKEND,
     PASSWORD,
@@ -20,7 +21,6 @@ from conftest import (
     make_config,
     message_payload,
 )
-
 from sable.app import create_app, megabytes
 from sable.bot import Bot
 from sable.config import Config
@@ -41,9 +41,11 @@ def message_route():
     )
 
 
-async def client_for(config: Config, llm: FakeLLM | None = None) -> AsyncIterator[httpx.AsyncClient]:
+async def client_for(
+    config: Config, llm: FakeLLM | None = None
+) -> AsyncIterator[httpx.AsyncClient]:
     """Drive the app in-process, with the lifespan running."""
-    bot = Bot(config, llm=llm or FakeLLM())  # type: ignore[arg-type]
+    bot = Bot(config, llm=llm or FakeLLM())
     app = create_app(config, bot=bot)
     try:
         async with app.router.lifespan_context(app):
@@ -52,7 +54,7 @@ async def client_for(config: Config, llm: FakeLLM | None = None) -> AsyncIterato
                 transport=transport, base_url="http://sable.test"
             ) as client:
                 # So a test can feed the poller's dispatch without a Talk server.
-                client.app = app  # type: ignore[attr-defined]
+                client.app = app
                 yield client
     finally:
         await bot.aclose()
@@ -124,7 +126,7 @@ async def test_a_poller_is_not_started_for_a_bot_handed_in_by_a_test() -> None:
 # /notify
 # --------------------------------------------------------------------------- #
 
-NOTIFY_CONFIG = dict(notify_token="alert-token", notify_rooms={"alerts": ROOM})
+NOTIFY_CONFIG = {"notify_token": "alert-token", "notify_rooms": {"alerts": ROOM}}
 
 
 @respx.mock
@@ -281,8 +283,10 @@ async def test_startup_and_shutdown_are_logged_with_the_configuration(caplog) ->
         async for _client in client_for(config):
             pass
     text = caplog.text
-    assert "starting" in text and "ready" in text
-    assert "stopping" in text and "stopped" in text
+    assert "starting" in text
+    assert "ready" in text
+    assert "stopping" in text
+    assert "stopped" in text
     assert "listening on:   http://0.0.0.0:8080" in text
     assert f"nextcloud:      {BACKEND} as sable" in text
     assert "receiving:      long polls of up to 30s, conversations rescanned every 60s" in text
@@ -384,7 +388,7 @@ async def test_a_relayed_alert_is_logged(caplog) -> None:
 # --------------------------------------------------------------------------- #
 
 DAV = f"{BACKEND}/remote.php/dav/files/{USER}"
-UPLOADS = dict(notify_token="alert-token", notify_rooms={"alerts": ROOM})
+UPLOADS = {"notify_token": "alert-token", "notify_rooms": {"alerts": ROOM}}
 
 
 def share_fields(route) -> dict[str, str]:
@@ -419,7 +423,9 @@ async def test_notify_accepts_a_base64_file_in_json() -> None:
         )
     assert response.status_code == 201
     body = response.json()
-    assert body["ok"] is True and body["room"] == ROOM and body["shareId"] == 99
+    assert body["ok"] is True
+    assert body["room"] == ROOM
+    assert body["shareId"] == 99
     assert body["file"]["name"].endswith("-report.pdf")
     assert body["file"]["size"] == 4
     assert put.calls.last.request.content == b"PDF!"
@@ -564,7 +570,7 @@ async def test_the_text_only_contract_is_unchanged() -> None:
 
 
 @pytest.mark.parametrize(
-    "value, expected",
+    ("value", "expected"),
     [
         (104857600, "100 MB"),
         (26214400, "25 MB"),
@@ -604,10 +610,10 @@ async def test_startup_says_when_nobody_is_ignored(caplog) -> None:
 # /hook/{name}: webhooks from services that cannot speak /notify
 # --------------------------------------------------------------------------- #
 
-HOOKS = dict(
-    hooks={"komodo": ROOM},
-    hook_tokens={"komodo": "hook-token"},
-)
+HOOKS = {
+    "hooks": {"komodo": ROOM},
+    "hook_tokens": {"komodo": "hook-token"},
+}
 
 KOMODO_PAYLOAD = {
     "level": "CRITICAL",
@@ -632,7 +638,8 @@ async def test_a_hook_posts_a_rendered_message() -> None:
     assert response.json() == {"ok": True, "hook": "komodo", "room": ROOM, "messageId": 1}
     body = sent(route)[0]["message"]
     assert body.startswith("**CRITICAL**")
-    assert "prod-1" in body and "Unhealthy" in body
+    assert "prod-1" in body
+    assert "Unhealthy" in body
 
 
 @respx.mock
@@ -682,9 +689,7 @@ async def test_a_hook_needs_its_own_token() -> None:
 async def test_the_notify_token_does_not_open_a_hook() -> None:
     config = make_config(notify_token="alert-token", **HOOKS)
     async for client in client_for(config):
-        response = await client.post(
-            "/hook/komodo?token=alert-token", json=KOMODO_PAYLOAD
-        )
+        response = await client.post("/hook/komodo?token=alert-token", json=KOMODO_PAYLOAD)
     assert response.status_code == 401
 
 
@@ -710,9 +715,7 @@ async def test_a_hook_accepts_a_payload_that_is_not_json() -> None:
 
 async def test_an_oversized_payload_is_refused() -> None:
     async for client in client_for(make_config(max_hook_bytes=64, **HOOKS)):
-        response = await client.post(
-            "/hook/komodo?token=hook-token", json={"padding": "x" * 500}
-        )
+        response = await client.post("/hook/komodo?token=hook-token", json={"padding": "x" * 500})
     assert response.status_code == 413
     assert "SABLE_MAX_HOOK_BYTES" in response.json()["detail"]
 
@@ -755,7 +758,7 @@ class GatedLLM(FakeLLM):
 async def ask_twice(client: httpx.AsyncClient) -> None:
     """Two mentions, two message ids - two replies to run."""
     for message_id in (101, 102):
-        client.app.state.poller._dispatch(  # type: ignore[attr-defined]
+        client.app.state.poller._dispatch(
             ROOM, message_payload("@sable hello", message_id=message_id)
         )
 
@@ -977,7 +980,7 @@ async def test_a_declared_length_over_the_cap_is_refused_before_the_body_is_read
     config = make_config(max_upload_bytes=1024, **UPLOADS)
     async for client in client_for(config):
         status_code, body, pulled = await raw_post(
-            client.app,  # type: ignore[attr-defined]
+            client.app,
             "/notify",
             [b"x" * 10],
             [
@@ -997,7 +1000,7 @@ async def test_a_streamed_body_is_cut_off_the_moment_it_passes_the_cap() -> None
     chunks = [b"x" * 16384] * 100  # far more than the cap, no Content-Length at all
     async for client in client_for(config):
         status_code, body, pulled = await raw_post(
-            client.app,  # type: ignore[attr-defined]
+            client.app,
             "/notify",
             chunks,
             [
@@ -1015,7 +1018,7 @@ async def test_a_lying_content_length_does_not_get_past_the_cap() -> None:
     config = make_config(max_upload_bytes=1024, **UPLOADS)
     async for client in client_for(config):
         status_code, _, pulled = await raw_post(
-            client.app,  # type: ignore[attr-defined]
+            client.app,
             "/notify",
             [b"y" * 40000] * 5,
             [
@@ -1082,14 +1085,15 @@ async def test_the_hook_cap_is_the_setting_plus_a_little_slack() -> None:
     async for client in client_for(make_config(max_hook_bytes=64, **HOOKS)):
         small = await client.post("/hook/komodo?token=hook-token", content=b"x" * 5000)
         status_code, _, pulled = await raw_post(
-            client.app,  # type: ignore[attr-defined]
+            client.app,
             "/hook/komodo",
             [b"x" * 5000],
             [(b"content-length", b"5000")],
             query=b"token=hook-token",
         )
     assert small.status_code == 413
-    assert status_code == 413 and pulled == 0
+    assert status_code == 413
+    assert pulled == 0
 
 
 async def test_every_other_route_is_capped_at_64_kib() -> None:
@@ -1152,7 +1156,7 @@ async def test_non_ascii_hook_tokens_are_401_not_500() -> None:
         response = await client.post(
             "/hook/komodo",
             json={"a": 1},
-            headers={"Authorization": b"Bearer " + "é".encode("utf-8")},
+            headers={"Authorization": b"Bearer " + "é".encode()},
         )
         assert response.status_code == 401
 
@@ -1160,9 +1164,7 @@ async def test_non_ascii_hook_tokens_are_401_not_500() -> None:
 async def test_non_ascii_health_tokens_are_401_not_500() -> None:
     async for client in client_for(make_config(health_token="h" * 20)):
         for odd in ("é", "\U0001f600"):
-            response = await client.get(
-                "/healthz", headers={"X-Health-Token": odd.encode("utf-8")}
-            )
+            response = await client.get("/healthz", headers={"X-Health-Token": odd.encode("utf-8")})
             assert response.status_code == 401, odd
 
 
@@ -1208,8 +1210,10 @@ async def test_an_invalid_notify_body_is_422_with_the_field_named(body, field) -
         response = await client.post("/notify", json=body, headers=AUTH)
     assert response.status_code == 422
     detail = response.json()["detail"]
-    assert isinstance(detail, str) and field in detail
-    assert "Traceback" not in detail and "pydantic" not in detail
+    assert isinstance(detail, str)
+    assert field in detail
+    assert "Traceback" not in detail
+    assert "pydantic" not in detail
 
 
 async def test_a_deeply_nested_notify_body_is_a_4xx() -> None:
@@ -1305,12 +1309,14 @@ async def test_a_hook_cannot_ping_everyone() -> None:
     route = message_route()
     async for client in client_for(make_config(**HOOKS)):
         response = await client.post(
-            "/hook/komodo?token=hook-token", json={"message": "disk full @all see @\"team/ops\" x"}
+            "/hook/komodo?token=hook-token", json={"message": 'disk full @all see @"team/ops" x'}
         )
     assert response.status_code == 201
     text = sent(route)[0]["message"]
-    assert "@all" not in text and '@"team/' not in text
-    assert "all" in text and "disk full" in text
+    assert "@all" not in text
+    assert '@"team/' not in text
+    assert "all" in text
+    assert "disk full" in text
 
 
 @respx.mock
@@ -1332,7 +1338,7 @@ async def test_notify_leaves_mentions_alone() -> None:
 
 def dispatch(client: httpx.AsyncClient, *ids: int) -> None:
     for message_id in ids:
-        client.app.state.poller._dispatch(  # type: ignore[attr-defined]
+        client.app.state.poller._dispatch(
             ROOM, message_payload("@sable hello", message_id=message_id)
         )
 
@@ -1362,18 +1368,14 @@ async def test_chatter_and_our_own_replies_do_not_take_queue_slots() -> None:
     llm = GatedLLM()
     config = make_config(max_concurrent_replies=1, max_queued_replies=1, rate_limit=0)
     async for client in client_for(config, llm=llm):
-        poller = client.app.state.poller  # type: ignore[attr-defined]
+        poller = client.app.state.poller
         poller._dispatch(ROOM, message_payload("@sable hello", message_id=101))  # runs
         await settle()
         assert llm.open == 1
         for n in range(110, 120):
             poller._dispatch(ROOM, message_payload("just chatting", message_id=n))
-        poller._dispatch(
-            ROOM, message_payload("a reply", message_id=130, actor_id="users/sable")
-        )
-        poller._dispatch(
-            ROOM, message_payload("beep", message_id=131, actor_id="bots/relay")
-        )
+        poller._dispatch(ROOM, message_payload("a reply", message_id=130, actor_id="users/sable"))
+        poller._dispatch(ROOM, message_payload("beep", message_id=131, actor_id="bots/relay"))
         poller._dispatch(ROOM, message_payload("@sable second", message_id=140))  # waits
         poller._dispatch(ROOM, message_payload("@sable third", message_id=141))  # over
         await settle()
@@ -1432,7 +1434,7 @@ async def test_a_dropped_reply_is_closed_not_left_unawaited() -> None:
     with respx.mock:
         message_route()
         async for client in client_for(config, llm=llm):
-            spawn = client.app.state.poller._spawn  # type: ignore[attr-defined]
+            spawn = client.app.state.poller._spawn
 
             async def work() -> None:
                 await asyncio.sleep(0)
@@ -1513,5 +1515,5 @@ async def test_the_body_cap_passes_lifespan_and_websocket_scopes_untouched() -> 
     wrapped = BodyLimitMiddleware(inner, cap_for=lambda method, path: 1)
     for kind in ("lifespan", "websocket"):
         # No "method"/"path" in these scopes: reading them would raise KeyError.
-        await wrapped({"type": kind}, None, None)  # type: ignore[arg-type]
+        await wrapped({"type": kind}, None, None)
     assert seen == ["lifespan", "websocket"]

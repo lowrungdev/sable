@@ -19,9 +19,12 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "mypy>=1.10",
+    "pre-commit>=3.7",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "respx>=0.21",
+    "ruff>=0.6",
 ]
 
 [project.scripts]
@@ -35,3 +38,53 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 filterwarnings = ["error::DeprecationWarning:sable.*"]
 
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+# Agent worktrees live under .claude/ and are not part of this project.
+extend-exclude = [".claude"]
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # import sorting
+    "B",      # bugbear
+    "UP",     # pyupgrade
+    "C4",     # comprehensions
+    "SIM",    # simplifications
+    "ASYNC",  # blocking calls inside async code
+    "RUF",    # ruff-specific
+    "PT",     # pytest style
+    "PIE",    # misc. cleanups
+    "S",      # bandit: security checks for a service that handles tokens
+    "T20",    # no stray print()
+    "PERF",   # performance anti-patterns
+    "RET",    # return consistency
+    "N",      # naming
+]
+
+[tool.ruff.lint.per-file-ignores]
+"src/sable/__main__.py" = [
+    "T201",  # the command line interface reports on stdout/stderr by design
+]
+"tests/**" = [
+    "S101",  # assert is how pytest tests assert
+    "S105",  # fake secrets are the test fixtures
+    "S106",  # fake secrets passed as arguments are the test fixtures
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.11"
+# Only the package is checked. The tests lean on fakes and monkeypatching that are
+# deliberately not type-correct, and annotating them would add noise, not safety.
+files = ["src/sable"]
+strict = true
+# Pydantic and FastAPI are typed, so no stub packages are needed.

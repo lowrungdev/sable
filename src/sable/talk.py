@@ -10,6 +10,7 @@ listing conversations, long-polling them for new messages, posting, reacting.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import httpx
 
@@ -96,9 +97,9 @@ class TalkClient:
         url: str,
         label: str,
         *,
-        params: dict[str, object] | None = None,
+        params: dict[str, str | int | bool] | None = None,
         payload: dict[str, object] | None = None,
-        timeout: float | None = None,
+        timeout: float | None = None,  # noqa: ASYNC109 - handed to httpx, not an asyncio timeout
         ok: frozenset[int] = frozenset(),
         long_poll: bool = False,
     ) -> httpx.Response:
@@ -136,11 +137,12 @@ class TalkClient:
             raise TalkError(response.status_code, response.text, f"{method} {label}")
         return response
 
-    async def _talk(
-        self, method: str, path: str, **kwargs: object
-    ) -> httpx.Response:
+    async def _talk(self, method: str, path: str, **kwargs: object) -> httpx.Response:
         return await self._send(
-            method, f"{self.base_url}{API_BASE}{path}", path, **kwargs  # type: ignore[arg-type]
+            method,
+            f"{self.base_url}{API_BASE}{path}",
+            path,
+            **kwargs,  # type: ignore[arg-type]
         )
 
     # -- who we are -------------------------------------------------------- #
@@ -150,9 +152,7 @@ class TalkClient:
 
         Doubles as the credentials check: a wrong password is a 401 here.
         """
-        response = await self._send(
-            "GET", f"{self.base_url}{USER_ENDPOINT}", USER_ENDPOINT
-        )
+        response = await self._send("GET", f"{self.base_url}{USER_ENDPOINT}", USER_ENDPOINT)
         data = _ocs_data(response)
         if not isinstance(data, dict) or not data.get("id"):
             raise TalkError(
@@ -164,7 +164,7 @@ class TalkClient:
 
     # -- receiving --------------------------------------------------------- #
 
-    async def rooms(self) -> list[dict]:
+    async def rooms(self) -> list[dict[str, Any]]:
         """Every conversation this account is in."""
         # noStatusUpdate: listing conversations must not flip the account online.
         response = await self._send(
@@ -196,7 +196,7 @@ class TalkClient:
             return 0
         return max((_int(m.get("id")) for m in messages if isinstance(m, dict)), default=0)
 
-    async def message(self, room_token: str, message_id: int) -> dict | None:
+    async def message(self, room_token: str, message_id: int) -> dict[str, Any] | None:
         """One message by id, or None if it is gone (or was never there).
 
         Talk has no single-message endpoint. The context call returns the message
@@ -236,8 +236,12 @@ class TalkClient:
         return response.status_code != 404
 
     async def poll(
-        self, room_token: str, after: int, *, timeout: int = 30
-    ) -> tuple[list[dict], int]:
+        self,
+        room_token: str,
+        after: int,
+        *,
+        timeout: int = 30,  # noqa: ASYNC109 - handed to httpx
+    ) -> tuple[list[dict[str, Any]], int]:
         """Wait for messages newer than ``after``; return them and the new cursor.
 
         Talk answers 304 when the timeout passes with nothing to say, which is

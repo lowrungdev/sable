@@ -16,7 +16,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Awaitable, Callable
+from collections.abc import Callable, Coroutine
+from typing import Any
 
 import httpx
 
@@ -50,7 +51,7 @@ MAX_LEAVES_PER_SCAN = 5
 SAMPLE_OBJECT_TYPE = "sample"
 
 #: Spawns an event handler detached from the poll loop, under the reply ceiling.
-Spawn = Callable[[Awaitable[None]], None]
+Spawn = Callable[[Coroutine[Any, Any, None]], None]
 
 
 class Poller:
@@ -108,7 +109,7 @@ class Poller:
         self._scanner = None
 
     def _delay(self, failures: int) -> float:
-        return min(self._backoff_base * 2 ** max(failures - 1, 0), self._backoff_max)
+        return float(min(self._backoff_base * 2 ** max(failures - 1, 0), self._backoff_max))
 
     # -- which conversations ------------------------------------------------ #
 
@@ -136,8 +137,8 @@ class Poller:
     async def scan(self) -> None:
         """Compare the conversation list with what is being polled."""
         rooms = await self.bot.talk.rooms()
-        usable: list[dict] = []
-        unlisted: list[dict] = []
+        usable: list[dict[str, Any]] = []
+        unlisted: list[dict[str, Any]] = []
         for room in rooms:
             token = str(room.get("token", ""))
             if not TOKEN_RE.match(token):
@@ -196,8 +197,8 @@ class Poller:
         for token, room in wanted.items():
             name = str(room.get("displayName") or room.get("name") or "")
             self._names[token] = name
-            task = self._tasks.get(token)
-            if task is not None and not task.done():
+            running = self._tasks.get(token)
+            if running is not None and not running.done():
                 continue
             newest = _newest(room)
             if token not in self._cursors and newest is not None:
@@ -208,7 +209,9 @@ class Poller:
                 self._follow(token), name=f"sable-poll-{token}"
             )
 
-    async def _leave_unlisted(self, unlisted: list[dict], rooms: list[dict]) -> None:
+    async def _leave_unlisted(
+        self, unlisted: list[dict[str, Any]], rooms: list[dict[str, Any]]
+    ) -> None:
         """Leave the group and public conversations nobody listed, if asked to.
 
         ``rooms`` is the whole fetched list; nothing is left unless at least one
@@ -292,11 +295,10 @@ class Poller:
                 raise
             except TalkError as exc:
                 if exc.status in (403, 404, 412):
-                    # Removed from the conversation, it was deleted, or a lobby shut us out (412), between two
-                    # scans. The next scan settles whether it is still ours.
+                    # Removed from the conversation, it was deleted, or a lobby shut us out
+                    # (412), between two scans. The next scan settles whether it is still ours.
                     log.info(
-                        "conversation %s is no longer readable (HTTP %s); "
-                        "stopped following it",
+                        "conversation %s is no longer readable (HTTP %s); stopped following it",
                         token,
                         exc.status,
                     )
@@ -335,11 +337,9 @@ class Poller:
                 if spare > 0:
                     await asyncio.sleep(spare)
 
-    def _dispatch(self, token: str, message: dict) -> None:
+    def _dispatch(self, token: str, message: dict[str, Any]) -> None:
         try:
-            event = parse_message(
-                message, room_token=token, room_name=self._names.get(token, "")
-            )
+            event = parse_message(message, room_token=token, room_name=self._names.get(token, ""))
         except EventError as exc:
             log.warning("unparseable message in %s: %s", token, exc)
             return
@@ -359,7 +359,7 @@ class Poller:
         self._spawn(self.bot.handle(event))
 
 
-def _skipped(room: dict) -> bool:
+def _skipped(room: dict[str, Any]) -> bool:
     """True for a conversation not worth holding a request open for."""
     return room.get("type") in SKIPPED_ROOM_TYPES or room.get("objectType") == SAMPLE_OBJECT_TYPE
 
@@ -371,7 +371,7 @@ def _int(value: object) -> int:
         return 0
 
 
-def _newest(room: dict) -> int | None:
+def _newest(room: dict[str, Any]) -> int | None:
     """The id of the newest message the room list reports, None if it has none."""
     last = room.get("lastMessage")
     return _int(last.get("id")) if isinstance(last, dict) and last.get("id") else None

@@ -96,9 +96,7 @@ def scalar(value: Any) -> str:
     return text
 
 
-def take(
-    fields: list[tuple[str, Any]], names: tuple[str, ...]
-) -> tuple[str | None, str | None]:
+def take(fields: list[tuple[str, Any]], names: tuple[str, ...]) -> tuple[str | None, str | None]:
     """Find the first field whose leaf name is one of ``names``.
 
     Returns the path and its value, and leaves the list untouched - the caller
@@ -169,9 +167,7 @@ def render(payload: Any) -> str:
     if severity_path:
         used.add(severity_path)
 
-    title_path, title = take(
-        [f for f in fields if f[0] not in used], TITLE_KEYS
-    )
+    title_path, title = take([f for f in fields if f[0] not in used], TITLE_KEYS)
     if title_path:
         used.add(title_path)
 

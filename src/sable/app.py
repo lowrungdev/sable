@@ -31,13 +31,15 @@ import json
 import logging
 import math
 import time
+from collections.abc import AsyncIterator, Callable, Coroutine
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Annotated, AsyncIterator
+from typing import Annotated, Any, cast
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field, ValidationError
+
 # Starlette's own class: request.form() yields these, and FastAPI's UploadFile is a
 # subclass, so checking against the base accepts both.
 from starlette.datastructures import UploadFile
@@ -59,7 +61,7 @@ DRAIN_TIMEOUT = 30.0
 
 #: Guards GET /healthz when SABLE_HEALTH_TOKEN is set. A header rather than a
 #: query parameter, so the value stays out of proxy and access logs.
-HEADER_HEALTH_TOKEN = "X-Health-Token"
+HEADER_HEALTH_TOKEN = "X-Health-Token"  # noqa: S105 - a header name, not a secret
 
 #: Cap on any request body that has no reason to be large: health checks, the
 #: root, a wrong method on a real route. 64 KiB.
@@ -119,7 +121,9 @@ class NotifyRequest(BaseModel):
     file's caption rather than a second chat message.
     """
 
-    room: str = Field(min_length=1, description="Conversation token, or an alias from SABLE_NOTIFY_ROOMS")
+    room: str = Field(
+        min_length=1, description="Conversation token, or an alias from SABLE_NOTIFY_ROOMS"
+    )
     message: str = Field(default="", description="Markdown message body, or a caption for a file")
     silent: bool = Field(default=False, description="Post without triggering notifications")
     reply_to: int = Field(default=0, ge=0, alias="replyTo", description="Message id to reply to")
@@ -197,9 +201,7 @@ def create_app(
         )
         log.info(
             "  rate limit:     %s",
-            f"{config.rate_limit} triggers a minute per person"
-            if config.rate_limit
-            else "off",
+            f"{config.rate_limit} triggers a minute per person" if config.rate_limit else "off",
         )
         log.info("  admin commands: %s", admin_summary(config))
         log.info(
@@ -302,7 +304,7 @@ def create_app(
 
     app.add_middleware(BodyLimitMiddleware, cap_for=body_cap)
 
-    async def under_the_ceiling(coro) -> None:
+    async def under_the_ceiling(coro: Coroutine[Any, Any, None]) -> None:
         """Wait for a free slot, then run the handler.
 
         The waiting happens here, inside the background task, and never in the
@@ -321,7 +323,7 @@ def create_app(
         async with slots:
             await coro
 
-    def spawn(coro) -> None:
+    def spawn(coro: Coroutine[Any, Any, None]) -> None:
         """Run a handler detached from the poll loop, keeping a strong reference.
 
         With a ceiling, the number of replies waiting for a slot is bounded by
@@ -363,7 +365,7 @@ def create_app(
         """The Bot built during startup. Read from app.state rather than through
         Depends: a locally defined alias is not resolvable under postponed
         annotations, and FastAPI would take it for a query parameter."""
-        return request.app.state.bot
+        return cast(Bot, request.app.state.bot)
 
     @app.get("/healthz", tags=["ops"])
     async def healthz(
@@ -422,8 +424,7 @@ def create_app(
         if not TOKEN_RE.match(room):
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST,
-                f"{payload.room!r} is not a known alias or a conversation "
-                f"token: {TOKEN_HINT}",
+                f"{payload.room!r} is not a known alias or a conversation token: {TOKEN_HINT}",
             )
 
         if attachment is not None:
@@ -492,8 +493,7 @@ def create_app(
         if len(body) > config.max_hook_bytes:
             raise HTTPException(
                 status.HTTP_413_CONTENT_TOO_LARGE,
-                f"the payload is larger than SABLE_MAX_HOOK_BYTES "
-                f"({config.max_hook_bytes} bytes)",
+                f"the payload is larger than SABLE_MAX_HOOK_BYTES ({config.max_hook_bytes} bytes)",
             )
 
         text = body.decode("utf-8", "replace")
@@ -570,10 +570,7 @@ def proxy_trust_summary(config: Config) -> str:
             f"* - ANY client's X-Forwarded-For is believed by {UVICORN}; only safe "
             f"behind a proxy that overwrites it"
         )
-    return (
-        f"{', '.join(config.trusted_proxies)} - believed by {UVICORN}, "
-        f"and read by nothing else"
-    )
+    return f"{', '.join(config.trusted_proxies)} - believed by {UVICORN}, and read by nothing else"
 
 
 def ask_reaction_summary(config: Config) -> str:
@@ -704,9 +701,7 @@ async def _read_upload(upload: UploadFile, limit: int) -> bytes:
     return bytes(data)
 
 
-async def _parse_notify(
-    request: Request, limit: int
-) -> tuple[NotifyRequest, Attachment | None]:
+async def _parse_notify(request: Request, limit: int) -> tuple[NotifyRequest, Attachment | None]:
     """One endpoint, three shapes: JSON, JSON with a base64 file, or multipart.
 
     Content-Type decides. Everything ends up as a NotifyRequest plus an optional
@@ -730,7 +725,7 @@ async def _parse_notify(
                 room=str(form.get("room") or ""),
                 message=str(form.get("message") or ""),
                 silent=_form_bool(form.get("silent")),
-                reply_to=_form_int(form.get("replyTo") or form.get("reply_to") or 0),
+                replyTo=_form_int(form.get("replyTo") or form.get("reply_to") or 0),
             )
         )
         if upload is None:
@@ -742,13 +737,9 @@ async def _parse_notify(
     try:
         body = await request.json()
     except ValueError as exc:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST, f"invalid JSON: {exc}"
-        ) from exc
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"invalid JSON: {exc}") from exc
     except RecursionError as exc:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST, "invalid JSON: nested too deeply"
-        ) from exc
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid JSON: nested too deeply") from exc
     if not isinstance(body, dict):
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -775,12 +766,10 @@ async def _parse_notify(
 def _json_kind(value: object) -> str:
     if value is None:
         return "null"
-    return {list: "an array", str: "a string", bool: "a boolean"}.get(
-        type(value), "a number"
-    )
+    return {list: "an array", str: "a string", bool: "a boolean"}.get(type(value), "a number")
 
 
-def _validated(build) -> NotifyRequest:
+def _validated(build: Callable[[], NotifyRequest]) -> NotifyRequest:
     """Run ``build`` and turn a pydantic failure into a readable 422.
 
     Only the field names and what is wrong with them are reported: not the

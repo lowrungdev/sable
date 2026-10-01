@@ -60,7 +60,8 @@ async def test_omits_optional_parameters_and_auth_when_unset() -> None:
         await client.aclose()
 
     body = json.loads(route.calls.last.request.content)
-    assert "temperature" not in body and "max_tokens" not in body
+    assert "temperature" not in body
+    assert "max_tokens" not in body
     assert "authorization" not in route.calls.last.request.headers
 
 
@@ -191,9 +192,8 @@ async def test_a_backend_error_is_logged_with_its_url(caplog) -> None:
     respx.post(URL).mock(return_value=httpx.Response(502, text="upstream is down"))
     client = make_client()
     try:
-        with caplog.at_level(logging.WARNING):
-            with pytest.raises(LLMError):
-                await client.complete(MESSAGES)
+        with caplog.at_level(logging.WARNING), pytest.raises(LLMError):
+            await client.complete(MESSAGES)
     finally:
         await client.aclose()
     assert URL in caplog.text
@@ -206,9 +206,8 @@ async def test_an_unreachable_backend_logs_the_lost_connection(caplog) -> None:
     respx.post(URL).mock(side_effect=httpx.ConnectError("refused"))
     client = make_client()
     try:
-        with caplog.at_level(logging.ERROR):
-            with pytest.raises(LLMError):
-                await client.complete(MESSAGES)
+        with caplog.at_level(logging.ERROR), pytest.raises(LLMError):
+            await client.complete(MESSAGES)
     finally:
         await client.aclose()
     assert "lost connection to the model backend at" in caplog.text
@@ -219,9 +218,8 @@ async def test_a_timeout_names_the_limit(caplog) -> None:
     respx.post(URL).mock(side_effect=httpx.ReadTimeout("slow"))
     client = make_client(timeout=7.0)
     try:
-        with caplog.at_level(logging.WARNING):
-            with pytest.raises(LLMError):
-                await client.complete(MESSAGES)
+        with caplog.at_level(logging.WARNING), pytest.raises(LLMError):
+            await client.complete(MESSAGES)
     finally:
         await client.aclose()
     assert "did not answer within 7.0s" in caplog.text
