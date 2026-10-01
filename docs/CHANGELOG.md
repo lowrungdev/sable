@@ -10,7 +10,7 @@ is not worth publishing.
 Format: `## <version>`, optionally followed by a date. Anything until the next
 `##` heading is the body.
 
-## Unreleased
+## 0.8
 
 - **BREAKING: sable now runs as an ordinary Nextcloud user, not as a Talk bot.**
   It used to be a webhook bot on Talk's Bot API: Nextcloud called `/webhook`,

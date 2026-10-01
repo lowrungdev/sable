@@ -23,7 +23,7 @@ sable --check
 ```
 
 ```
-sable 0.7 config OK
+sable 0.8 config OK
   nextcloud:  https://cloud.example.org
   account:    sable (password set)
   polling:    30s long polls, rooms rescanned every 60s
