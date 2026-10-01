@@ -78,9 +78,10 @@ Format: `## <version>`, optionally followed by a date. Anything until the next
   an untrusted certificate or a rejected app password all show up at boot. A
   plain `http://` URL to a host that is not local gets a warning, since the
   password crosses the network unencrypted.
-- **The ⁉️ reaction is unverified against a live server.** It depends on Talk
-  delivering reactions as system messages through the chat poll, which the code
-  and tests assume but which has not yet been confirmed; see
+- **The ⁉️ reaction works on a live server.** Talk delivers a reaction as a
+  system message through the chat poll, and sable reads the emoji and the
+  reacted-to message from it, as tested against Nextcloud Talk on 2026-10-01.
+  Removing a reaction is still unexercised; see
   [future.md](future.md#talk-features-not-yet-used).
 
 ## 0.7

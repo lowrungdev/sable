@@ -72,11 +72,18 @@ threads 22.0. Limits: `config.chat.max-length`, `config.chat.read-privacy`.
   With `pm.max_children = 32` all seven returned 304 in 30.8-31.0 s. A queued request can sit
   past the client's timeout, so ordinary posts can fail too while the pool is full.
 
+## Verified on a live server (2026-10-01)
+- A reaction added by a person arrives through the chat long poll as a `reaction` system message;
+  sable's `_reaction()` recovers the emoji and `parent.id` is the reacted-to message. The docs'
+  worry that it is replaced before a poll sees it, or that its text is only a `{reaction}`
+  placeholder, did not bite. (Not recorded which of `message` or `messageParameters` carried it.)
+- sable's own reaction (the thinking emoji) and reply posts work with the documented calls.
+
 ## Known unknowns (not verified against a live server)
-1. Where the emoji sits in a `reaction` system message: sable's `_reaction()` reads `message`, then
-   `messageParameters.reaction|emoji`. Docs only say `{reaction}` placeholder + `parent`.
-2. Whether `reaction` system messages survive until a poll sees them, since the docs say they are
-   replaced after the action.
+1. Removal: whether `reaction_deleted` / `reaction_revoked` arrive through the poll, and in what
+   shape. Nothing acts on them.
+2. Whether a reaction moves a conversation's `lastMessage` in `GET /room` (matters only for a
+   room-list polling design).
 3. sable treats `reaction_revoked` as Undo; author removal is actually `reaction_deleted`
    (harmless today, nothing acts on Undo).
 4. sable's DELETE sends `reaction` in the body, as documented, and also as a query parameter in

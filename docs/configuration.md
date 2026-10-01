@@ -192,8 +192,9 @@ and does not carry its text. sable answers from the messages it saw arrive, keep
 posted before sable started following the conversation, and it says so rather than guessing.
 Nothing is cached at all when `SABLE_ASK_REACTION` is empty.
 
-This relies on Talk delivering reaction events through the same chat poll as messages. That has
-not yet been confirmed against a live server; see [future.md](future.md#talk-features-not-yet-used).
+This relies on Talk delivering reaction events through the same chat poll as messages, which
+it does: the feature has been confirmed against a live server. What has not been exercised is a
+reaction being taken back; see [future.md](future.md#talk-features-not-yet-used).
 
 ### Restricting the reaction, and the rooms it caches
 

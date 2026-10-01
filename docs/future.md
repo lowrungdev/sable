@@ -44,19 +44,15 @@ names. Revisit when the first per-room rule is actually wanted.
 
 ## Talk features not yet used
 
-**Reactions rely on an assumption that has not been checked.** The ⁉️ feature works only if Talk
-delivers reactions as `reaction` system messages through the same chat poll that delivers
-everything else, with the reacted-to message in `parent`. That is how the code reads them, and
-the tests feed it exactly that shape, but it has **not been verified against a live Nextcloud**.
-The Talk documentation says the `reaction` system message is replaced after the action
-completes, so a poll may never see it, and that its text is a `{reaction}` placeholder rather than
-the emoji; `_reaction()` reads the emoji from `message` and from `messageParameters`, and neither
-is confirmed. A reaction a person removes themselves arrives as `reaction_deleted`, which is not
-parsed, while `reaction_revoked` is a moderator removing someone else's. Until it has been
-checked, treat the reaction as unproven: if it does nothing, `SABLE_LOG_LEVEL=DEBUG` will show
-no `received Like` line, and the fix is in `parse_message` in
-[`events.py`](../src/sable/events.py) or in how the poller asks for messages. Checking it is the
-first thing to do against a real server.
+**Adding a reaction is confirmed; taking one back is not.** The ⁉️ feature was tried against a
+live Nextcloud on 2026-10-01 and works: Talk delivers the reaction as a `reaction` system
+message through the same chat poll as everything else, with the reacted-to message in `parent`,
+and `_reaction()` recovers the emoji. The Talk documentation had suggested that message might be
+replaced before a poll saw it, and that its text might be a `{reaction}` placeholder; neither
+got in the way. What has not been exercised is removal. A reaction a person takes back arrives
+as `reaction_deleted`, which is not parsed, while `reaction_revoked` is a moderator removing
+someone else's and is parsed as `Undo`; nothing acts on either. If a feature ever needs to,
+that is the place to start, in `parse_message` in [`events.py`](../src/sable/events.py).
 
 Reactions are handled for one emoji: ⁉️ sends the message it is attached to to the model. Any
 other reaction is parsed and ignored, so a second behaviour — an approval flow where a thumbs-up
@@ -97,7 +93,8 @@ with newer activity, last message included, and a one-second chat poll then fetc
 from just those. That holds nothing open, at the cost of a few seconds of latency and one cheap
 request per interval, and it would replace `SABLE_POLL_TIMEOUT` and `SABLE_ROOM_REFRESH` with a
 single interval. It is **not** implemented, and it rests on something not yet verified: whether
-a reaction moves a conversation's `lastMessage`, which the ⁉️ feature would need. Talk's webhook
+a reaction moves a conversation's `lastMessage`, which the ⁉️ feature would need (the feature
+works today because every conversation has its own poll, which sees the reaction directly). Talk's webhook
 Bot API is the other way out, which costs an idle server nothing, at the price of everything the
 [user-account model](purpose.md#what-it-deliberately-doesnt-do) was chosen to avoid.
 
