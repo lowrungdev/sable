@@ -36,7 +36,7 @@ def load_dotenv(path: Path) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="sable", description="A Nextcloud Talk bot.")
+    parser = argparse.ArgumentParser(prog="sable", description="A Nextcloud Talk assistant that runs as a user account.")
     parser.add_argument("--env-file", default=".env", type=Path, help="defaults to ./.env")
     parser.add_argument("--host", help="overrides SABLE_HOST")
     parser.add_argument("--port", type=int, help="overrides SABLE_PORT")

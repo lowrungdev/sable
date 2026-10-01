@@ -139,11 +139,10 @@ class Bot:
     def is_admin_actor(self, event: TalkEvent) -> bool:
         """May whoever caused this event use the restricted paths?
 
-        The bot check belongs in the decision rather than in front of it: an
-        actor typed ``Application`` with an id like ``users/maser`` resolves a
-        user id, and it is the administrator's, so is_admin_user says yes to it.
-        What stops that today is the is_bot early return in handle happening to
-        run first - true, and only true while nobody moves a line. Refusing here
+        The bot check belongs in the decision rather than in front of it. An
+        administrator's id is a plain string, and what keeps another bot from
+        passing for one is the is_bot early return in handle happening to run
+        first - true, and only true while nobody moves a line. Refusing here
         holds wherever the question is asked from.
         """
         return not event.actor.is_bot and self.config.is_admin_user(event.actor.user_id)

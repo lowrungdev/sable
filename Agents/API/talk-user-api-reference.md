@@ -24,7 +24,10 @@ sable's code is `src/sable/talk.py`, `events.py` and `poller.py`.
 - Room fields we use: `token`, `type`, `name`, `displayName`, `lastActivity` (UTC s), `lastMessage`
   (object with `id`; omits `parent`/`reactionsSelf`), `readOnly`, `permissions`, `participantType`,
   `unreadMessages`, `unreadMention`.
-- Types: 1 one-to-one, 2 group, 3 public, 4 changelog ("Talk updates"), 5 note-to-self.
+- Types (constants page): 1 one-to-one, 2 group, 3 public, 4 changelog ("Talk updates"),
+  5 former one-to-one (other user deleted), 6 note to self. The conversation page's summary said
+  5 was note-to-self; the constants page is the authority. `objectType` `sample` marks the
+  "Let's get started!" onboarding conversation (also: file, room, phone, event, extended_conversation…).
 - Participant types: 1 owner, 2 moderator, 3 user, 4 guest, 5 guest moderator.
 
 ## GET /chat/{token} (v1) — the long poll
@@ -63,6 +66,12 @@ chat-v2 3.2, system-messages 4.0, mention-flag 4.0, chat-reference-id 9.0, react
 silent-send 15.0, chat-keep-notifications 16.0, edit-messages 19.0, delete-messages 11.1,
 threads 22.0. Limits: `config.chat.max-length`, `config.chat.read-privacy`.
 
+## Learned on a live server (2026-10-01)
+- Seven simultaneous long polls took 41-90 s each against the stock Nextcloud docker image,
+  whose PHP-FPM pool is `pm.max_children = 5` (start_servers 2): polls queue for a worker.
+  With `pm.max_children = 32` all seven returned 304 in 30.8-31.0 s. A queued request can sit
+  past the client's timeout, so ordinary posts can fail too while the pool is full.
+
 ## Known unknowns (not verified against a live server)
 1. Where the emoji sits in a `reaction` system message: sable's `_reaction()` reads `message`, then
    `messageParameters.reaction|emoji`. Docs only say `{reaction}` placeholder + `parent`.
@@ -70,5 +79,6 @@ threads 22.0. Limits: `config.chat.max-length`, `config.chat.read-privacy`.
    replaced after the action.
 3. sable treats `reaction_revoked` as Undo; author removal is actually `reaction_deleted`
    (harmless today, nothing acts on Undo).
-4. sable's DELETE sends `reaction` as a query parameter; docs say body.
+4. sable's DELETE sends `reaction` in the body, as documented, and also as a query parameter in
+   case a server reads DELETE parameters only from the URL.
 5. sable does not yet check the 256 reaction permission or the `reactions` capability.

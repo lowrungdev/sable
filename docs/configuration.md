@@ -81,11 +81,16 @@ message to the same handler every trigger goes through. A poll that finds nothin
 The conversation list is fetched every `SABLE_ROOM_REFRESH` seconds. A conversation the account
 was invited to is followed from its newest message on, so nothing said before sable noticed it is
 replayed; one it left, or that was deleted, is dropped. Expect up to that long between being
-invited and being heard. The "Talk updates" conversation is skipped.
+invited and being heard. Conversations nobody addresses a bot in are skipped, since each one
+would cost a held request for nothing: the "Talk updates" changelog, a former one-to-one whose
+other person has gone, the account's own "Note to self", and Talk's "Let's get started!"
+sample conversation.
 
 **The cost is a held request.** Each long poll occupies a request slot on your Nextcloud server
 for up to `SABLE_POLL_TIMEOUT` seconds, and there is one per conversation. On PHP-FPM that is a
-worker kept busy doing nothing. sable therefore follows at most **50** conversations, the most
+worker kept busy doing nothing, and the stock PHP-FPM pool allows only **five** of them at
+once. Raise `pm.max_children` first; [deployment.md](deployment.md#give-nextcloud-enough-php-workers)
+says how. sable therefore follows at most **50** conversations, the most
 recently active, and logs a warning once when an account is in more. A dedicated account that is
 only in the rooms it needs stays far below that. Raising `SABLE_POLL_TIMEOUT` towards 60 means
 fewer, longer requests; lowering it means more, shorter ones. Neither changes how quickly a
@@ -234,8 +239,8 @@ the feature off, empty `SABLE_ASK_REACTION`, which stops the caching too.
 no ceiling of their own, so a busy conversation or a burst of messages produces as
 many simultaneous model calls as there were events, each holding `SABLE_LLM_TIMEOUT` seconds open.
 
-Nothing upstream applies the brakes. Talk rate-limits the messages sable *sends* with HTTP 429; it
-does not rate-limit the messages sable reads, and there is no rate limiting of our own —
+Nothing upstream applies the brakes. Talk does not pace the messages sable reads, and there is no
+rate limiting of our own —
 [accepted risk 9](security.md#accepted-risks). The default of `8` is a ceiling rather than a
 target, and most deployments never reach it.
 
@@ -293,8 +298,7 @@ that costs you an ignore while here it would cost you the commands. Guests and b
 id, so they are never administrators.
 
 Restricting a command restricts its aliases too — `reset` covers `!forget` — and naming an
-alias
-restricts the command behind it. `!help` lists only what the asker can run, marking the rest
+alias restricts the command behind it. `!help` lists only what the asker can run, marking the rest
 `(admin)` for those who can; `!help reset` says who it is for, and running a command you may not
 answers "`!reset` is for administrators only." and logs a warning naming you. Nothing is hidden,
 in other words; the list is just tailored.
@@ -332,7 +336,7 @@ Any endpoint that implements OpenAI's `POST /chat/completions` works.
 | `SABLE_LLM_BASE_URL` | `https://api.openai.com/v1` | Base URL **including** the version segment; `/chat/completions` is appended. |
 | `SABLE_LLM_API_KEY` | *(empty)* | Sent as `Authorization: Bearer …`. Omit for a local backend that wants no auth — the header is then not sent at all. |
 | `SABLE_LLM_MODEL` | *(empty)* | **Empty disables the assistant entirely**: commands still work, no model is ever called, and mentions are ignored. |
-| `SABLE_LLM_SYSTEM_PROMPT` | *(a short default)* | The system message. The conversation's name is appended automatically, so the model knows which room it is in. |
+| `SABLE_LLM_SYSTEM_PROMPT` | *(a short default)* | The system message. The conversation's name and the current date and time are appended automatically. |
 | `SABLE_LLM_TEMPERATURE` | *(unset)* | Omitted from the request when unset, letting the backend's own default apply. Some newer models reject an explicit temperature. |
 | `SABLE_LLM_MAX_TOKENS` | *(unset)* | Sent as `max_tokens`. Also omitted when unset. |
 | `SABLE_LLM_TIMEOUT` | `120` | Seconds to wait for a completion. On timeout the room gets an error message (if `SABLE_REPORT_ERRORS` is on) rather than silence. |
@@ -519,8 +523,8 @@ come in over it: its only callers are your alerting systems and your health prob
 
 `SABLE_API_DOCS` is off because whatever your proxy exposes is what an unauthenticated caller can
 read — and the schema describes every route, every header and every body shape in one request.
-Nothing at runtime needs it: your alerting callers were written against
-[deployment.md](deployment.md). Turn it on while writing a caller, then turn it off again.
+Nothing at runtime needs it: your alerting callers can be written against
+[the README](README.md#alerting) and [deployment.md](deployment.md#6-verify-end-to-end). Turn it on while writing a caller, then turn it off again.
 
 Off means the routes do not exist. `GET /docs` answers 404, the same as any unrouted path, so
 turning it off does not advertise that there was ever something there.

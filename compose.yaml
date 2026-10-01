@@ -141,9 +141,8 @@ services:
       # Model calls allowed in flight at once; "0" means no ceiling. Each
       # trigger is a background task with no limit of its own, so a busy room or
       # a burst of messages means that many completions open together, each
-      # holding SABLE_LLM_TIMEOUT. Talk rate-limits the replies sable sends, not
-      # the messages it reads. Lower it for a local model that serves one
-      # request at a time.
+      # holding SABLE_LLM_TIMEOUT. Nothing upstream paces the messages sable
+      # reads. Lower it for a local model that serves one request at a time.
       # SABLE_MAX_CONCURRENT_REPLIES: "8"
 
       # Users to ignore completely - nothing they say or react to is acted on.
@@ -297,7 +296,7 @@ services:
       # debug prefix and mention matching.
       # SABLE_LOG_LEVEL: "INFO"
 
-      # The healthcheck below asks every 30 seconds, and uvicorn logs each one
+      # The image's healthcheck asks every 30 seconds, and uvicorn logs each one
       # — about 2,900 identical lines a day. They are dropped unless you turn
       # this on; a probe that FAILS is logged either way.
       # SABLE_LOG_HEALTH_CHECKS: "false"

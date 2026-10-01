@@ -57,8 +57,11 @@ file, which a bot cannot. What it costs, honestly:
   answer is a dedicated account that owns nothing else, not a technical control.
 - **It holds connections open.** Talk has no single feed across conversations, so sable keeps one
   long poll per conversation, each occupying a request slot on Nextcloud for up to
-  `SABLE_POLL_TIMEOUT` seconds, all day. A webhook costs the server nothing while idle. sable
-  follows at most 50 conversations because of it.
+  `SABLE_POLL_TIMEOUT` seconds, all day. A webhook costs the server nothing while idle. On a
+  stock Nextcloud container that slot is one of **five** PHP workers, so an account in seven
+  conversations queues its own polls and slows everyone else; the pool has to be raised before
+  sable is pointed at it (see [deployment.md](deployment.md#give-nextcloud-enough-php-workers)).
+  sable skips conversations nobody addresses a bot in, and follows at most 50 of the rest.
 - **It is a person in the room.** Anyone who can invite participants can invite it, and nothing in
   Talk marks its messages as automated.
 - **It hears about a new room late.** The conversation list is rescanned every
@@ -139,7 +142,7 @@ accepted rather than solved.
 | Change when the model answers | `Bot.handle` in [`bot.py`](../src/sable/bot.py) |
 | Keep history across restarts | `History` in [`history.py`](../src/sable/history.py) |
 | Support a backend that isn't OpenAI-shaped | A sibling of [`openwebui.py`](../src/sable/openwebui.py) answering `complete(messages) -> str`, and one branch in `llm_client` |
-| Act on reactions | The `Like` and `Undo` branches of `Bot.handle`, already parsed out of Talk's reaction system messages |
+| Act on reactions | The `Like` branch of `Bot.handle`; `Like` and `Undo` are already parsed out of Talk's reaction system messages, though nothing acts on `Undo` |
 | Change which conversations are followed | `Poller.scan` in [`poller.py`](../src/sable/poller.py) |
 | Add an HTTP route | [`app.py`](../src/sable/app.py) |
 

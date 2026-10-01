@@ -23,7 +23,7 @@ import httpx
 from .bot import Bot
 from .config import TOKEN_RE
 from .events import EventError, parse_message
-from .talk import TalkError
+from .talk import POLL_SLACK, TalkError
 
 log = logging.getLogger(__name__)
 
@@ -33,9 +33,13 @@ log = logging.getLogger(__name__)
 #: ones win.
 MAX_POLLED_ROOMS = 50
 
-#: Talk's conversation type for the "Talk updates" changelog, which is read-only
-#: and nothing anybody addresses a bot in.
-CHANGELOG_ROOM = 4
+#: Conversation types nobody addresses a bot in, each of which would cost a held
+#: request for nothing: the read-only "Talk updates" changelog (4), a former
+#: one-to-one whose other person is gone (5), and the account's own note to self (6).
+SKIPPED_ROOM_TYPES = frozenset({4, 5, 6})
+
+#: The object type of Talk's "Let's get started!" sample conversation.
+SAMPLE_OBJECT_TYPE = "sample"
 
 #: Spawns an event handler detached from the poll loop, under the reply ceiling.
 Spawn = Callable[[Awaitable[None]], None]
@@ -123,7 +127,9 @@ class Poller:
             if not TOKEN_RE.match(token):
                 # Goes into a URL path below; anything odd is not worth following.
                 log.warning("ignoring a conversation with an unusable token %r", token)
-            elif room.get("type") != CHANGELOG_ROOM:
+            elif _skipped(room):
+                log.debug("not following %s: nobody talks to a bot there", token)
+            else:
                 usable.append(room)
 
         usable.sort(key=lambda room: _int(room.get("lastActivity")), reverse=True)
@@ -195,6 +201,22 @@ class Poller:
                 failures += 1
                 await asyncio.sleep(self._delay(failures))
                 continue
+            except httpx.ReadTimeout:
+                failures += 1
+                # Said once per streak: a server that is short of workers does it on
+                # every poll, and the first line is the one that helps.
+                log.log(
+                    logging.WARNING if failures == 1 else logging.DEBUG,
+                    "Nextcloud held the poll of conversation %s (%r) past %ds without "
+                    "answering; asking again. If this repeats, its PHP-FPM pool is "
+                    "probably too small for this many conversations "
+                    "(see docs/deployment.md).",
+                    token,
+                    self._names.get(token, ""),
+                    self.config.poll_timeout + POLL_SLACK,
+                )
+                await asyncio.sleep(self._delay(failures))
+                continue
             except httpx.HTTPError:
                 failures += 1
                 await asyncio.sleep(self._delay(failures))
@@ -227,6 +249,11 @@ class Poller:
             event.message_id or "-",
         )
         self._spawn(self.bot.handle(event))
+
+
+def _skipped(room: dict) -> bool:
+    """True for a conversation not worth holding a request open for."""
+    return room.get("type") in SKIPPED_ROOM_TYPES or room.get("objectType") == SAMPLE_OBJECT_TYPE
 
 
 def _int(value: object) -> int:

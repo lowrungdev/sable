@@ -6,9 +6,10 @@ Talk's chat API hands back JSON message objects: an ``id``, who wrote it
 matter here:
 
 * ``Create`` - a chat message was posted (``messageType`` ``comment``)
-* ``Like`` / ``Undo`` - a reaction was added / removed. Talk reports these as
-  *system* messages (``reaction`` / ``reaction_revoked``) whose ``parent`` is the
-  message reacted to.
+* ``Like`` / ``Undo`` - a reaction was added / revoked by a moderator. Talk reports
+  these as *system* messages (``reaction`` / ``reaction_revoked``) whose ``parent``
+  is the message reacted to. A reaction its author takes back arrives as
+  ``reaction_deleted``, which is not parsed, since nothing acts on a removal.
 
 Everything else - joins, renames, deleted messages - is of no interest, and
 :func:`parse_message` says so by returning None. :func:`render_message` flattens

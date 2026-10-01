@@ -249,8 +249,8 @@ class Config:
     #: Model calls allowed to be in flight at once; 0 lifts the ceiling. Every
     #: trigger becomes a background task with no limit of its own, so a busy room
     #: or a burst of messages means that many completions open together, each
-    #: holding the llm.timeout open. Talk rate-limits the replies we send, not
-    #: the messages we read, so nothing upstream applies the brakes either.
+    #: holding the llm.timeout open. Nothing upstream limits how many messages
+    #: arrive, so nothing applies the brakes but this.
     max_concurrent_replies: int = 8
 
     # --- conversation memory ----------------------------------------------

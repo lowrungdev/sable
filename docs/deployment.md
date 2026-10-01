@@ -4,14 +4,47 @@ Getting sable running against a real Nextcloud, and keeping it running.
 
 ## Prerequisites
 
-You need Nextcloud with Talk installed, an account on it that you can make a user with, and
-either Docker or Python 3.11+ on whatever host runs sable.
+You need Nextcloud with Talk installed, permission to create a user on it, and either Docker or Python 3.11+ on whatever host runs sable.
 
 sable is a Nextcloud user, so the connection goes one way: sable reaches out to Nextcloud, and
 Nextcloud never calls sable. It needs outbound access to your Nextcloud and to the model
 backend, and nothing inbound at all unless something calls `/notify` or `/hook/{name}`, or you
-probe `/healthz` from another host. There is no HTTPS endpoint to expose to Nextcloud and no
-`occ` command to run.
+probe `/healthz` from another host. There is no HTTPS endpoint to expose to Nextcloud and no bot
+to install with `occ`.
+
+### Give Nextcloud enough PHP workers
+
+Each conversation sable follows holds one PHP-FPM worker for up to `SABLE_POLL_TIMEOUT` seconds.
+The stock pool in the official Nextcloud image is `pm.max_children = 5`, so an account in seven
+conversations queues two of its polls behind the others: in a test with seven simultaneous polls
+they took 41 to 90 seconds each instead of 30, and a queued request can outlast sable's own
+timeout, so its posts can fail too. The queue is shared with everything else that uses Nextcloud, so it also slows
+your browser. Raise the pool before pointing sable at it, to the number of conversations the
+account is in plus headroom for everyone else, and check that the RAM covers it (a worker can
+take around 100 MB).
+
+Check the current value:
+
+```bash
+docker exec <nextcloud-container> php-fpm -tt 2>&1 | grep pm.max_children
+```
+
+and override it with a file mounted into the container, which survives the container being
+recreated (the `zz-` prefix makes it load after the image's `www.conf`):
+
+```ini
+[www]
+pm = dynamic
+pm.max_children = 32
+pm.start_servers = 6
+pm.min_spare_servers = 4
+pm.max_spare_servers = 8
+```
+
+```yaml
+    volumes:
+      - ./php-fpm-pool.conf:/usr/local/etc/php-fpm.d/zz-pool.conf:ro
+```
 
 ## 1. Create the account
 
@@ -242,8 +275,11 @@ not seen. It logs when that happens, which doubles as proof that the whole recei
 following conversation abcd1234 ('Team chat')
 ```
 
-It follows at most 50 conversations, the most recently active ones. Each is a request held open
-on your Nextcloud server, so keep the account out of rooms it has no business in.
+It follows at most 50 conversations, the most recently active ones, and skips the Talk updates
+room, a former one-to-one, its own note to self and the "Let's get started!" sample. Each one
+it does follow is a request held open on your Nextcloud server, so keep the account out of
+rooms it has no business in, and make sure the PHP pool
+[has room for them](#give-nextcloud-enough-php-workers).
 
 ## 6. Verify end to end
 
@@ -421,6 +457,16 @@ ERROR  sable.state: lost connection to Nextcloud: ConnectError: All connection a
 INFO   sable.state: Nextcloud is reachable again
 ```
 
+A long poll that Nextcloud accepts and then holds past its timeout is not an outage, and is not
+reported as one. It is a single warning per streak, naming the conversation:
+
+```
+WARNING  sable.poller: Nextcloud held the poll of conversation abcd1234 ('Team chat') past 45s without answering; asking again. If this repeats, its PHP-FPM pool is probably too small for this many conversations (see docs/deployment.md).
+```
+
+It means every PHP worker was busy and the poll queued, which is what a pool of five does to an
+account in seven conversations.
+
 The same applies to the model backend. A transport failure counts as unreachable; an HTTP error
 response does not, because the service answered, and that is logged with its status code and the
 first 200 characters of the body.
@@ -500,8 +546,9 @@ out or touches production belongs in that list, with the people allowed to run i
 | Nothing happens at all | The account is not in that conversation, or sable cannot sign in. Look for `signed in to` at startup, and for `following conversation <token>` once the account has been invited. A new invitation takes up to `SABLE_ROOM_REFRESH` seconds to be noticed. |
 | `refused the credentials for '…' (HTTP 401)` in the log | `SABLE_NEXTCLOUD_USER` or `SABLE_NEXTCLOUD_PASSWORD` is wrong, the password is not an app password, it was revoked, or the user is disabled. Generate a new app password under Settings → Security. |
 | `could not reach Nextcloud at …` | The URL, DNS, or the certificate. `CERTIFICATE_VERIFY_FAILED` means an internal CA is not trusted — see [the self-signed section](#if-your-nextcloud-uses-an-internal-or-self-signed-certificate). |
-| Invited to a room, still silent after a minute | The account is already in more than 50 conversations and this one is not among the most recently active — the log warns once. Leave the ones it does not need. Otherwise check `SABLE_ROOM_REFRESH`. |
+| Invited to a room, still silent after a minute | It is one sable does not follow — Talk updates, a former one-to-one, the account's note to self or the "Let's get started!" sample — or the account is already in more than 50 conversations and this one is not among the most recently active — the log warns once. Leave the ones it does not need. Otherwise check `SABLE_ROOM_REFRESH`. |
 | Silent in a room from before sable started | Expected: a conversation is followed from its newest message, so nothing earlier is replayed. |
+| `Nextcloud held the poll of conversation … past …s without answering` | Nextcloud accepted the request and did not answer in time, almost always because its PHP-FPM pool is full and the poll is queued. sable keeps asking and does not treat it as an outage. Raise `pm.max_children` — see [give Nextcloud enough PHP workers](#give-nextcloud-enough-php-workers). You can confirm it by running seven `curl` polls at once: with a big enough pool they all return in about 30 seconds. |
 | Nextcloud shows many long-running requests from one user | That is the long polling: one per conversation, each up to `SABLE_POLL_TIMEOUT` seconds. See [how chat is received](configuration.md#how-chat-is-received). |
 | Replies never appear, `could not post to <token>` in logs | The account cannot post there (a read-only conversation, or it was removed), or `SABLE_NEXTCLOUD_URL` is unreachable. |
 | Answers are slow or absent, `completion failed` in logs | Model timeout. Raise `SABLE_LLM_TIMEOUT`, lower `SABLE_LLM_MAX_TOKENS`, or pick a faster model. |
@@ -510,7 +557,7 @@ out or touches production belongs in that list, with the people allowed to run i
 | `the loop finished without writing an answer` | Open WebUI accepted the work and wrote nothing. Almost always the model's own *Stream Chat Response* parameter, which overrides `stream: true` and stops the tool loop running. |
 | Tool answers are stale or invented | The model has no clock unless you give it one. Check the date line in the system prompt, and set `SABLE_TIMEZONE`. |
 | Replies are cut short with `_[truncated]_` | The answer exceeded `SABLE_MAX_MESSAGE_CHARS`; Talk's own ceiling is 32000 characters. |
-| `HTTP 429` from Talk | The account is posting too fast. Talk rate-limits it; batch or slow down whatever is calling `/notify`. |
+| `HTTP 429` from Talk | Nextcloud is throttling the account, most likely for posting too fast. Batch or slow down whatever is calling `/notify`. |
 | Mentions ignored | Pick the account from Talk's mention list, or start the message with its user id. `SABLE_NEXTCLOUD_USER` has to be the id people mention. Set `SABLE_LOG_LEVEL=DEBUG` and watch for `message in <token> was not for me`. |
 | The ⁉️ reaction does nothing | Set `SABLE_LOG_LEVEL=DEBUG` and react again. If no `received Like` line appears, Talk is not delivering reactions through the chat poll, which is not yet verified against a live server — see [future.md](future.md#talk-features-not-yet-used). Otherwise the message was older than the cache, or in a room outside `SABLE_ASK_ROOMS`. |
 | `/notify` returns 404 | `SABLE_NOTIFY_TOKEN` is unset, so the route is disabled. |

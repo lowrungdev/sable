@@ -58,7 +58,7 @@ the same operation: create a new one, update `SABLE_NEXTCLOUD_PASSWORD`, restart
 
 Who wrote a message is whatever Nextcloud says it is. sable ignores anything written by its own
 account, so its replies and reactions coming back down the poll do not trigger it, and ignores
-actors Talk marks as applications or whose id starts with `bots/`.
+actors Talk marks as bots (actor type `bots`, ids starting `bots/`).
 
 Room tokens are validated before use, in two places. `/notify` accepts an alias from
 `SABLE_NOTIFY_ROOMS` or a token matching `^[a-z0-9]{4,64}\Z` — Talk's own routes match only
@@ -74,21 +74,24 @@ in [deployment.md](deployment.md#if-your-nextcloud-uses-an-internal-or-self-sign
 
 ## Abuse resistance
 
-Events from actors Talk marks as applications, or whose id starts with `bots/`, are ignored, as
+Events from actors Talk marks as bots (actor type `bots`, ids starting `bots/`) are ignored, as
 is anything the account wrote itself, so two bots in one room cannot start answering each other
 and sable cannot answer its own replies. Every event is de-duplicated on the conversation, type,
 message id, actor and reaction together, keeping the last 512, so a message seen twice produces
 one reply while two people reacting to the same message remain two distinct events.
 
 `SABLE_MAX_CONCURRENT_REPLIES` caps how many model calls can be open at once, eight by default,
-with the rest queued rather than dropped. Talk rate-limits the replies sable *sends* with a 429
-but does not limit the messages it hands over, so without a ceiling a burst in a busy room meant
-one open model call per message, each holding `SABLE_LLM_TIMEOUT` open. The poll loop never waits
+with the rest queued rather than dropped. Nothing upstream paces the messages Talk hands over, so
+without a ceiling a burst in a busy room meant one open model call per message, each holding
+`SABLE_LLM_TIMEOUT` open. The poll loop never waits
 for a slot, so a full queue delays replies and never makes sable fall behind the conversation.
 
-sable follows at most 50 conversations, the most recently active. Each one is a request held open
-on Nextcloud, so the cap bounds what a misplaced invitation list can cost the server as well as
-what sable watches.
+sable follows at most 50 conversations, the most recently active, and none of the ones nobody
+addresses a bot in (Talk updates, a former one-to-one, the account's note to self, the sample
+conversation). Each one it does follow is a request held open on Nextcloud, so the cap bounds
+what a misplaced invitation list can cost the server as well as what sable watches. A poll that
+Nextcloud holds past its timeout is logged as a warning naming the conversation, not as an
+outage.
 
 Display names and conversation names are flattened onto a single line before anything uses them:
 control characters go, Unicode line separators collapse, and the result is capped at 100
@@ -124,7 +127,7 @@ token is what grants access, so treat logs accordingly.
 
 The image runs as a non-root user, uid 10001, created in the image, and is built from a
 patch-pinned base rather than a floating tag. Dependencies are locked and hash-verified:
-`uv.lock` pins 32 packages and `uv sync --locked` fails rather than resolving something else. uv
+`uv.lock` pins 31 packages and `uv sync --locked` fails rather than resolving something else. uv
 itself is uninstalled in the same layer, so it does not ship.
 
 Nothing is written to disk. Conversation history and the message cache live in process memory
@@ -170,7 +173,7 @@ These are known and deliberate. Decide for yourself whether they are acceptable.
 2. Commands are open unless you close them. Out of the box anyone in the conversation, guests
    included, can run any command. `SABLE_ADMIN_COMMANDS` plus `SABLE_ADMIN_USERS` moves named
    commands — or all of them, with `*` — behind a list of Nextcloud user ids, and a custom
-   can check `ctx.is_admin` for anything finer. What this is not is authentication: it trusts the
+   command can check `ctx.is_admin` for anything finer. What this is not is authentication: it trusts the
    user id Nextcloud's chat API reports for the sender, the same trust the rest of the service
    runs on. Who is in the conversation at all stays Talk's decision, not ours.
 
@@ -210,13 +213,19 @@ These are known and deliberate. Decide for yourself whether they are acceptable.
    that is not wanted, and list it in no more rooms than it needs: each conversation is also a
    long poll held open on Nextcloud, which is why no more than 50 are followed.
 
-9. There is no rate limiting of our own. Talk rate-limits what the account posts with HTTP 429;
-   nothing limits how fast `/notify` can be called, so the real memory ceiling for attachments is
-   the cap times the number of concurrent callers. Reading chat has its own cost, which is not a
+9. There is no rate limiting of our own. Nothing limits how fast `/notify` can be called, so the
+   real memory ceiling for attachments is the cap times the number of concurrent callers, and
+   whatever Nextcloud itself does about an account that posts too fast is not something sable
+   relies on. Reading chat has its own cost, which is not a
    risk to sable but to Nextcloud: every long poll holds a request slot for up to
    `SABLE_POLL_TIMEOUT` seconds, per conversation, continuously, where a webhook would cost it
-   nothing while idle. On a small server with few PHP workers that is enough to be felt, and the
-   50-conversation cap and the dedicated account are the mitigations.
+   nothing while idle. On a small server with few PHP workers that is enough to be felt, and
+   in practice it is an availability problem for everyone on that Nextcloud: the stock
+   container's pool is five workers, so seven followed conversations starve it, queue other
+   users' requests behind idle polls, and make sable's own posts time out. Raise
+   `pm.max_children` (see [deployment.md](deployment.md#give-nextcloud-enough-php-workers)); the
+   skipped conversation types, the 50-conversation cap and the dedicated account are the
+   mitigations on sable's side.
 
 10. Logs are the only audit trail. There is no separate audit log and no metrics endpoint. At
     INFO they record who used the bot, which command or trigger, and in which conversation,

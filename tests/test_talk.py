@@ -329,5 +329,23 @@ async def test_the_connection_state_follows_the_calls(caplog) -> None:
         await client.aclose()
 
 
+@respx.mock
+async def test_a_long_poll_read_timeout_does_not_mark_nextcloud_down() -> None:
+    state = ConnectionState("Nextcloud")
+    respx.get(CHAT_URL).mock(side_effect=httpx.ReadTimeout("held"))
+    respx.post(CHAT_URL).mock(side_effect=httpx.ReadTimeout("held"))
+    client = TalkClient(BACKEND, USER, PASSWORD, state=state)
+    try:
+        with pytest.raises(httpx.ReadTimeout):
+            await client.poll(ROOM, 5, timeout=1)
+        assert state.up is None
+        # Any other call that times out still means Nextcloud is not answering.
+        with pytest.raises(httpx.ReadTimeout):
+            await client.send_message(ROOM, "hi")
+        assert state.up is False
+    finally:
+        await client.aclose()
+
+
 def test_conversations_are_listed_under_v4() -> None:
     assert ROOMS_API_BASE == "/ocs/v2.php/apps/spreed/api/v4"

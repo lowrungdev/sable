@@ -38,7 +38,9 @@ Nextcloud Talk ◀──── posts, reactions, file shares, as the same user �
 
 One long poll is held open per conversation, and each message it returns is handled in the
 background, because a model call routinely takes longer than is comfortable to wait for in the
-loop that is reading.
+loop that is reading. Each held poll occupies a PHP worker on Nextcloud, and the stock pool is
+five, so raise it before connecting an account that is in more than a few conversations
+([how](deployment.md#give-nextcloud-enough-php-workers)).
 
 ## Quickstart
 

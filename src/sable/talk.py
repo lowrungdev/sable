@@ -95,6 +95,7 @@ class TalkClient:
         payload: dict[str, object] | None = None,
         timeout: float | None = None,
         ok: frozenset[int] = frozenset(),
+        long_poll: bool = False,
     ) -> httpx.Response:
         """One call. Raises TalkError on a status of 400 or more, except any in ``ok``."""
         try:
@@ -108,6 +109,10 @@ class TalkClient:
                 timeout=timeout if timeout is not None else self._timeout,
             )
         except httpx.HTTPError as exc:
+            if long_poll and isinstance(exc, httpx.ReadTimeout):
+                # Connected, then held past the time we allowed: Nextcloud is slow
+                # (usually too few PHP workers), not unreachable. The caller says so.
+                raise
             # Transport level: Nextcloud could not be reached at all.
             if self._state is not None:
                 self._state.record_failure(exc)
@@ -209,6 +214,7 @@ class TalkClient:
             },
             timeout=timeout + POLL_SLACK,
             ok=frozenset({304}),
+            long_poll=True,
         )
         if response.status_code == 304:
             return [], after

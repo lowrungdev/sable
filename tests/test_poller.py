@@ -230,7 +230,7 @@ async def test_a_room_already_followed_is_not_followed_twice(rig) -> None:
 
 
 @respx.mock
-async def test_unusable_tokens_and_the_changelog_room_are_skipped(rig, caplog) -> None:
+async def test_unusable_tokens_and_rooms_nobody_talks_to_are_skipped(rig, caplog) -> None:
     _, poller, _ = rig
     respx.get(ROOM_URL).mock(
         return_value=ocs(
@@ -238,6 +238,9 @@ async def test_unusable_tokens_and_the_changelog_room_are_skipped(rig, caplog) -
                 room("../evil", 1),
                 room("UPPER", 1),
                 room(OTHER, 1, type=4),
+                room("former01", 1, type=5),
+                room("notetoself", 1, type=6),
+                room("sample01", 1, objectType="sample"),
                 room(ROOM, 50),
             ]
         )
@@ -404,6 +407,28 @@ async def test_errors_back_off_and_the_poll_carries_on_from_the_same_cursor(rig)
     await until(lambda: route.called)
     assert feed.cursors[:3] == [50, 50, 50]
     assert poller.following == [ROOM]
+
+
+@respx.mock
+async def test_a_poll_held_too_long_is_slow_not_lost(rig, caplog) -> None:
+    bot, poller, _ = rig
+    feed = Room(
+        httpx.ReadTimeout("held"),
+        httpx.ReadTimeout("held"),
+        [message_payload("hi", message_id=51)],
+    )
+    respx.get(ROOM_URL).mock(return_value=ocs([room(last=50)]))
+    respx.get(chat_url()).mock(side_effect=feed)
+    with caplog.at_level(logging.DEBUG):
+        await poller.scan()
+        await until(lambda: len(feed.polls) >= 4)
+    assert "lost connection to Nextcloud" not in caplog.text
+    assert bot.nextcloud.up is not False
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert ROOM in warnings[0].getMessage()
+    assert "PHP-FPM" in warnings[0].getMessage()
+    assert feed.cursors[:3] == [50, 50, 50]
 
 
 @respx.mock

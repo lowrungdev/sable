@@ -60,9 +60,8 @@ class Context:
         Commands named in SABLE_ADMIN_COMMANDS are already gated before the
         handler runs.
 
-        Asks the bot rather than the config, so a bot actor is refused here too:
-        an actor typed ``Application`` with an id like ``users/maser`` does
-        resolve an administrator's user id, and this is what !help filters on.
+        Asks the bot rather than the config, so a bot actor is refused here too,
+        whatever id it carries; this is what !help filters on.
         """
         return self.bot.is_admin_actor(self.event)
 

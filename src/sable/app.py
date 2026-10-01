@@ -217,7 +217,7 @@ def create_app(
     app = FastAPI(
         title="sable",
         version=__version__,
-        description="A Nextcloud Talk bot.",
+        description="A Nextcloud Talk assistant that runs as a user account.",
         lifespan=lifespan,
         # None removes the route entirely rather than hiding it. The schema
         # describes every endpoint and body shape to whoever can reach the

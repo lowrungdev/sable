@@ -28,8 +28,8 @@ throughput fix: `SABLE_MAX_CONCURRENT_REPLIES` raises the ceiling within one pro
 splitting anything.
 
 **No rate limiting on `/notify`.** Nothing stops a misconfigured alertmanager posting a thousand
-messages. Talk will start returning 429 and the bot will log failures, but the noise has already
-happened. A token bucket per room, or rate limiting at the proxy, fixes it. Something upstream
+messages. Nextcloud may eventually answer 429 and the bot will log failures, but the noise has
+already happened. A token bucket per room, or rate limiting at the proxy, fixes it. Something upstream
 will misbehave eventually. Note what this is *not*: `SABLE_MAX_CONCURRENT_REPLIES` caps how many
 model calls run at once, which bounds the resources a flood consumes, but it queues the work
 rather than shedding it. A thousand alerts still become a thousand messages, just more slowly.
@@ -85,9 +85,20 @@ message id per conversation would close it, at the price of a state file and of 
 a missed question may be before answering it would be strange.
 
 **Long-poll load on Nextcloud.** One held request per conversation, up to 50 of them, is the cost of
-the user-account model, and it is the thing to watch on a small server. If it hurts, the options
-are a longer `SABLE_POLL_TIMEOUT`, fewer conversations, or a different shape: Talk can push to
-a bot over a webhook, which costs an idle server nothing, at the price of everything the
+the user-account model, and it is the thing to watch on a small server. It has already bitten:
+against the stock Nextcloud container, whose PHP pool is five workers, seven polls took 41 to 90
+seconds instead of 30, and a raised pool fixed it (see
+[deployment.md](deployment.md#give-nextcloud-enough-php-workers)). If it still hurts, the options
+are a longer `SABLE_POLL_TIMEOUT`, fewer conversations, or a different shape.
+
+The shape worth building is polling the conversation list instead of holding a request per
+conversation: `GET /api/v4/room?modifiedSince=…` every few seconds returns only conversations
+with newer activity, last message included, and a one-second chat poll then fetches what is new
+from just those. That holds nothing open, at the cost of a few seconds of latency and one cheap
+request per interval, and it would replace `SABLE_POLL_TIMEOUT` and `SABLE_ROOM_REFRESH` with a
+single interval. It is **not** implemented, and it rests on something not yet verified: whether
+a reaction moves a conversation's `lastMessage`, which the ⁉️ feature would need. Talk's webhook
+Bot API is the other way out, which costs an idle server nothing, at the price of everything the
 [user-account model](purpose.md#what-it-deliberately-doesnt-do) was chosen to avoid.
 
 ## Assistant features
@@ -166,8 +177,8 @@ Logs are the only audit trail; see [security.md](security.md#accepted-risks).
 
 `sable --check` prints less than the startup block does, and the gap keeps widening: eight
 settings against the block's eighteen. It has never named attachments, hooks or the ignore list,
-and now also misses the concurrency ceiling, the cached rooms, the API docs, the health check,
-the proxy trust, the time zone and every tool the model can reach — most of
+and now also misses the concurrency ceiling, the ask reaction and its cached rooms, the API docs,
+the health check, the proxy trust and every tool the model can reach — most of
 what somebody runs `--check` to confirm before deploying. Either it grows to match the block or
 it stops claiming to show the resolved configuration; feeding both from the same summary helpers
 would keep them from drifting again, and `tests/test_docs.py` already pins the block's shape.

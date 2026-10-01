@@ -34,8 +34,17 @@ Format: `## <version>`, optionally followed by a date. Anything until the next
   caught one outright error: conversations are listed under `api/v4`, not `v1`,
   so the first version of this change could not find any. Polls and the room
   scan now send `noStatusUpdate=1`, so sable no longer flips its account online,
-  and removing a reaction sends the emoji in the request body as documented.
+  and removing a reaction sends the emoji in the request body as documented
+  (and in the query string too, for a server that reads only the URL).
   The calls are listed in [configuration.md](configuration.md).
+  sable no longer follows conversations nobody addresses a bot in (the Talk
+  updates room, a former one-to-one, the account's note to self and the
+  "Let's get started!" sample), so those hold no request open. A long poll that
+  Nextcloud holds past its timeout is now logged once per streak, naming the
+  conversation and pointing at the PHP-FPM pool, instead of being reported as
+  "lost connection to Nextcloud". The stock pool of five workers is too small
+  for more than a few conversations: see
+  [deployment.md](deployment.md#give-nextcloud-enough-php-workers).
   **Migrating:** (1) create a Nextcloud user for sable and an app password for it
   under Settings > Security > Devices & sessions; (2) invite that user to each
   conversation it should be in - a normal invitation, there is no bot switch;
