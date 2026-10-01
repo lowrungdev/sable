@@ -89,3 +89,22 @@ threads 22.0. Limits: `config.chat.max-length`, `config.chat.read-privacy`.
 4. sable's DELETE sends `reaction` in the body, as documented, and also as a query parameter in
    case a server reads DELETE parameters only from the URL.
 5. sable does not yet check the 256 reaction permission or the `reactions` capability.
+
+## Verified against the docs 2026-10-01 (chat and participant pages)
+- **Message context** (`chat` page): `GET /ocs/v2.php/apps/spreed/api/v1/chat/{token}/{messageId}/context`,
+  capability `chat-get-context`. Param `limit` = messages "into each direction" (default 50, max 100).
+  200 returns an array of chat messages (same shape as the poll) around the requested one; 404 when
+  the conversation is not found for the participant; 412 lobby active and not moderator. Headers
+  `X-Chat-Last-Given` and `X-Chat-Last-Common-Read`. **There is no single-message endpoint**; sable's
+  `TalkClient.message()` calls this with `limit=1` and picks the entry whose `id` matches (none ->
+  treated as not found). The docs do not say outright that the centre message is in the array: the code
+  does not assume it. Unverified live: whether `limit=1` still includes the message itself.
+- **Leave a conversation** (`participant` page): `DELETE /ocs/v2.php/apps/spreed/api/v4/room/{token}/participants/self`.
+  200 left; 400 when the caller is a moderator/owner and no other moderator/owner remains; 404
+  conversation not found for the participant. (403 is listed only for removing *other* attendees.)
+  sable treats 400/403 as "cannot leave", 404 as "already gone".
+- **Mentions** (`chat` page): in message text a mention is `@<id>`; ids with a space or slash are
+  wrapped in double quotes: `@"space user"`, `@"guest/random-string"`. Autocomplete `source` values:
+  `users`, `federated_users`, `group`, `guests`, `calls` ("mentioning the whole conversation").
+  The page documents **no explicit `@all` or team syntax**; `@all`, `@"group/..."` and `@"team/..."`
+  are what Talk's clients send, so `sable.mentions.defang_mentions` covers them on that basis.

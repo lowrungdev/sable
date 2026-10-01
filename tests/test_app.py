@@ -928,3 +928,596 @@ async def test_nothing_is_said_when_every_ignore_entry_is_an_id(caplog) -> None:
         async for _client in client_for(make_config(ignore_users=["alice", "users/bob"])):
             pass
     assert "SABLE_IGNORE_USERS holds whitespace" not in caplog.text
+
+
+# --------------------------------------------------------------------------- #
+# Request body caps, enforced by the app itself
+# --------------------------------------------------------------------------- #
+
+
+async def raw_post(
+    app, path: str, chunks, headers: list[tuple[bytes, bytes]], *, query: bytes = b""
+) -> tuple[int, bytes, int]:
+    """POST straight at the ASGI app, feeding ``chunks`` one per receive().
+
+    Returns (status, response body, how many chunks the app pulled). Bypassing
+    httpx is what makes a lying Content-Length expressible.
+    """
+    pulled = 0
+    iterator = iter(chunks)
+    sent_messages: list[dict] = []
+
+    async def receive() -> dict:
+        nonlocal pulled
+        try:
+            chunk = next(iterator)
+        except StopIteration:
+            return {"type": "http.disconnect"}
+        pulled += 1
+        return {"type": "http.request", "body": chunk, "more_body": True}
+
+    async def send(message: dict) -> None:
+        sent_messages.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": query,
+        "headers": headers,
+        "client": ("127.0.0.1", 1),
+        "server": ("sable.test", 80),
+        "app": app,
+    }
+    await app(scope, receive, send)
+    start = next(m for m in sent_messages if m["type"] == "http.response.start")
+    body = b"".join(m.get("body", b"") for m in sent_messages if m["type"] == "http.response.body")
+    return start["status"], body, pulled
+
+
+async def test_a_declared_length_over_the_cap_is_refused_before_the_body_is_read() -> None:
+    config = make_config(max_upload_bytes=1024, **UPLOADS)
+    async for client in client_for(config):
+        status_code, body, pulled = await raw_post(
+            client.app,  # type: ignore[attr-defined]
+            "/notify",
+            [b"x" * 10],
+            [
+                (b"content-type", b"application/json"),
+                (b"content-length", b"10000000"),
+                (b"authorization", b"Bearer alert-token"),
+            ],
+        )
+    assert status_code == 413
+    assert pulled == 0, "not one byte of the body should have been read"
+    assert "larger than" in json.loads(body)["detail"]
+
+
+async def test_a_streamed_body_is_cut_off_the_moment_it_passes_the_cap() -> None:
+    config = make_config(max_upload_bytes=1024, **UPLOADS)
+    cap = 1366 + 64 * 1024  # ceil(1024 * 4 / 3) + 64 KiB
+    chunks = [b"x" * 16384] * 100  # far more than the cap, no Content-Length at all
+    async for client in client_for(config):
+        status_code, body, pulled = await raw_post(
+            client.app,  # type: ignore[attr-defined]
+            "/notify",
+            chunks,
+            [
+                (b"content-type", b"application/json"),
+                (b"transfer-encoding", b"chunked"),
+                (b"authorization", b"Bearer alert-token"),
+            ],
+        )
+    assert status_code == 413
+    assert json.loads(body)["detail"]
+    assert pulled * 16384 <= cap + 16384, "the app kept reading after the cap"
+
+
+async def test_a_lying_content_length_does_not_get_past_the_cap() -> None:
+    config = make_config(max_upload_bytes=1024, **UPLOADS)
+    async for client in client_for(config):
+        status_code, _, pulled = await raw_post(
+            client.app,  # type: ignore[attr-defined]
+            "/notify",
+            [b"y" * 40000] * 5,
+            [
+                (b"content-type", b"application/json"),
+                (b"content-length", b"12"),
+                (b"authorization", b"Bearer alert-token"),
+            ],
+        )
+    assert status_code == 413
+    assert pulled == 2  # 80000 > the 67 KiB cap: stopped on the second read
+
+
+async def test_a_chunked_body_over_the_cap_is_a_clean_413_through_httpx() -> None:
+    async def body() -> AsyncIterator[bytes]:
+        for _ in range(50):
+            yield b"z" * 8192
+
+    config = make_config(max_upload_bytes=1024, **UPLOADS)
+    async for client in client_for(config):
+        response = await client.post(
+            "/notify",
+            content=body(),
+            headers={"Authorization": "Bearer alert-token", "Content-Type": "application/json"},
+        )
+    assert response.status_code == 413
+    assert response.headers["content-type"] == "application/json"
+
+
+async def test_an_oversized_multipart_upload_never_reaches_the_form_parser(monkeypatch) -> None:
+    from starlette.requests import Request
+
+    async def boom(self, **kwargs):  # pragma: no cover - must not run
+        raise AssertionError("the form parser ran on an oversized body")
+
+    monkeypatch.setattr(Request, "_get_form", boom)
+    async for client in client_for(make_config(max_upload_bytes=1024, **UPLOADS)):
+        response = await client.post(
+            "/notify",
+            data={"room": "alerts"},
+            files={"file": ("big.bin", b"x" * 200_000, "application/octet-stream")},
+            headers={"Authorization": "Bearer alert-token"},
+        )
+    assert response.status_code == 413
+
+
+@respx.mock
+async def test_a_file_within_the_notify_cap_still_goes_through() -> None:
+    """The cap is ceil(N * 4 / 3) + 64 KiB, so a base64 file of exactly N bytes fits."""
+    upload_routes()
+    config = make_config(max_upload_bytes=30000, **UPLOADS)
+    async for client in client_for(config):
+        response = await client.post(
+            "/notify",
+            json={
+                "room": "alerts",
+                "file": {"name": "ok.bin", "content": base64.b64encode(b"x" * 30000).decode()},
+            },
+            headers={"Authorization": "Bearer alert-token"},
+        )
+    assert response.status_code == 201
+
+
+async def test_the_hook_cap_is_the_setting_plus_a_little_slack() -> None:
+    async for client in client_for(make_config(max_hook_bytes=64, **HOOKS)):
+        small = await client.post("/hook/komodo?token=hook-token", content=b"x" * 5000)
+        status_code, _, pulled = await raw_post(
+            client.app,  # type: ignore[attr-defined]
+            "/hook/komodo",
+            [b"x" * 5000],
+            [(b"content-length", b"5000")],
+            query=b"token=hook-token",
+        )
+    assert small.status_code == 413
+    assert status_code == 413 and pulled == 0
+
+
+async def test_every_other_route_is_capped_at_64_kib() -> None:
+    async for client in client_for(make_config()):
+        response = await client.post("/healthz", content=b"x" * (64 * 1024 + 1))
+        ok = await client.post("/healthz", content=b"x" * 1000)
+    assert response.status_code == 413
+    assert ok.status_code == 405
+
+
+async def test_the_cap_comes_before_authentication() -> None:
+    """It reveals nothing, so a bad token and a big body is simply a 413."""
+    async for client in client_for(make_config(max_upload_bytes=1024, **UPLOADS)):
+        response = await client.post(
+            "/notify",
+            content=b"x" * 200_000,
+            headers={"Authorization": "Bearer wrong", "Content-Type": "application/json"},
+        )
+    assert response.status_code == 413
+
+
+async def test_a_small_unauthenticated_notify_is_still_401() -> None:
+    async for client in client_for(make_config(**UPLOADS)):
+        response = await client.post("/notify", json={"room": "alerts", "message": "x"})
+    assert response.status_code == 401
+
+
+# --------------------------------------------------------------------------- #
+# Secrets are compared as bytes
+# --------------------------------------------------------------------------- #
+
+ODD_SECRETS = ["é", "\U0001f600", "café-token", "\ud800", "‮"]
+
+
+def test_same_secret_never_raises_on_non_ascii() -> None:
+    from sable.app import _same_secret
+
+    for odd in ODD_SECRETS:
+        assert _same_secret(odd, "alert-token") is False
+        assert _same_secret(odd, odd) is True
+        assert _same_secret("alert-token", odd) is False
+
+
+async def test_non_ascii_bearer_tokens_are_401_not_500() -> None:
+    async for client in client_for(make_config(**UPLOADS)):
+        for odd in ("é", "\U0001f600", "ÿþ"):
+            response = await client.post(
+                "/notify",
+                json={"room": "alerts", "message": "x"},
+                headers={"Authorization": b"Bearer " + odd.encode("utf-8")},
+            )
+            assert response.status_code == 401, odd
+
+
+async def test_non_ascii_hook_tokens_are_401_not_500() -> None:
+    async for client in client_for(make_config(**HOOKS)):
+        for query in ("%C3%A9", "%F0%9F%98%80", "%ED%A0%80", "%FF%FE"):
+            response = await client.post(f"/hook/komodo?token={query}", json={"a": 1})
+            assert response.status_code == 401, query
+        response = await client.post(
+            "/hook/komodo",
+            json={"a": 1},
+            headers={"Authorization": b"Bearer " + "é".encode("utf-8")},
+        )
+        assert response.status_code == 401
+
+
+async def test_non_ascii_health_tokens_are_401_not_500() -> None:
+    async for client in client_for(make_config(health_token="h" * 20)):
+        for odd in ("é", "\U0001f600"):
+            response = await client.get(
+                "/healthz", headers={"X-Health-Token": odd.encode("utf-8")}
+            )
+            assert response.status_code == 401, odd
+
+
+# --------------------------------------------------------------------------- #
+# A body that is wrong is a 4xx, never a 500
+# --------------------------------------------------------------------------- #
+
+AUTH = {"Authorization": "Bearer alert-token"}
+
+
+@pytest.mark.parametrize("body", [[1, 2], "text", 5, True, 1.5])
+async def test_a_json_body_that_is_not_an_object_is_422(body) -> None:
+    async for client in client_for(make_config(**UPLOADS)):
+        response = await client.post("/notify", json=body, headers=AUTH)
+    assert response.status_code == 422
+    assert "JSON object" in response.json()["detail"]
+
+
+async def test_a_json_null_body_is_422() -> None:
+    async for client in client_for(make_config(**UPLOADS)):
+        response = await client.post(
+            "/notify", content=b"null", headers={**AUTH, "Content-Type": "application/json"}
+        )
+    assert response.status_code == 422
+    assert "null" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    ("body", "field"),
+    [
+        ({}, "room"),
+        ({"room": ""}, "room"),
+        ({"room": "alerts", "message": 5}, "message"),
+        ({"room": "alerts", "replyTo": -1}, "replyTo"),
+        ({"room": "alerts", "replyTo": "abc"}, "replyTo"),
+        ({"room": "alerts", "silent": "perhaps"}, "silent"),
+        ({"room": "alerts", "file": "nope"}, "file"),
+        ({"room": "alerts", "file": {"name": "", "content": "eA=="}}, "file.name"),
+    ],
+)
+async def test_an_invalid_notify_body_is_422_with_the_field_named(body, field) -> None:
+    async for client in client_for(make_config(**UPLOADS)):
+        response = await client.post("/notify", json=body, headers=AUTH)
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert isinstance(detail, str) and field in detail
+    assert "Traceback" not in detail and "pydantic" not in detail
+
+
+async def test_a_deeply_nested_notify_body_is_a_4xx() -> None:
+    async for client in client_for(make_config(**UPLOADS)):
+        response = await client.post(
+            "/notify",
+            content=b"[" * 30_000 + b"]" * 30_000,
+            headers={**AUTH, "Content-Type": "application/json"},
+        )
+    assert response.status_code == 400
+
+
+async def test_invalid_utf8_notify_json_is_400() -> None:
+    async for client in client_for(make_config(**UPLOADS)):
+        response = await client.post(
+            "/notify",
+            content=b'{"room": "' + bytes([0xFF, 0xFE]) + b'"}',
+            headers={**AUTH, "Content-Type": "application/json"},
+        )
+    assert response.status_code == 400
+
+
+@pytest.mark.parametrize(
+    "data",
+    [{}, {"room": ""}, {"room": "alerts", "replyTo": "-3"}, {"room": "alerts", "replyTo": "x"}],
+)
+async def test_an_invalid_multipart_notify_is_422(data) -> None:
+    async for client in client_for(make_config(**UPLOADS)):
+        response = await client.post(
+            "/notify",
+            data=data,
+            files={"file": ("a.txt", b"hi", "text/plain")},
+            headers=AUTH,
+        )
+    assert response.status_code == 422
+    assert isinstance(response.json()["detail"], str)
+
+
+async def test_a_multipart_notify_with_a_huge_field_is_a_4xx() -> None:
+    async for client in client_for(make_config(**UPLOADS)):
+        response = await client.post(
+            "/notify",
+            data={"room": "alerts", "message": "m" * (300 * 1024)},
+            files={"file": ("a.txt", b"hi", "text/plain")},
+            headers=AUTH,
+        )
+    assert response.status_code == 400  # Starlette: "Part exceeded maximum size"
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "body",
+    [
+        bytes([0, 1, 2, 255, 254]) + b" binary",
+        bytes([255, 254, 250]),
+        b"[" * 50_000,
+        b"[" * 600 + b"]" * 600,
+        b"9" * 5000,
+    ],
+)
+async def test_a_hook_survives_odd_bodies(body: bytes) -> None:
+    route = message_route()
+    async for client in client_for(make_config(**HOOKS)):
+        response = await client.post("/hook/komodo?token=hook-token", content=body)
+    assert response.status_code in {201, 422}, response.text
+    if response.status_code == 201:
+        assert route.called
+
+
+@respx.mock
+async def test_a_hook_with_a_template_survives_deep_nesting() -> None:
+    route = message_route()
+    config = make_config(
+        hooks={"komodo": ROOM},
+        hook_tokens={"komodo": "hook-token"},
+        hook_templates={"komodo": "got: {a}"},
+    )
+    async for client in client_for(config):
+        response = await client.post(
+            "/hook/komodo?token=hook-token", content=b"[" * 800 + b"]" * 800
+        )
+    assert response.status_code == 201
+    assert route.called
+
+
+# --------------------------------------------------------------------------- #
+# Hook text cannot mention everyone
+# --------------------------------------------------------------------------- #
+
+
+@respx.mock
+async def test_a_hook_cannot_ping_everyone() -> None:
+    route = message_route()
+    async for client in client_for(make_config(**HOOKS)):
+        response = await client.post(
+            "/hook/komodo?token=hook-token", json={"message": "disk full @all see @\"team/ops\" x"}
+        )
+    assert response.status_code == 201
+    text = sent(route)[0]["message"]
+    assert "@all" not in text and '@"team/' not in text
+    assert "all" in text and "disk full" in text
+
+
+@respx.mock
+async def test_notify_leaves_mentions_alone() -> None:
+    route = message_route()
+    async for client in client_for(make_config(**NOTIFY_CONFIG)):
+        await client.post(
+            "/notify",
+            json={"room": "alerts", "message": "hello @all"},
+            headers=AUTH,
+        )
+    assert sent(route)[0]["message"] == "hello @all"
+
+
+# --------------------------------------------------------------------------- #
+# The bound on replies waiting for a slot
+# --------------------------------------------------------------------------- #
+
+
+def dispatch(client: httpx.AsyncClient, *ids: int) -> None:
+    for message_id in ids:
+        client.app.state.poller._dispatch(  # type: ignore[attr-defined]
+            ROOM, message_payload("@sable hello", message_id=message_id)
+        )
+
+
+@respx.mock
+async def test_replies_past_the_queue_bound_are_dropped(caplog) -> None:
+    route = message_route()
+    llm = GatedLLM()
+    config = make_config(max_concurrent_replies=1, max_queued_replies=20, rate_limit=0)
+    async for client in client_for(config, llm=llm):
+        with caplog.at_level(logging.WARNING):
+            dispatch(client, *range(100, 122))  # 22: 1 running + 20 waiting + 1 over
+            await settle(200)
+            assert llm.open == 1
+            llm.release.set()
+            await wait_for_calls(route, 21)
+            await settle(200)
+    assert len(route.calls) == 21, "the 22nd should have been dropped, the rest answered"
+    assert caplog.text.count("dropping replies") == 1
+
+
+@respx.mock
+async def test_chatter_and_our_own_replies_do_not_take_queue_slots() -> None:
+    """With the one slot busy and room for one waiter, events that handle would
+    ignore anyway must not fill the queue and cost a real trigger its place."""
+    route = message_route()
+    llm = GatedLLM()
+    config = make_config(max_concurrent_replies=1, max_queued_replies=1, rate_limit=0)
+    async for client in client_for(config, llm=llm):
+        poller = client.app.state.poller  # type: ignore[attr-defined]
+        poller._dispatch(ROOM, message_payload("@sable hello", message_id=101))  # runs
+        await settle()
+        assert llm.open == 1
+        for n in range(110, 120):
+            poller._dispatch(ROOM, message_payload("just chatting", message_id=n))
+        poller._dispatch(
+            ROOM, message_payload("a reply", message_id=130, actor_id="users/sable")
+        )
+        poller._dispatch(
+            ROOM, message_payload("beep", message_id=131, actor_id="bots/relay")
+        )
+        poller._dispatch(ROOM, message_payload("@sable second", message_id=140))  # waits
+        poller._dispatch(ROOM, message_payload("@sable third", message_id=141))  # over
+        await settle()
+        llm.release.set()
+        await wait_for_calls(route, 2)
+        await settle(200)
+    assert len(route.calls) == 2, "the second trigger queued, the third was over the bound"
+
+
+@respx.mock
+async def test_a_queue_of_zero_lets_nothing_wait() -> None:
+    route = message_route()
+    llm = GatedLLM()
+    config = make_config(max_concurrent_replies=1, max_queued_replies=0)
+    async for client in client_for(config, llm=llm):
+        dispatch(client, 101, 102)
+        await settle()
+        llm.release.set()
+        await wait_for_calls(route, 1)
+        await settle(200)
+    assert len(route.calls) == 1
+
+
+@respx.mock
+async def test_slots_free_up_so_later_replies_are_accepted_again() -> None:
+    route = message_route()
+    llm = GatedLLM()
+    llm.release.set()
+    config = make_config(max_concurrent_replies=1, max_queued_replies=0)
+    async for client in client_for(config, llm=llm):
+        dispatch(client, 101)
+        await wait_for_calls(route, 1)
+        await settle(200)
+        dispatch(client, 102)
+        await wait_for_calls(route, 2)
+    assert len(route.calls) == 2
+
+
+async def test_the_drop_warning_is_rate_limited(caplog) -> None:
+    llm = GatedLLM()
+    with respx.mock:
+        message_route()
+        config = make_config(max_concurrent_replies=1, max_queued_replies=0)
+        async for client in client_for(config, llm=llm):
+            with caplog.at_level(logging.WARNING):
+                dispatch(client, *range(100, 140))
+                await settle()
+                llm.release.set()
+                await settle(200)
+    assert caplog.text.count("dropping replies") == 1
+
+
+async def test_a_dropped_reply_is_closed_not_left_unawaited() -> None:
+    llm = GatedLLM()
+    config = make_config(max_concurrent_replies=1, max_queued_replies=0)
+    with respx.mock:
+        message_route()
+        async for client in client_for(config, llm=llm):
+            spawn = client.app.state.poller._spawn  # type: ignore[attr-defined]
+
+            async def work() -> None:
+                await asyncio.sleep(0)
+
+            first = work()
+            spawn(first)  # takes the only slot
+            second = work()
+            spawn(second)  # dropped
+            assert second.cr_frame is None, "a dropped coroutine must be closed"
+            llm.release.set()
+            await settle()
+
+
+async def test_with_no_ceiling_there_is_no_queue_to_bound() -> None:
+    llm = GatedLLM()
+    config = make_config(max_concurrent_replies=0, max_queued_replies=0)
+    with respx.mock:
+        message_route()
+        async for client in client_for(config, llm=llm):
+            dispatch(client, 101, 102, 103)
+            await settle()
+            assert llm.open == 3
+            llm.release.set()
+            await settle(200)
+
+
+async def test_the_queue_bound_is_named_at_startup(caplog) -> None:
+    with caplog.at_level(logging.INFO):
+        async for _client in client_for(
+            make_config(max_concurrent_replies=3, max_queued_replies=7)
+        ):
+            pass
+    assert "at most 7 waiting" in caplog.text
+
+
+# --------------------------------------------------------------------------- #
+# Review additions: legitimate large and tiny-limit /notify calls
+# --------------------------------------------------------------------------- #
+
+
+@respx.mock
+async def test_a_multipart_file_far_larger_than_the_field_limit_goes_through() -> None:
+    """max_part_size caps fields; an upload of several MB is a file, not a field."""
+    put, _ = upload_routes()
+    async for client in client_for(make_config(**UPLOADS)):
+        response = await client.post(
+            "/notify",
+            data={"room": "alerts", "message": "big", "silent": "false", "replyTo": "3"},
+            files={"file": ("big.bin", b"x" * 3_000_000, "application/octet-stream")},
+            headers={"Authorization": "Bearer alert-token"},
+        )
+    assert response.status_code == 201, response.text
+    assert len(put.calls.last.request.content) == 3_000_000
+
+
+@respx.mock
+@pytest.mark.parametrize("limit", [1, 2])
+async def test_a_tiny_upload_limit_still_allows_a_normal_json_message(limit: int) -> None:
+    route = message_route()
+    async for client in client_for(make_config(max_upload_bytes=limit, **UPLOADS)):
+        response = await client.post(
+            "/notify",
+            json={"room": "alerts", "message": "m" * 40_000},
+            headers={"Authorization": "Bearer alert-token"},
+        )
+    assert response.status_code == 201, response.text
+    assert route.called
+
+
+async def test_the_body_cap_passes_lifespan_and_websocket_scopes_untouched() -> None:
+    from sable.limits import BodyLimitMiddleware
+
+    seen: list[str] = []
+
+    async def inner(scope, receive, send) -> None:
+        seen.append(scope["type"])
+
+    wrapped = BodyLimitMiddleware(inner, cap_for=lambda method, path: 1)
+    for kind in ("lifespan", "websocket"):
+        # No "method"/"path" in these scopes: reading them would raise KeyError.
+        await wrapped({"type": kind}, None, None)  # type: ignore[arg-type]
+    assert seen == ["lifespan", "websocket"]

@@ -79,10 +79,71 @@ Format: `## <version>`, optionally followed by a date. Anything until the next
   plain `http://` URL to a host that is not local gets a warning, since the
   password crosses the network unencrypted.
 - **The ⁉️ reaction works on a live server.** Talk delivers a reaction as a
-  system message through the chat poll, and sable reads the emoji and the
-  reacted-to message from it, as tested against Nextcloud Talk on 2026-10-01.
+  system message through the chat poll, and sable reads the emoji and the id of
+  the reacted-to message from it, as tested against Nextcloud Talk on 2026-10-01.
   Removing a reaction is still unexercised; see
   [future.md](future.md#talk-features-not-yet-used).
+- **The ⁉️ reaction reads the message back from Talk instead of remembering it.**
+  It calls `GET /chat/{token}/{messageId}/context` (capability
+  `chat-get-context`), so it works on old messages and across restarts, and sable
+  keeps no cache of chat content. Replies: "I cannot find that message" for a
+  404, "That message has been deleted.", "That message has no text for me to
+  read."; a system message is silent, and a failed read is logged and reported.
+  Not yet checked against a live server: that `limit=1` includes the message
+  itself.
+- **BREAKING: access is now narrowed by room, by person and by tool, and several
+  settings changed meaning.** None of it is needed to keep a deployment running
+  except where marked; all of it is worth doing. Read
+  [how the access layers combine](configuration.md#how-the-access-layers-combine).
+  **Migrating:**
+  (1) set `SABLE_ALLOWED_ROOMS` to the conversation *tokens* sable should serve.
+  Empty still follows every room the account is in, but now with a startup
+  warning, since any user who can invite the account can then use it.
+  `SABLE_LEAVE_UNLISTED_ROOMS=true` also makes it leave the group and public
+  conversations that are neither listed nor a `/notify` or `/hook` destination.
+  (2) `SABLE_AI_ROOMS` takes tokens (or `*`) only; a display name is a startup
+  error, because anybody can name their own conversation after yours.
+  `SABLE_NOTIFY_ROOMS` aliases are unchanged.
+  (3) **Tools stop working until you act.** `tool_ids` and `features` in
+  `SABLE_LLM_EXTRA_BODY` are now a startup error: move them to
+  `SABLE_LLM_TOOL_IDS` and `SABLE_LLM_FEATURES`, and list the rooms where the
+  model may use them in the new `SABLE_LLM_TOOL_ROOMS`. Empty means off
+  everywhere, so tools configured without it are silently unused (with a
+  startup warning), and elsewhere the model is called without any.
+  (4) Optionally set `SABLE_LLM_USERS` to the user ids allowed to use the model
+  (administrators always are; empty means everyone). Somebody outside it is told
+  "You are not allowed to use the assistant." when they mention the bot or use
+  `!ai`, and ignored silently for plain AI-room messages and ⁉️ reactions.
+  (5) Drop `SABLE_ASK_ROOMS` and `SABLE_MESSAGE_CACHE`: the cache is gone, and
+  an old `.env` that still sets them is ignored without a warning.
+  (6) The `!echo` command is removed.
+  (7) Two new defaults apply on upgrade: `SABLE_RATE_LIMIT=20` (triggers per
+  person per minute; `0` turns it off) and `SABLE_MAX_QUEUED_REPLIES=20`
+  (replies allowed to wait for a slot past `SABLE_MAX_CONCURRENT_REPLIES`; beyond
+  that new work is dropped). And request bodies are now capped by the app itself:
+  `/notify` at `SABLE_MAX_UPLOAD_BYTES` x 4/3 + 64 KiB, `/hook/{name}` at
+  `SABLE_MAX_HOOK_BYTES` + 1 KiB, everything else at 64 KiB, refused with a 413
+  before the token is checked. A proxy in front should allow at least that much
+  for `/notify`.
+- **Hardening.** Token comparisons are constant-time on UTF-8 bytes, so a
+  non-ASCII token is a 401 rather than a 500. `/notify` answers 422 for a body
+  that is not a JSON object and 400 for invalid JSON, invalid UTF-8 or nesting
+  too deep; `/hook/{name}` treats odd bodies as text. The Open WebUI chat id is
+  percent-encoded in URL paths. Everything sable posts in answer to chat (model
+  answers, command replies, error reports) and every `/hook` message has `@all`,
+  `@"group/..."` and `@"team/..."` defanged with a zero-width space; one-person
+  mentions and `/notify` text are untouched. The startup banner gains `rooms:`, `model users:` and
+  `rate limit:` lines, `in rooms:` on `tools:`, and the queue bound on
+  `concurrency:`, and loses `ask rooms:`.
+- **Container hardening.** `compose.yaml` runs with a read-only root
+  filesystem, a 256 MB tmpfs on `/tmp` (where a multipart upload spools, so it
+  must exceed `SABLE_MAX_UPLOAD_BYTES`), all capabilities dropped,
+  `no-new-privileges`, `pids_limit: 256` and `mem_limit: 768m`. The documented
+  systemd unit gains `TasksMax=256`. See
+  [deployment.md](deployment.md#container-hardening).
+- **`!whoami` and the participant type.** The participant type was documented as
+  already arriving on the event; it does not, so `!whoami` never prints it. See
+  [future.md](future.md#limitations-with-a-known-fix).
 
 ## 0.7
 
@@ -113,7 +174,7 @@ Format: `## <version>`, optionally followed by a date. Anything until the next
   is required, both checked at startup, as is every feature name.
   Worth reading before turning it on: the tools run with the permissions of the
   account behind that API key, and anyone in a conversation can prompt the model
-  into calling one. Accepted risk 15 in `docs/security.md` covers it.
+  into calling one. Accepted risk 14 in `docs/security.md` covers it.
 - **The model is told what day it is.** The system prompt now ends with the
   current date, time and zone, set by `SABLE_TIMEZONE` or the host clock. This
   is not cosmetic: asked what gold was worth "right now", a model with no clock

@@ -38,6 +38,14 @@ MAX_POLLED_ROOMS = 50
 #: one-to-one whose other person is gone (5), and the account's own note to self (6).
 SKIPPED_ROOM_TYPES = frozenset({4, 5, 6})
 
+#: The only conversation types sable will leave: group (2) and public (3). A
+#: one-to-one is a person, not a room, and the rest are not ours to leave.
+LEAVABLE_ROOM_TYPES = frozenset({2, 3})
+
+#: Most conversations left in one scan, so a long list of unwanted rooms is
+#: worked through over several scans rather than all at once.
+MAX_LEAVES_PER_SCAN = 5
+
 #: The object type of Talk's "Let's get started!" sample conversation.
 SAMPLE_OBJECT_TYPE = "sample"
 
@@ -70,6 +78,13 @@ class Poller:
         self._names: dict[str, str] = {}
         self._scanner: asyncio.Task[None] | None = None
         self._capped = False
+        #: Conversations Talk would not let us leave (we moderate them alone), so
+        #: they are said once and not asked about every scan.
+        self._stuck: set[str] = set()
+        #: Allowed tokens the last scan did not find, so the warning is said once.
+        self._absent: list[str] = []
+        #: Whether leaving is currently suspended, so the warning is said once.
+        self._leave_suspended = False
 
     # -- lifecycle --------------------------------------------------------- #
 
@@ -122,6 +137,7 @@ class Poller:
         """Compare the conversation list with what is being polled."""
         rooms = await self.bot.talk.rooms()
         usable: list[dict] = []
+        unlisted: list[dict] = []
         for room in rooms:
             token = str(room.get("token", ""))
             if not TOKEN_RE.match(token):
@@ -129,8 +145,28 @@ class Poller:
                 log.warning("ignoring a conversation with an unusable token %r", token)
             elif _skipped(room):
                 log.debug("not following %s: nobody talks to a bot there", token)
+            elif not self.config.room_allowed(token):
+                log.debug("not following %s: not in SABLE_ALLOWED_ROOMS", token)
+                unlisted.append(room)
             else:
                 usable.append(room)
+
+        absent = sorted(
+            set(self.config.allowed_rooms) - {str(room.get("token", "")) for room in rooms}
+        )
+        if absent != self._absent:
+            self._absent = absent
+            if absent:
+                # A mistyped token is silent otherwise - and with
+                # SABLE_LEAVE_UNLISTED_ROOMS on it means every other group is left.
+                log.warning(
+                    "SABLE_ALLOWED_ROOMS lists %s, which the account is not in "
+                    "(or that is not a conversation token); nothing is followed there",
+                    ", ".join(absent),
+                )
+
+        await self._leave_unlisted(unlisted, rooms)
+        self._stuck &= {str(room["token"]) for room in unlisted}
 
         usable.sort(key=lambda room: _int(room.get("lastActivity")), reverse=True)
         if len(usable) > MAX_POLLED_ROOMS:
@@ -170,6 +206,74 @@ class Poller:
             log.info("following conversation %s (%r)", token, name)
             self._tasks[token] = asyncio.create_task(
                 self._follow(token), name=f"sable-poll-{token}"
+            )
+
+    async def _leave_unlisted(self, unlisted: list[dict], rooms: list[dict]) -> None:
+        """Leave the group and public conversations nobody listed, if asked to.
+
+        ``rooms`` is the whole fetched list; nothing is left unless at least one
+        allowed conversation is in it.
+
+        Never raises: a conversation that will not let us go is said once and
+        left alone, and a failure of any other kind waits for the next scan.
+        """
+        config = self.config
+        if not (config.leave_unlisted_rooms and config.allowed_rooms):
+            return
+        if not unlisted:
+            return
+        if not any(config.room_allowed(str(room.get("token", ""))) for room in rooms):
+            # A mistyped SABLE_ALLOWED_ROOMS (or an account removed from the room
+            # it was meant to keep) would otherwise make every other group look
+            # unwanted. With no allowed room in sight, whatever is left is not
+            # known to be unwanted.
+            if not self._leave_suspended:
+                log.warning(
+                    "leaving unlisted conversations is suspended: none of the "
+                    "conversations in SABLE_ALLOWED_ROOMS is in the account's "
+                    "conversation list, so nothing can be told apart as unwanted "
+                    "(check the tokens). Nothing is left until one is visible."
+                )
+            self._leave_suspended = True
+            return
+        self._leave_suspended = False
+        keep = config.destination_rooms
+        left = 0
+        for room in unlisted:
+            token = str(room["token"])
+            if room.get("type") not in LEAVABLE_ROOM_TYPES or token in keep:
+                continue
+            if token in self._stuck:
+                continue
+            if left >= MAX_LEAVES_PER_SCAN:
+                log.info("more conversations to leave; the rest wait for the next scan")
+                break
+            name = str(room.get("displayName") or room.get("name") or "")
+            try:
+                await self.bot.talk.leave(token)
+            except TalkError as exc:
+                if exc.status in (400, 403):
+                    self._stuck.add(token)
+                    log.warning(
+                        "cannot leave conversation %s (%r): HTTP %s - probably the "
+                        "account is its only moderator or owner. Remove it from "
+                        "there, or list the token in SABLE_ALLOWED_ROOMS.",
+                        token,
+                        name,
+                        exc.status,
+                    )
+                else:
+                    log.warning("could not leave conversation %s: %s", token, exc)
+                continue
+            except httpx.HTTPError as exc:
+                log.warning("could not leave conversation %s: %s", token, exc)
+                continue
+            left += 1
+            log.info(
+                "left conversation %s (%r): not in SABLE_ALLOWED_ROOMS and not a "
+                "/notify or /hook destination",
+                token,
+                name,
             )
 
     # -- one conversation --------------------------------------------------- #
@@ -248,6 +352,10 @@ class Poller:
             token,
             event.message_id or "-",
         )
+        if not self.bot.would_handle(event):
+            # Chatter, our own replies, other bots: nothing for handle to do, so
+            # it must not take a reply slot or push a real trigger out of the queue.
+            return
         self._spawn(self.bot.handle(event))
 
 

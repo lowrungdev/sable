@@ -36,6 +36,11 @@ POLL_SLACK = 15.0
 #: Most messages one poll may return.
 POLL_LIMIT = 100
 
+#: Neighbours asked for each way when fetching one message through the context
+#: call. Talk's docs do not say whether the target is included or how a small
+#: limit counts, so a few are asked for and the target is picked out by its id.
+CONTEXT_LIMIT = 3
+
 
 class TalkError(RuntimeError):
     """A Talk API call failed."""
@@ -190,6 +195,45 @@ class TalkClient:
         if not isinstance(messages, list):
             return 0
         return max((_int(m.get("id")) for m in messages if isinstance(m, dict)), default=0)
+
+    async def message(self, room_token: str, message_id: int) -> dict | None:
+        """One message by id, or None if it is gone (or was never there).
+
+        Talk has no single-message endpoint. The context call returns the message
+        with its neighbours (``limit`` of them each way, capability
+        ``chat-get-context``), so the one asked for is picked out by id. A 404
+        means the conversation is not ours or the message does not exist.
+        """
+        response = await self._talk(
+            "GET",
+            f"/chat/{room_token}/{int(message_id)}/context",
+            params={"limit": CONTEXT_LIMIT},
+            ok=frozenset({404}),
+        )
+        if response.status_code == 404:
+            return None
+        data = _ocs_data(response)
+        if not isinstance(data, list):
+            return None
+        for item in data:
+            if isinstance(item, dict) and _int(item.get("id")) == message_id:
+                return item
+        return None
+
+    async def leave(self, room_token: str) -> bool:
+        """Leave a conversation. False if we were not in it already.
+
+        ``DELETE api/v4/room/{token}/participants/self``: 200 when it worked, 404
+        when the conversation is not ours, and 400 when we are its last moderator
+        or owner - that one is raised as a TalkError for the caller to weigh.
+        """
+        response = await self._send(
+            "DELETE",
+            f"{self.base_url}{ROOMS_API_BASE}/room/{room_token}/participants/self",
+            f"/room/{room_token}/participants/self",
+            ok=frozenset({404}),
+        )
+        return response.status_code != 404
 
     async def poll(
         self, room_token: str, after: int, *, timeout: int = 30

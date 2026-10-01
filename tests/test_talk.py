@@ -349,3 +349,86 @@ async def test_a_long_poll_read_timeout_does_not_mark_nextcloud_down() -> None:
 
 def test_conversations_are_listed_under_v4() -> None:
     assert ROOMS_API_BASE == "/ocs/v2.php/apps/spreed/api/v4"
+
+
+# -- reading one message back, and leaving ----------------------------------- #
+
+
+@respx.mock
+async def test_message_asks_for_the_context_and_picks_the_message_by_id() -> None:
+    route = respx.get(f"{CHAT_URL}/100/context").mock(
+        return_value=ocs([{"id": 99, "message": "before"}, {"id": 100, "message": "this"}])
+    )
+    client = make()
+    try:
+        found = await client.message(ROOM, 100)
+    finally:
+        await client.aclose()
+    assert found == {"id": 100, "message": "this"}
+    assert route.calls.last.request.url.params["limit"] == "3"
+
+
+@respx.mock
+async def test_message_is_none_for_a_404_and_for_an_answer_without_it() -> None:
+    respx.get(f"{CHAT_URL}/100/context").mock(return_value=httpx.Response(404))
+    respx.get(f"{CHAT_URL}/101/context").mock(return_value=ocs([{"id": 7}]))
+    respx.get(f"{CHAT_URL}/102/context").mock(return_value=ocs({"unexpected": True}))
+    client = make()
+    try:
+        assert await client.message(ROOM, 100) is None
+        assert await client.message(ROOM, 101) is None
+        assert await client.message(ROOM, 102) is None
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_message_raises_on_other_failures() -> None:
+    respx.get(f"{CHAT_URL}/100/context").mock(return_value=httpx.Response(412, text="lobby"))
+    client = make()
+    try:
+        with pytest.raises(TalkError) as caught:
+            await client.message(ROOM, 100)
+    finally:
+        await client.aclose()
+    assert caught.value.status == 412
+
+
+@respx.mock
+async def test_leave_is_a_delete_on_participants_self_under_v4() -> None:
+    route = respx.delete(f"{BACKEND}{ROOMS_API_BASE}/room/{ROOM}/participants/self").mock(
+        return_value=ocs({})
+    )
+    client = make()
+    try:
+        assert await client.leave(ROOM) is True
+    finally:
+        await client.aclose()
+    assert route.called
+    assert route.calls.last.request.headers["ocs-apirequest"] == "true"
+
+
+@respx.mock
+async def test_leaving_a_conversation_we_are_not_in_is_not_an_error() -> None:
+    respx.delete(f"{BACKEND}{ROOMS_API_BASE}/room/{ROOM}/participants/self").mock(
+        return_value=httpx.Response(404)
+    )
+    client = make()
+    try:
+        assert await client.leave(ROOM) is False
+    finally:
+        await client.aclose()
+
+
+@respx.mock
+async def test_the_last_moderator_cannot_leave_and_it_says_so() -> None:
+    respx.delete(f"{BACKEND}{ROOMS_API_BASE}/room/{ROOM}/participants/self").mock(
+        return_value=httpx.Response(400, text="last owner")
+    )
+    client = make()
+    try:
+        with pytest.raises(TalkError) as caught:
+            await client.leave(ROOM)
+    finally:
+        await client.aclose()
+    assert caught.value.status == 400

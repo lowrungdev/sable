@@ -29,13 +29,15 @@ import binascii
 import hmac
 import json
 import logging
+import math
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Annotated, AsyncIterator
 
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request, Response, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 # Starlette's own class: request.form() yields these, and FastAPI's UploadFile is a
 # subclass, so checking against the base accepts both.
 from starlette.datastructures import UploadFile
@@ -45,6 +47,8 @@ from .bot import Bot
 from .config import TOKEN_HINT, TOKEN_RE, Config
 from .files import FilesError
 from .hooks import render, render_with_template
+from .limits import BodyLimitMiddleware
+from .mentions import defang_mentions
 from .poller import Poller
 from .talk import TalkError
 
@@ -56,6 +60,49 @@ DRAIN_TIMEOUT = 30.0
 #: Guards GET /healthz when SABLE_HEALTH_TOKEN is set. A header rather than a
 #: query parameter, so the value stays out of proxy and access logs.
 HEADER_HEALTH_TOKEN = "X-Health-Token"
+
+#: Cap on any request body that has no reason to be large: health checks, the
+#: root, a wrong method on a real route. 64 KiB.
+SMALL_BODY_BYTES = 64 * 1024
+
+#: Room on top of SABLE_MAX_HOOK_BYTES, so a payload just over the setting still
+#: reaches the handler and gets its own, more specific, 413.
+HOOK_SLACK_BYTES = 1024
+
+#: At most one "dropping replies" warning per this many seconds.
+DROP_WARNING_INTERVAL = 30.0
+
+#: Limits handed to Starlette's multipart parser. Only /notify takes a form: at
+#: most the one file and a handful of short fields. max_part_size caps a *field*
+#: (message, room, ...) - an uploaded file is not a field, and is capped by the
+#: body limit and _read_upload instead.
+FORM_MAX_FILES = 1
+FORM_MAX_FIELDS = 10
+FORM_MAX_FIELD_BYTES = 256 * 1024
+
+
+def notify_body_cap(max_upload_bytes: int) -> int:
+    """The largest POST /notify body worth reading.
+
+    A file of N bytes costs ceil(N * 4 / 3) as base64 in a JSON body (4 output
+    characters per 3 input bytes, so this is the worst case; padding adds at most
+    two more), and N plus boundary lines as multipart, which is the smaller of the
+    two. 64 KiB on top covers the JSON syntax, the other fields and a message.
+    """
+    return math.ceil(max_upload_bytes * 4 / 3) + 64 * 1024
+
+
+def _same_secret(supplied: str, expected: str) -> bool:
+    """Constant-time comparison of two secrets, as UTF-8 bytes.
+
+    hmac.compare_digest raises TypeError for a str holding a non-ASCII character,
+    and whatever a client puts in a header or a query string is not ours to
+    constrain. Comparing bytes cannot raise. ``surrogatepass`` keeps a lone
+    surrogate (which a decoder can hand us) from raising on encode as well.
+    """
+    return hmac.compare_digest(
+        supplied.encode("utf-8", "surrogatepass"), expected.encode("utf-8", "surrogatepass")
+    )
 
 
 class NotifyFile(BaseModel):
@@ -102,6 +149,13 @@ def create_app(
     #: there is one (uvicorn calls it as a factory, tests build the app and drive
     #: it later). None means no ceiling at all.
     slots: asyncio.Semaphore | None = None
+    #: Replies spawned and not yet finished, running or waiting. With the
+    #: ceiling on, at most max_concurrent_replies + max_queued_replies of them
+    #: are allowed; the rest are dropped in spawn().
+    live = 0
+    last_drop_warning = float("-inf")
+    dropped = 0
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         nonlocal slots
@@ -134,7 +188,19 @@ def create_app(
             log.info("  tools:          %s", tools_summary(config))
         log.info("  concurrency:    %s", concurrency_summary(config))
         log.info("  ask reaction:   %s", ask_reaction_summary(config))
-        log.info("  ask rooms:      %s", ask_rooms_summary(config))
+        log.info("  rooms:          %s", rooms_summary(config))
+        log.info(
+            "  model users:    %s",
+            ", ".join(config.llm_users) + " and the administrators"
+            if config.llm_users
+            else "everyone",
+        )
+        log.info(
+            "  rate limit:     %s",
+            f"{config.rate_limit} triggers a minute per person"
+            if config.rate_limit
+            else "off",
+        )
         log.info("  admin commands: %s", admin_summary(config))
         log.info(
             "  ai rooms:       %s",
@@ -227,6 +293,15 @@ def create_app(
         openapi_url="/openapi.json" if config.api_docs else None,
     )
 
+    def body_cap(method: str, path: str) -> int | None:
+        if method == "POST" and path == "/notify":
+            return notify_body_cap(config.max_upload_bytes)
+        if method == "POST" and path.startswith("/hook/"):
+            return config.max_hook_bytes + HOOK_SLACK_BYTES
+        return SMALL_BODY_BYTES
+
+    app.add_middleware(BodyLimitMiddleware, cap_for=body_cap)
+
     async def under_the_ceiling(coro) -> None:
         """Wait for a free slot, then run the handler.
 
@@ -247,10 +322,41 @@ def create_app(
             await coro
 
     def spawn(coro) -> None:
-        """Run a handler detached from the poll loop, keeping a strong reference."""
+        """Run a handler detached from the poll loop, keeping a strong reference.
+
+        With a ceiling, the number of replies waiting for a slot is bounded by
+        SABLE_MAX_QUEUED_REPLIES: past that the new work is dropped, because an
+        unbounded pile of parked tasks is the same flood the ceiling was meant to
+        stop, only cheaper. Dropping happens here, in the poll loop, which is why
+        it must be quick and never wait.
+        """
+        nonlocal live, last_drop_warning, dropped
+        if slots is not None and live >= config.max_concurrent_replies + config.max_queued_replies:
+            coro.close()  # never started, so close it rather than leave "never awaited"
+            dropped += 1
+            now = time.monotonic()
+            if now - last_drop_warning >= DROP_WARNING_INTERVAL:
+                log.warning(
+                    "dropping replies: %d are running or queued, the most "
+                    "SABLE_MAX_CONCURRENT_REPLIES (%d) + SABLE_MAX_QUEUED_REPLIES "
+                    "(%d) allow; %d dropped so far",
+                    live,
+                    config.max_concurrent_replies,
+                    config.max_queued_replies,
+                    dropped,
+                )
+                last_drop_warning = now
+            return
+        live += 1
+
+        def finished(task: asyncio.Task[None]) -> None:
+            nonlocal live
+            live -= 1
+            tasks.discard(task)
+
         task = asyncio.create_task(under_the_ceiling(coro))
         tasks.add(task)
-        task.add_done_callback(tasks.discard)
+        task.add_done_callback(finished)
         task.add_done_callback(_log_task_failure)
 
     def current_bot(request: Request) -> Bot:
@@ -276,9 +382,7 @@ def create_app(
         dependency is down asks an orchestrator to restart a process that is
         working perfectly. Whoever is reading decides what an outage means.
         """
-        if config.health_token and not hmac.compare_digest(
-            health_token.strip(), config.health_token
-        ):
+        if config.health_token and not _same_secret(health_token.strip(), config.health_token):
             log.warning("rejected a health check with a bad or missing token")
             raise HTTPException(
                 status.HTTP_401_UNAUTHORIZED,
@@ -377,7 +481,7 @@ def create_app(
         if not supplied and header:
             scheme, _, value = header.partition(" ")
             supplied = value.strip() if scheme.lower() == "bearer" else ""
-        if not hmac.compare_digest(supplied, config.hook_token(name)):
+        if not _same_secret(supplied, config.hook_token(name)):
             raise HTTPException(
                 status.HTTP_401_UNAUTHORIZED,
                 "this hook needs its own token, as a bearer header or ?token=",
@@ -392,24 +496,25 @@ def create_app(
                 f"({config.max_hook_bytes} bytes)",
             )
 
+        text = body.decode("utf-8", "replace")
         try:
             payload = json.loads(body) if body.strip() else {}
-        except json.JSONDecodeError:
-            # Not everything sends JSON. Text is better than a rejection.
-            payload = body.decode("utf-8", "replace")
+        except (ValueError, RecursionError):
+            # Not everything sends JSON, and some of it is not even text: invalid
+            # UTF-8 and absurdly deep nesting land here as well. Text is better
+            # than a rejection. (JSONDecodeError and UnicodeDecodeError are both
+            # ValueErrors; json.loads also raises ValueError past the int limit.)
+            payload = text
 
         template = config.hook_templates.get(name.strip().lower(), "")
-        if template:
-            message, missing = render_with_template(template, payload)
-            if missing:
-                log.warning(
-                    "hook %r: its format string asks for %s, which the payload "
-                    "does not have",
-                    name,
-                    ", ".join(sorted(set(missing))),
-                )
-        else:
-            message = render(payload)
+        try:
+            message = _render_hook(name, template, payload)
+        except RecursionError:
+            # Parsed, but nested deeper than the renderer can walk.
+            message = _render_hook(name, template, text)
+        # The payload is third-party text: it must not be able to ping everyone.
+        # (/notify is not treated this way; its caller may mean it.)
+        message = defang_mentions(message)
 
         if not message.strip():
             raise HTTPException(
@@ -480,15 +585,14 @@ def ask_reaction_summary(config: Config) -> str:
     return config.ask_reaction
 
 
-def ask_rooms_summary(config: Config) -> str:
-    """Which conversations have their messages remembered, and so which ones the
-    reaction can answer in. Worth a line of its own: this is the setting that
-    decides how much chat content sits in memory."""
-    if not config.ask_reaction:
-        return "(none - the reaction is disabled, so nothing is cached)"
-    if not config.ask_rooms:
-        return "every conversation the bot is in"
-    return ", ".join(config.ask_rooms)
+def rooms_summary(config: Config) -> str:
+    """Which conversations the account follows, and whether it leaves the rest."""
+    if not config.allowed_rooms:
+        return "every conversation the account is in (SABLE_ALLOWED_ROOMS is empty)"
+    line = ", ".join(config.allowed_rooms)
+    if config.leave_unlisted_rooms:
+        line += " (leaves the others, except /notify and /hook destinations)"
+    return line
 
 
 def tools_summary(config: Config) -> str:
@@ -500,6 +604,8 @@ def tools_summary(config: Config) -> str:
     parts = [
         "server-side loop via Open WebUI",
         f"tools: {', '.join(config.llm.tool_ids) or 'none'}",
+        "in rooms: "
+        + (", ".join(config.llm.tool_rooms) if config.llm.tool_rooms else "none (off everywhere)"),
     ]
     if not config.llm.builtin_tools:
         parts.append("built-ins off (one blocking request, SABLE_LLM_BUILTIN_TOOLS)")
@@ -522,7 +628,11 @@ def concurrency_summary(config: Config) -> str:
             "no ceiling (SABLE_MAX_CONCURRENT_REPLIES=0) - every event that "
             "arrives starts a model call of its own"
         )
-    return f"up to {config.max_concurrent_replies} replies at once, the rest queued"
+    return (
+        f"up to {config.max_concurrent_replies} replies at once, the rest queued "
+        f"(at most {config.max_queued_replies} waiting, then dropped: "
+        f"SABLE_MAX_QUEUED_REPLIES)"
+    )
 
 
 def admin_summary(config: Config) -> str:
@@ -539,6 +649,20 @@ def megabytes(value: int) -> str:
     """A byte count as something a person can read at a glance."""
     size = value / (1024 * 1024)
     return f"{size:.0f} MB" if abs(size - round(size)) < 0.05 else f"{size:.1f} MB"
+
+
+def _render_hook(name: str, template: str, payload: object) -> str:
+    """The message for a hook payload: its format string if it has one, else generic."""
+    if not template:
+        return render(payload)
+    message, missing = render_with_template(template, payload)
+    if missing:
+        log.warning(
+            "hook %r: its format string asks for %s, which the payload does not have",
+            name,
+            ", ".join(sorted(set(missing))),
+        )
+    return message
 
 
 def _form_bool(value: object) -> bool:
@@ -591,17 +715,23 @@ async def _parse_notify(
     content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
 
     if content_type == "multipart/form-data":
-        form = await request.form()
+        form = await request.form(
+            max_files=FORM_MAX_FILES,
+            max_fields=FORM_MAX_FIELDS,
+            max_part_size=FORM_MAX_FIELD_BYTES,
+        )
         upload = form.get("file")
         if upload is not None and not isinstance(upload, UploadFile):
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_CONTENT, "'file' must be an uploaded file"
             )
-        payload = NotifyRequest(
-            room=str(form.get("room") or ""),
-            message=str(form.get("message") or ""),
-            silent=_form_bool(form.get("silent")),
-            reply_to=_form_int(form.get("replyTo") or form.get("reply_to") or 0),
+        payload = _validated(
+            lambda: NotifyRequest(
+                room=str(form.get("room") or ""),
+                message=str(form.get("message") or ""),
+                silent=_form_bool(form.get("silent")),
+                reply_to=_form_int(form.get("replyTo") or form.get("reply_to") or 0),
+            )
         )
         if upload is None:
             return payload, None
@@ -615,7 +745,16 @@ async def _parse_notify(
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST, f"invalid JSON: {exc}"
         ) from exc
-    payload = NotifyRequest.model_validate(body)
+    except RecursionError as exc:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "invalid JSON: nested too deeply"
+        ) from exc
+    if not isinstance(body, dict):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"the body must be a JSON object, not {_json_kind(body)}",
+        )
+    payload = _validated(lambda: NotifyRequest.model_validate(body))
     if payload.file is None:
         return payload, None
     try:
@@ -633,9 +772,35 @@ async def _parse_notify(
     return payload, Attachment(payload.file.name, content)
 
 
+def _json_kind(value: object) -> str:
+    if value is None:
+        return "null"
+    return {list: "an array", str: "a string", bool: "a boolean"}.get(
+        type(value), "a number"
+    )
+
+
+def _validated(build) -> NotifyRequest:
+    """Run ``build`` and turn a pydantic failure into a readable 422.
+
+    Only the field names and what is wrong with them are reported: not the
+    offending input, not pydantic's URL, not a traceback.
+    """
+    try:
+        return build()
+    except ValidationError as exc:
+        problems = "; ".join(
+            f"{'.'.join(str(part) for part in error['loc']) or 'body'}: {error['msg']}"
+            for error in exc.errors(include_input=False, include_url=False, include_context=False)
+        )
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, f"invalid request: {problems}"
+        ) from exc
+
+
 def _check_bearer(header: str, expected: str) -> None:
     scheme, _, token = header.partition(" ")
-    if scheme.lower() != "bearer" or not hmac.compare_digest(token.strip(), expected):
+    if scheme.lower() != "bearer" or not _same_secret(token.strip(), expected):
         raise HTTPException(
             status.HTTP_401_UNAUTHORIZED,
             "a valid bearer token is required",

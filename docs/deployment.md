@@ -70,8 +70,9 @@ $EDITOR .env
 ```
 
 At minimum set `SABLE_NEXTCLOUD_URL`, `SABLE_NEXTCLOUD_USER` and `SABLE_NEXTCLOUD_PASSWORD`;
-everything else is in [configuration.md](configuration.md). Then check what it resolved to
-before going further:
+everything else is in [configuration.md](configuration.md). Set `SABLE_ALLOWED_ROOMS` too, to the
+tokens of the conversations it should serve: left empty it follows every room it is invited to,
+and says so in a warning. Then check what it resolved to before going further:
 
 ```bash
 sable --check
@@ -104,6 +105,26 @@ The image runs as a non-root user, holds no state, and has a healthcheck on `/he
 block, put both services on one network and let the proxy reach `sable:8080` directly. If nothing
 calls sable from outside the host you can drop it regardless, since reading and replying to chat
 does not use the port.
+
+#### Container hardening
+
+`compose.yaml` also locks the container down, since sable writes nothing and needs no privileges.
+Keep all of it:
+
+| Setting | Effect |
+| --- | --- |
+| `read_only: true` | The root filesystem is read-only, so nothing can be planted in the image |
+| `tmpfs: /tmp:size=256m` | The only writable path, held in RAM and gone on restart. A multipart upload to `/notify` spools here, so it must be larger than `SABLE_MAX_UPLOAD_BYTES` (25 MB by default; 256m leaves room for several at once) |
+| `cap_drop: [ALL]` | No Linux capabilities: it listens on 8080 and makes outbound requests |
+| `security_opt: no-new-privileges:true` | A setuid binary cannot gain privileges |
+| `pids_limit: 256` | A runaway or a fork bomb stops well short of the host's limits |
+| `mem_limit: 768m` | A memory cap, which has to cover the `/tmp` tmpfs when it is full |
+
+If you raise `SABLE_MAX_UPLOAD_BYTES` above about 200 MB, grow the tmpfs `size=` with it and raise
+`mem_limit` to match, or a large upload can fill the tmpfs before it is finished. A
+base64 upload (the JSON shape) is held in memory rather than spooled, so it counts against
+`mem_limit` directly. The app caps request bodies itself, before the proxy matters: see
+[request size caps](configuration.md#request-size-caps).
 
 ### systemd
 
@@ -140,7 +161,8 @@ ExecStart=/opt/sable/app/.venv/bin/sable --env-file /opt/sable/.env
 Restart=on-failure
 RestartSec=5s
 
-# The bot writes nothing and needs no privileges.
+# The bot writes nothing and needs no privileges. This is the same lockdown
+# compose.yaml applies to the container.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
@@ -148,10 +170,17 @@ ProtectHome=true
 ReadOnlyPaths=/opt/sable
 CapabilityBoundingSet=
 MemoryMax=512M
+TasksMax=256
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+`PrivateTmp=true` gives the service a `/tmp` of its own, which is where a multipart upload to
+`/notify` spools. Unlike the container's tmpfs it is on disk and not size-capped, so
+`SABLE_MAX_UPLOAD_BYTES` is the only limit; make sure the filesystem behind it has the room.
+`TasksMax` and `MemoryMax` are the equivalents of `pids_limit` and `mem_limit`; raise `MemoryMax`
+if you raise `SABLE_MAX_UPLOAD_BYTES` a long way, since a base64 upload is held in memory.
 
 ```bash
 sudo systemctl daemon-reload
@@ -190,9 +219,11 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
 
-        # A little over SABLE_MAX_UPLOAD_BYTES, which is 25 MiB by default. nginx's
-        # own default of 1m would refuse an attachment to /notify.
-        client_max_body_size 30m;
+        # A little over what /notify accepts: SABLE_MAX_UPLOAD_BYTES x 4/3 plus 64 KiB,
+        # about 33.4 MiB by default, since a base64 file is a third bigger than the
+        # file. nginx's own default of 1m would refuse an attachment to /notify. sable
+        # enforces its own caps whatever this says; this is defence in depth.
+        client_max_body_size 36m;
     }
 }
 ```
@@ -275,6 +306,12 @@ not seen. It logs when that happens, which doubles as proof that the whole recei
 following conversation abcd1234 ('Team chat')
 ```
 
+With `SABLE_ALLOWED_ROOMS` set, only the listed conversations are followed, so **add the new
+room's token there too** (the last part of its URL) or sable will never follow it. It says why at
+DEBUG: `not following abcd1234: not in SABLE_ALLOWED_ROOMS`. An unlisted room costs no held
+request, and with `SABLE_LEAVE_UNLISTED_ROOMS=true` the account leaves it altogether, so an
+invitation to a room you have not listed is undone within a scan or two.
+
 It follows at most 50 conversations, the most recently active ones, and skips the Talk updates
 room, a former one-to-one, its own note to self and the "Let's get started!" sample. Each one
 it does follow is a request held open on your Nextcloud server, so keep the account out of
@@ -325,10 +362,13 @@ The file is uploaded into the account's own Files, under `SABLE_UPLOAD_PATH`, an
 conversation — see [configuration.md](configuration.md#file-attachments). There is nothing to
 enable: it is the same account that posts the text.
 
-Responses: `201` with the stored filename, path and size; `413` over `SABLE_MAX_UPLOAD_BYTES`;
-`422` for a bad base64 body or neither message nor file; `400` if Nextcloud rejected the share.
-If the upload succeeds but the share fails, the uploaded file is deleted again rather than left
-orphaned in the account's Files.
+Responses: `201` with the stored filename, path and size; `401` for a bad token; `413` over
+`SABLE_MAX_UPLOAD_BYTES`, or for a request body over the cap sable puts on `/notify` (that one
+before the token is even checked; see [request size caps](configuration.md#request-size-caps));
+`400` for JSON or UTF-8 that does not parse, nesting too deep, or if Nextcloud rejected the share;
+`422` for a body that is not a JSON object, a bad base64 file, or neither message nor file. If the
+upload succeeds but the share fails, the uploaded file is deleted again rather than left orphaned
+in the account's Files.
 
 ### Receiving alerts from other services
 
@@ -376,9 +416,17 @@ SABLE_LLM_API_KEY=<a key belonging to an account made for sable>
 SABLE_LLM_MODEL=<the workspace model, not the underlying one>
 SABLE_LLM_TOOL_IDS=server:mcp:1,server:mcp:2
 SABLE_LLM_FEATURES=web_search
+SABLE_LLM_TOOL_ROOMS=e5f6g7h8
+SABLE_LLM_USERS=alice,bob
 SABLE_LLM_TIMEOUT=300
 SABLE_THINKING_REACTION=⏳
 ```
+
+`SABLE_LLM_TOOL_ROOMS` is not optional: empty, tools are off everywhere, whatever the two
+settings above it say, and sable warns that they are configured and unusable. Name a room whose
+membership you control, and `SABLE_LLM_USERS` so that only people you trust can ask in it. In every
+other room the model is called without tools. `tool_ids` and `features` may not be smuggled in
+through `SABLE_LLM_EXTRA_BODY`; that is a startup error.
 
 The tool ids are per-account, and MCP servers are addressed as `server:mcp:<id>` rather than
 appearing in this list:
@@ -394,10 +442,10 @@ request. sable reports the second as a loop that finished without writing an ans
 The startup block prints what the model can reach:
 
 ```
-tools:          server-side loop via Open WebUI · tools: server:mcp:1, server:mcp:2 · built-ins: web_search
+tools:          server-side loop via Open WebUI · tools: server:mcp:1, server:mcp:2 · in rooms: e5f6g7h8 · built-ins: web_search
 ```
 
-Read that as a list of what a stranger in a chat room can set off, because it is one. The tools
+Read that as a list of what a stranger in those rooms can set off, because it is one. The tools
 run as the account behind the API key and the model picks which to call, so give it an account
 of its own. Answers take tens of seconds, which is why the timeout is raised and the thinking
 reaction earns its keep.
@@ -416,9 +464,11 @@ sable 0.7 starting
   receiving:      long polls of up to 30s, conversations rescanned every 60s
   command prefix: '!'
   model:          gpt-4o-mini at https://api.openai.com/v1
-  concurrency:    up to 8 replies at once, the rest queued
+  concurrency:    up to 8 replies at once, the rest queued (at most 20 waiting, then dropped: SABLE_MAX_QUEUED_REPLIES)
   ask reaction:   ⁉️
-  ask rooms:      every conversation the bot is in
+  rooms:          abcd1234, efgh5678 (leaves the others, except /notify and /hook destinations)
+  model users:    alice, bob and the administrators
+  rate limit:     20 triggers a minute per person
   admin commands: reset - only for maser
   ai rooms:       (mentions only)
   alerting:       enabled, aliases: alerts
@@ -437,10 +487,21 @@ Alice (users/alice) asked the model in abcd1234 (22 chars)
 gpt-4o-mini answered in 1.8s (243 chars)
 Alice (users/alice) asked the model about message 12 in abcd1234, written by Bob
 relayed an alert to abcd1234 (alias alerts) as message 4242
+left conversation zzzz9999 ('Lunch'): not in SABLE_ALLOWED_ROOMS and not a /notify or /hook destination
 no longer in conversation abcd1234 ('Team chat') - no further messages from it
 sable 0.7 stopping
 sable 0.7 stopped
 ```
+
+Settings that are probably a mistake are logged as warnings straight after the block (an empty
+`SABLE_ALLOWED_ROOMS`, tools configured with no room to use them; the full list is in
+[configuration.md](configuration.md#startup-warnings)). When the model backend is Open WebUI the
+block gains a `tools:` line between `model:` and `concurrency:`, shown
+[below](#giving-the-assistant-tools-through-open-webui). Refusals show up as warnings you can
+grep for: `rate limit: ignoring …` once per person per minute,
+`dropping replies: …` at most every 30 seconds when the queue is full, `refused !reset for …` for
+an admin-only command, and `cannot leave conversation …` for a room Talk would not let the
+account leave.
 
 The startup probe, the line reading `signed in to`, asks Nextcloud who the credentials belong to.
 It proves DNS, TLS and the app password in one request, and tells you the display name Nextcloud
@@ -505,8 +566,8 @@ Rotating the app password needs no reinstalling. Create a new one under Settings
 put it in `SABLE_NEXTCLOUD_PASSWORD`, restart, then revoke the old one. Until the restart, a
 revoked password means every call to Nextcloud is refused with a 401.
 
-Run one process, and one per account. Conversation history, the message cache, the redelivery
-cache and the position in each conversation all live in memory, so two workers would split them
+Run one process, and one per account. Conversation history, the redelivery cache, the rate
+limiter and the position in each conversation all live in memory, so two workers would split them
 and replies would forget context depending on which worker answered. Worse, two processes signed
 in as the same account would each read every message and each answer it. One process handles chat
 traffic without breaking a sweat, at a few tens of megabytes resident with all its I/O async.
@@ -539,6 +600,15 @@ in a conversation can trigger any command not named in `SABLE_ADMIN_COMMANDS`, s
 out or touches production belongs in that list, with the people allowed to run it in
 `SABLE_ADMIN_USERS`.
 
+Narrow who can reach it at all, because every default is open. Set `SABLE_ALLOWED_ROOMS` to the
+rooms it serves (and `SABLE_LEAVE_UNLISTED_ROOMS` if it should not sit in the others), set
+`SABLE_LLM_USERS` to the people who may use the model, and keep tools for a dedicated room named
+in `SABLE_LLM_TOOL_ROOMS`. Leave the container hardening in `compose.yaml` as it is
+([above](#container-hardening)), and the rate limit and queue caps at their defaults unless you
+have measured a reason. [How the layers combine](configuration.md#how-the-access-layers-combine)
+says what each one does and does not cover. The full checklist is in
+[security.md](security.md#hardening-checklist).
+
 ## Troubleshooting
 
 | Symptom | Cause and fix |
@@ -546,7 +616,11 @@ out or touches production belongs in that list, with the people allowed to run i
 | Nothing happens at all | The account is not in that conversation, or sable cannot sign in. Look for `signed in to` at startup, and for `following conversation <token>` once the account has been invited. A new invitation takes up to `SABLE_ROOM_REFRESH` seconds to be noticed. |
 | `refused the credentials for '…' (HTTP 401)` in the log | `SABLE_NEXTCLOUD_USER` or `SABLE_NEXTCLOUD_PASSWORD` is wrong, the password is not an app password, it was revoked, or the user is disabled. Generate a new app password under Settings → Security. |
 | `could not reach Nextcloud at …` | The URL, DNS, or the certificate. `CERTIFICATE_VERIFY_FAILED` means an internal CA is not trusted — see [the self-signed section](#if-your-nextcloud-uses-an-internal-or-self-signed-certificate). |
-| Invited to a room, still silent after a minute | It is one sable does not follow — Talk updates, a former one-to-one, the account's note to self or the "Let's get started!" sample — or the account is already in more than 50 conversations and this one is not among the most recently active — the log warns once. Leave the ones it does not need. Otherwise check `SABLE_ROOM_REFRESH`. |
+| Invited to a room, still silent after a minute | The room is not in `SABLE_ALLOWED_ROOMS`, which is the commonest cause once that is set: at DEBUG the log says `not following <token>: not in SABLE_ALLOWED_ROOMS`. Add its token (and with `SABLE_LEAVE_UNLISTED_ROOMS` the account may already have left it). Otherwise it is one sable does not follow — Talk updates, a former one-to-one, the account's note to self or the "Let's get started!" sample — or the account is already in more than 50 conversations and this one is not among the most recently active — the log warns once. Leave the ones it does not need. Otherwise check `SABLE_ROOM_REFRESH`. |
+| Answers in a room only without the tools | The room is not in `SABLE_LLM_TOOL_ROOMS`, which is empty by default: tools are off everywhere until a room is named. Add the token, and check the `tools:` line of the startup block for `in rooms:`. |
+| `You are not allowed to use the assistant.` | `SABLE_LLM_USERS` is set and the sender's Nextcloud user id is not in it (administrators always are). Add the id; display names never match. Plain messages in an AI room and ⁉️ reactions from the same person get no reply at all, only an INFO line `not in SABLE_LLM_USERS`. |
+| `rate limit: ignoring …` in the log, and the bot stops answering one person | They set off more than `SABLE_RATE_LIMIT` triggers (20 by default) within a minute. It is silent in the room and lifts a minute after their last accepted trigger. Raise it, or `0` turns it off. |
+| `dropping replies: …` in the log, and some questions get no answer | More replies were running or waiting than `SABLE_MAX_CONCURRENT_REPLIES` plus `SABLE_MAX_QUEUED_REPLIES` allow, so new work is dropped, silently to the user. A slow model backend and a long `SABLE_LLM_TIMEOUT` are the usual cause; raise the ceiling if the backend can take it. |
 | Silent in a room from before sable started | Expected: a conversation is followed from its newest message, so nothing earlier is replayed. |
 | `Nextcloud held the poll of conversation … past …s without answering` | Nextcloud accepted the request and did not answer in time, almost always because its PHP-FPM pool is full and the poll is queued. sable keeps asking and does not treat it as an outage. Raise `pm.max_children` — see [give Nextcloud enough PHP workers](#give-nextcloud-enough-php-workers). You can confirm it by running seven `curl` polls at once: with a big enough pool they all return in about 30 seconds. |
 | Nextcloud shows many long-running requests from one user | That is the long polling: one per conversation, each up to `SABLE_POLL_TIMEOUT` seconds. See [how chat is received](configuration.md#how-chat-is-received). |
@@ -559,12 +633,15 @@ out or touches production belongs in that list, with the people allowed to run i
 | Replies are cut short with `_[truncated]_` | The answer exceeded `SABLE_MAX_MESSAGE_CHARS`; Talk's own ceiling is 32000 characters. |
 | `HTTP 429` from Talk | Nextcloud is throttling the account, most likely for posting too fast. Batch or slow down whatever is calling `/notify`. |
 | Mentions ignored | Pick the account from Talk's mention list, or start the message with its user id. `SABLE_NEXTCLOUD_USER` has to be the id people mention. Set `SABLE_LOG_LEVEL=DEBUG` and watch for `message in <token> was not for me`. |
-| The ⁉️ reaction does nothing | Set `SABLE_LOG_LEVEL=DEBUG` and react again. Otherwise the message was older than the cache, or in a room outside `SABLE_ASK_ROOMS`, which is by far the commonest cause: the reply says it does not keep the conversation's messages, and the log line says `the conversation is not in SABLE_ASK_ROOMS`. If no `received Like` line appears at all, the reaction never arrived through the chat poll — see [future.md](future.md#talk-features-not-yet-used). |
+| The ⁉️ reaction does nothing | Set `SABLE_LOG_LEVEL=DEBUG` and react again. Silence is by design when the reactor is outside `SABLE_ALLOWED_ROOMS`, `SABLE_LLM_USERS` or `SABLE_ADMIN_USERS` (with `SABLE_ASK_ADMINS_ONLY`), when they are over the rate limit, when the message's author is in `SABLE_IGNORE_USERS`, or when it is a system message; each leaves a log line. If no `received Like` line appears at all, the reaction never arrived through the chat poll — see [future.md](future.md#talk-features-not-yet-used). |
+| The ⁉️ reaction says `I cannot find that message` | Talk answered 404 to the read-back: the message was deleted, or the account cannot see it. The call is `GET /chat/{token}/{messageId}/context`, which needs the `chat-get-context` capability. `That message has been deleted.` and `…has no text for me to read` are the other two replies. A transport failure instead says `I could not read the message you reacted to` and is logged. |
 | `/notify` returns 404 | `SABLE_NOTIFY_TOKEN` is unset, so the route is disabled. |
 | `/hook/<name>` returns 404 | No hook by that name, or `SABLE_HOOKS` is unset. A configured hook with a bad token answers 401 instead, so 404 means the name. |
 | `!reset is for administrators only` | The sender's Nextcloud user id is not in `SABLE_ADMIN_USERS`. The log line names who was refused. Display names are never matched, only user ids. |
 | `/docs` or `/openapi.json` returns 404 | Expected: set `SABLE_API_DOCS=true` to serve them. |
 | `/healthz` returns 401 | `SABLE_HEALTH_TOKEN` is set, so the probe needs an `X-Health-Token` header. The image's own healthcheck sends it; anything else calling `/healthz` has to as well. |
 | Access log shows the proxy's IP, not the client's | The proxy's address is not in `SABLE_TRUSTED_PROXIES`, so its `X-Forwarded-For` is ignored. In Docker that is the usual case: name the network's subnet. |
-| `/notify` returns 400 | The `room` is neither a known alias nor a plausible conversation token, or Talk rejected it — including because the account is not in that conversation. |
+| `/notify` returns 400 | The `room` is neither a known alias nor a plausible conversation token, or Talk rejected it — including because the account is not in that conversation. Invalid JSON or UTF-8 and nesting too deep are 400 as well. |
+| `/notify` or `/hook` returns 413 | The body is over the cap sable enforces itself: `SABLE_MAX_UPLOAD_BYTES` × 4/3 + 64 KiB for `/notify`, `SABLE_MAX_HOOK_BYTES` + 1 KiB for `/hook`, 64 KiB elsewhere. It is refused before the token is checked. See [request size caps](configuration.md#request-size-caps). |
+| `/notify` returns 422 | The body is not a JSON object, a field is missing or invalid, the base64 file is bad, or there is neither a message nor a file. |
 | Config error on startup | See [the table in configuration.md](configuration.md#startup-errors-and-what-they-mean). |

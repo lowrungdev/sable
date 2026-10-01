@@ -48,9 +48,15 @@ class FakeLLM:
         self.reply = reply
         self.error = error
         self.calls: list[list[Message]] = []
+        #: The ``tools`` argument of each call; None where it was not passed, which
+        #: is how the plain OpenAI-compatible client is called.
+        self.tools: list[bool | None] = []
 
-    async def complete(self, messages: list[Message], *, model: str | None = None) -> str:
+    async def complete(
+        self, messages: list[Message], *, model: str | None = None, tools: bool | None = None
+    ) -> str:
         self.calls.append(messages)
+        self.tools.append(tools)
         if self.error is not None:
             raise self.error
         return self.reply

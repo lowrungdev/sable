@@ -20,15 +20,16 @@ already in it. It started as the second and was changed to the third, for the re
 ## What it does
 
 **Commands.** A prefix router over a registry, `!` by default. It ships with `!help`, `!ping`,
-`!whoami`, `!echo`, `!ai`, `!reset` and `!version`, and a new one is a decorated async function
+`!whoami`, `!ai`, `!reset` and `!version`, and a new one is a decorated async function
 that returns Markdown. This is the seam most people will use; the rest of the bot exists so that
 writing a command is boring.
 
 **An assistant.** Mention the bot and it answers through any endpoint that speaks OpenAI's
 `/chat/completions` shape, keeping a short rolling history per conversation. React to a message
-with ⁉️ and it answers that message instead, threaded underneath it. Pointed at Open WebUI it
-can also use tools — search, MCP servers, whatever that instance offers — with Open WebUI
-running the loop.
+with ⁉️ and it answers that message instead, threaded underneath it, reading the message back
+from Talk so it works on old ones too. Pointed at Open WebUI it can also use tools — search, MCP
+servers, whatever that instance offers — with Open WebUI running the loop, in the rooms you
+name.
 
 Model-agnosticism here is a requirement rather than a nicety. The chat-completions shape is the
 one interface that OpenAI, Ollama, vLLM, llama.cpp, LiteLLM, OpenRouter, Groq and Together all
@@ -63,7 +64,8 @@ file, which a bot cannot. What it costs, honestly:
   sable is pointed at it (see [deployment.md](deployment.md#give-nextcloud-enough-php-workers)).
   sable skips conversations nobody addresses a bot in, and follows at most 50 of the rest.
 - **It is a person in the room.** Anyone who can invite participants can invite it, and nothing in
-  Talk marks its messages as automated.
+  Talk marks its messages as automated. `SABLE_ALLOWED_ROOMS` is the answer to the first half:
+  list the conversations it serves, by token, and an invitation to any other gets nothing.
 - **It hears about a new room late.** The conversation list is rescanned every
   `SABLE_ROOM_REFRESH` seconds, where a bot install is effective at once.
 
@@ -83,11 +85,16 @@ sable does not execute tools itself, and has no retrieval. A model that asks for
 answer from the portable backend, because a single round trip cannot give it one. What sable
 will do is hand the whole job to a server that runs the loop already — `SABLE_LLM_BACKEND=openwebui`
 — which keeps the tool registry, the credentials and the authorization in one place that was
-built for them, rather than growing a second one here. The cost is that the room's participants
-can set those tools off, which [security.md](security.md#accepted-risks) states plainly.
+built for them, rather than growing a second one here. The cost is that whoever can ask the model
+in a tools room can set those tools off, which is why tools are a decision about a room
+(`SABLE_LLM_TOOL_ROOMS`, off everywhere by default) and [security.md](security.md#accepted-risks)
+states the rest plainly.
 
-There is no user or permission management. Whether the account is in a conversation is Talk's
-decision, made by whoever invites it. And it is not multi-tenant: one account, one password, one
+There is no user or permission management beyond a handful of lists. Whether the account is in a
+conversation is Talk's decision, made by whoever invites it, which `SABLE_ALLOWED_ROOMS` can
+override on sable's side; who may use the model and who may run which command are two more lists
+([how they combine](configuration.md#how-the-access-layers-combine)). All of them match Nextcloud
+user ids, not roles or groups. And it is not multi-tenant: one account, one password, one
 Nextcloud. Run a second instance with a second account if you need a second bot, since they are
 small.
 
@@ -126,9 +133,11 @@ rather than a fork.
 | --- | --- |
 | sable to Nextcloud | HTTPS, authenticated as the account by its app password. It cannot be scoped, so it reaches everything that user can: chat, Files, Contacts and Calendar. |
 | Nextcloud to sable | Nothing is accepted from Nextcloud unprompted: chat arrives as the answer to sable's own requests. |
-| Anything to `/notify` | A separate bearer token, compared in constant time. Unset means the route answers 404. |
-| Chat text to the model | Messages are sent verbatim to your configured backend. Whoever can talk to the bot can send text to that provider — and, with server-side tools on, can have it call one. |
+| Anything to `/notify` | A separate bearer token, compared in constant time. Unset means the route answers 404. Request bodies are capped by the app, before the token is checked. |
+| Who may talk to it | Nothing by default: any user who can invite the account can use it. `SABLE_ALLOWED_ROOMS` limits the rooms and `SABLE_LLM_USERS` the people who may use the model. |
+| Chat text to the model | Messages are sent verbatim to your configured backend. Whoever may use the model can send text to that provider — and, in a room named in `SABLE_LLM_TOOL_ROOMS`, can have it call a tool. |
 | A command's own reach | Whatever you give it. Commands run with the bot's credentials, and anyone in the conversation can trigger any that is not named in `SABLE_ADMIN_COMMANDS`. |
+| Chat text to other people's notifications | `@all` and group or team mentions in anything sable posts for chat or a webhook are defanged. |
 
 The app password is the value that matters most, and revoking it in Nextcloud is how you
 rotate it. [security.md](security.md) covers all of this properly, including the risks that are

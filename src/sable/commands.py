@@ -160,7 +160,11 @@ async def help_command(ctx: Context) -> str:
             lines.append("_Administrators only._")
         return "\n".join(lines)
 
+    model_ok = ctx.bot.can_use_model(ctx.event)
+
     def can_run(command: Command) -> bool:
+        if command.name == "ai" and not model_ok:
+            return False
         return ctx.is_admin or not ctx.bot.admin_only(command)
 
     # A command somebody cannot run is noise in their list. Nothing is kept
@@ -172,9 +176,10 @@ async def help_command(ctx: Context) -> str:
         if can_run(c)
     ]
     body = "\n".join(lines)
-    if ctx.bot.llm_enabled:
+    if ctx.bot.llm_enabled and model_ok:
         # A mention reaches the model whatever SABLE_ADMIN_COMMANDS says: only
-        # the command is gated, so only the command is conditional here.
+        # the command is gated, so only the command is conditional here. Whoever
+        # SABLE_LLM_USERS leaves out is not told about either way in.
         ai = ctx.bot.registry.get("ai")
         ways = f"Mention me (`@{ctx.bot.user_id}`)"
         if ai is not None and can_run(ai):
@@ -197,13 +202,6 @@ async def whoami(ctx: Context) -> str:
         f"{f' with participant type {actor.participant_type}' if actor.participant_type else ''}, "
         f"in conversation `{ctx.event.room_token}`."
     )
-
-
-@registry.command("echo", help="Repeat what you said.", usage="echo <text>")
-async def echo(ctx: Context) -> str:
-    if not ctx.args:
-        raise CommandError("Give me something to echo.")
-    return ctx.args
 
 
 @registry.command(

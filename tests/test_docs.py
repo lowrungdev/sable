@@ -22,8 +22,8 @@ from pathlib import Path
 import pytest
 from conftest import make_config
 
-from sable.app import create_app
-from sable.config import Config
+from sable.app import create_app, tools_summary
+from sable.config import Config, LLMConfig
 
 ROOT = Path(__file__).resolve().parent.parent
 DOCS = ROOT / "docs"
@@ -117,8 +117,13 @@ DOCUMENTED_DEFAULTS = {
     "SABLE_POLL_TIMEOUT": "poll_timeout",
     "SABLE_ROOM_REFRESH": "room_refresh",
     "SABLE_COMMAND_PREFIX": "command_prefix",
+    "SABLE_ALLOWED_ROOMS": "allowed_rooms",
+    "SABLE_LEAVE_UNLISTED_ROOMS": "leave_unlisted_rooms",
+    "SABLE_AI_ROOMS": "ai_rooms",
+    "SABLE_LLM_USERS": "llm_users",
+    "SABLE_RATE_LIMIT": "rate_limit",
+    "SABLE_MAX_QUEUED_REPLIES": "max_queued_replies",
     "SABLE_ASK_REACTION": "ask_reaction",
-    "SABLE_MESSAGE_CACHE": "message_cache",
     "SABLE_UNKNOWN_COMMAND_HINT": "unknown_command_hint",
     "SABLE_REPORT_ERRORS": "report_errors",
     "SABLE_STARTUP_CHECK": "startup_check",
@@ -142,6 +147,7 @@ DOCUMENTED_DEFAULTS = {
 #: The same, for settings that live on config.llm rather than on config.
 DOCUMENTED_LLM_DEFAULTS = {
     "SABLE_LLM_BACKEND": "backend",
+    "SABLE_LLM_TOOL_ROOMS": "tool_rooms",
     "SABLE_LLM_BUILTIN_TOOLS": "builtin_tools",
     "SABLE_LLM_POLL_INTERVAL": "poll_interval",
     "SABLE_LLM_KEEP_CHATS": "keep_chats",
@@ -271,6 +277,41 @@ async def test_the_logged_startup_banner_is_the_one_deployment_md_shows(caplog) 
         f"Add, remove or reorder the sample's lines to match - an operator checks "
         f"their own log against it line by line."
     )
+
+
+def sample_tools_line() -> str:
+    """The ``tools:`` line of the startup banner shown in deployment.md."""
+    for line in read(DEPLOYMENT).splitlines():
+        if line.startswith("tools:"):
+            return line
+    raise AssertionError("docs/deployment.md has no sample 'tools:' startup line")
+
+
+def test_the_tools_line_in_deployment_md_is_the_one_the_code_builds() -> None:
+    # The values are the ones the sample's own .ini block above it configures, so a
+    # change to the wording or order of tools_summary shows up here.
+    config = make_config(
+        llm=LLMConfig(
+            model="m",
+            api_key="k",
+            backend="openwebui",
+            base_url="https://ai.example.org/api",
+            tool_ids=["server:mcp:1", "server:mcp:2"],
+            features=["web_search"],
+            tool_rooms=["e5f6g7h8"],
+        )
+    )
+    assert sample_tools_line() == f"tools:          {tools_summary(config)}"
+
+
+def test_the_removed_echo_command_is_not_documented() -> None:
+    # The `!echo` command is gone: nothing an operator reads should still offer it.
+    # (The changelog is history and may name it; the removed settings are covered by
+    # test_no_file_documents_a_variable_the_code_never_reads.)
+    for path in [ENV_EXAMPLE, COMPOSE, *sorted(DOCS.glob("*.md"))]:
+        if path.name == "CHANGELOG.md":
+            continue
+        assert "!echo" not in read(path), f"{path.name} still mentions the removed !echo command"
 
 
 # --------------------------------------------------------------------------- #

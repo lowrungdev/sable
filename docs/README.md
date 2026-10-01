@@ -9,8 +9,10 @@ OpenAI-compatible model backend, and relays alerts from other systems into a con
 `POST /notify`, optionally with a file attached, or `POST /hook/{name}` for services that cannot
 speak that shape. It only ever connects out to Nextcloud, so nothing has to reach it, and nothing
 is installed in Nextcloud. The price is that its one credential is a user's app password, which
-cannot be scoped. Every alerting call needs its own token, and commands are open to everyone in
-the conversation unless you name them in `SABLE_ADMIN_COMMANDS`.
+cannot be scoped. Every alerting call needs its own token. Out of the box it is open: it answers
+in any conversation it is invited to, to anyone in it, so list the rooms in `SABLE_ALLOWED_ROOMS`
+and the people who may use the model in `SABLE_LLM_USERS`; commands are open to everyone in the
+conversation unless you name them in `SABLE_ADMIN_COMMANDS`.
 
 ## Documentation
 
@@ -51,7 +53,9 @@ Devices & sessions. Then add the user to a conversation, the way you would add a
 cp .env.example .env
 ```
 
-Set `SABLE_NEXTCLOUD_URL`, `SABLE_NEXTCLOUD_USER` and `SABLE_NEXTCLOUD_PASSWORD`. For the
+Set `SABLE_NEXTCLOUD_URL`, `SABLE_NEXTCLOUD_USER` and `SABLE_NEXTCLOUD_PASSWORD`, and
+`SABLE_ALLOWED_ROOMS` to the tokens of the conversations it should serve (the last part of each
+one's URL; left empty it follows every room it is invited to, with a warning). For the
 assistant, add `SABLE_LLM_BASE_URL`, `SABLE_LLM_API_KEY` and `SABLE_LLM_MODEL`; leaving the model
 empty is a supported mode that gives you a command bot and no model calls at all.
 
@@ -60,20 +64,24 @@ docker compose up -d --build   # or: uv sync --locked --no-dev && uv run sable
 sable --check                  # validate the configuration and print what it resolved to
 ```
 
-Within a minute sable notices the invitation, and you can say hello with `!ping`.
+Within a minute sable notices the invitation (to a room in the allow-list), and you can say hello
+with `!ping`.
 [deployment.md](deployment.md) has the full path, including TLS, reverse proxies, systemd and
 how to verify each half of the round trip.
 
 ## Using it in chat
 
-Commands start with `SABLE_COMMAND_PREFIX`, `!` by default, and `!help` lists them.
+Commands start with `SABLE_COMMAND_PREFIX`, `!` by default, and `!help` lists them: `!help`,
+`!ping`, `!whoami`, `!ai`, `!reset` and `!version`.
 
 The assistant answers when a message mentions the account, picked from Talk's mention list or
 typed as its user id at the start of a line, when someone uses `!ai <question>`, and for every
-message in the conversations named in `SABLE_AI_ROOMS`. You can also react to any message with ⁉️
-and it will answer that message, threaded underneath — useful for someone else's question or as
-a follow-up on its own reply. That last one only works on messages sable saw arrive, because a
-reaction names the message and does not carry its text.
+message in the conversations named in `SABLE_AI_ROOMS` (by token, or `*`). You can also react to
+any message with ⁉️ and it will answer that message, threaded underneath — useful for someone
+else's question or as a follow-up on its own reply. sable reads the message back from Talk, so
+this works on old messages and after a restart. Set `SABLE_LLM_USERS` and only those people (and
+the administrators) can make the model answer, by any of these routes. Each person is limited to
+`SABLE_RATE_LIMIT` triggers a minute, 20 by default.
 
 History is per conversation, held in memory, capped by `SABLE_HISTORY_TURNS` and
 `SABLE_HISTORY_TTL`, and cleared by `!reset`. It is a cache rather than a record, so a restart
@@ -82,8 +90,10 @@ and the current date and time go in the system prompt so "right now" means somet
 
 The assistant has no tools of its own — a single request cannot run one — but pointed at Open
 WebUI with `SABLE_LLM_BACKEND=openwebui` it uses whatever that instance offers, with Open WebUI
-executing the loop. Everyone in the room can set those tools off, so read
-[letting the model use tools](configuration.md#letting-the-model-use-tools) before enabling it.
+executing the loop, but only in the rooms named in `SABLE_LLM_TOOL_ROOMS` (empty is off
+everywhere). Anyone who can ask the model in such a room can set those tools off, so read
+[letting the model use tools](configuration.md#letting-the-model-use-tools) before enabling it, and
+see [how the access layers combine](configuration.md#how-the-access-layers-combine) for the rest.
 
 ## Alerting
 
@@ -94,8 +104,10 @@ token:
 curl -fsS https://sable.example.org/notify -H "Authorization: Bearer $SABLE_NOTIFY_TOKEN" -H 'Content-Type: application/json' -d '{"room": "alerts", "message": "disk full on db01, 98% of /var"}'
 ```
 
-You get `201` with the new message id, `400` for a room Talk rejected, `401` for a bad token,
-`502` if Nextcloud is unreachable, and `404` when `SABLE_NOTIFY_TOKEN` is unset.
+You get `201` with the new message id, `400` for a room Talk rejected or a body that is not valid
+JSON, `401` for a bad token, `413` for a body over the size cap, `422` for a body that is not a JSON
+object, `502` if Nextcloud is unreachable, and `404` when `SABLE_NOTIFY_TOKEN` is unset. The
+destination room need not be in `SABLE_ALLOWED_ROOMS`.
 
 The same single call takes a file, as multipart or base64, and the message becomes its caption:
 
@@ -126,7 +138,9 @@ raw argument string, a shell-split `argv`, and `ctx.bot` for `answer_with_llm`, 
 
 Bear in mind that by default anyone in the conversation can run any command. If yours touches
 something that matters, name it in `SABLE_ADMIN_COMMANDS` and the people allowed to run it in
-`SABLE_ADMIN_USERS`; for anything finer, `ctx.is_admin` says whether the sender is one of them.
+`SABLE_ADMIN_USERS`; for anything finer, `ctx.is_admin` says whether the sender is one of them. A
+command that calls `answer_with_llm` is subject to `SABLE_LLM_USERS` without doing anything: the
+sender is told they are not allowed.
 
 ## Development
 
@@ -154,7 +168,10 @@ The code is small enough to read in a sitting:
 [openwebui.py](../src/sable/openwebui.py) for the server-side tool loop,
 [hooks.py](../src/sable/hooks.py) for rendering somebody else's webhook into a message,
 [app.py](../src/sable/app.py) for the HTTP surface,
-[config.py](../src/sable/config.py) for the environment, and
+[config.py](../src/sable/config.py) for the environment,
+[limits.py](../src/sable/limits.py) for the request body caps,
+[ratelimit.py](../src/sable/ratelimit.py) for the per-person limit,
+[mentions.py](../src/sable/mentions.py) for defanging mass mentions, and
 [history.py](../src/sable/history.py), [state.py](../src/sable/state.py) and
 [logs.py](../src/sable/logs.py) for the small pieces around the edges.
 

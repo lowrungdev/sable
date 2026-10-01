@@ -79,6 +79,9 @@ def main(argv: list[str] | None = None) -> int:
             f"  notify:     {'enabled' if config.notify_enabled else 'disabled'}"
             f"{' aliases: ' + ', '.join(config.notify_rooms) if config.notify_rooms else ''}"
         )
+        for warning in config.warnings:
+            # The same doubts the server logs after its banner.
+            print(f"warning: {warning}")
         return 0
 
     import uvicorn
