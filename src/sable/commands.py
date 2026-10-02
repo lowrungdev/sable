@@ -19,9 +19,10 @@ configured administrators.
 
 from __future__ import annotations
 
+import enum
 import shlex
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from .events import TalkEvent
@@ -32,6 +33,21 @@ if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to type checke
 
 class CommandError(Exception):
     """User-facing failure: the text is posted back to the conversation."""
+
+
+class Access(enum.Enum):
+    """May this person run this plugin command here? See PluginManager.allows."""
+
+    OK = "ok"
+    #: Not in this room, or the plugin is not running: answered exactly like a
+    #: command that does not exist, so nothing says the plugin is there.
+    NOT_HERE = "not here"
+    #: In the right room, but not for this person.
+    NOT_YOU = "not you"
+
+    @property
+    def ok(self) -> bool:
+        return self is Access.OK
 
 
 @dataclass
@@ -74,12 +90,42 @@ class Command:
     usage: str = ""
     aliases: tuple[str, ...] = ()
     hidden: bool = False
+    #: The plugin this command came from, or empty for a built-in. Who may run a
+    #: plugin command is decided by the plugin's own access rules, on top of the
+    #: ones every command has.
+    plugin: str = ""
 
 
 class Registry:
     def __init__(self) -> None:
         self._commands: dict[str, Command] = {}
         self._aliases: dict[str, str] = {}
+
+    def add(self, command: Command) -> None:
+        """Register a ready-made command. Refuses a name or alias already taken."""
+        taken = [
+            name
+            for name in (command.name.lower(), *(a.lower() for a in command.aliases))
+            if name in self._commands or name in self._aliases
+        ]
+        if taken:
+            raise ValueError(f"command {taken[0]!r} is already registered")
+        key = command.name.lower()
+        self._commands[key] = command
+        for alias in command.aliases:
+            self._aliases[alias.lower()] = key
+
+    def copy(self) -> Registry:
+        """An independent registry with the same commands.
+
+        Each Bot works on its own copy, so a plugin loaded for one bot, or
+        registered in one test, never shows up in the module-level registry of
+        built-ins or in another bot's.
+        """
+        other = Registry()
+        other._commands = {key: replace(command) for key, command in self._commands.items()}
+        other._aliases = dict(self._aliases)
+        return other
 
     def command(
         self,
@@ -94,9 +140,7 @@ class Registry:
             key = name.lower()
             if key in self._commands or key in self._aliases:
                 raise ValueError(f"command {name!r} is already registered")
-            self._commands[key] = Command(key, handler, help, usage, aliases, hidden)
-            for alias in aliases:
-                self._aliases[alias.lower()] = key
+            self.add(Command(key, handler, help, usage, aliases, hidden))
             return handler
 
         return decorator
@@ -141,9 +185,15 @@ async def help_command(ctx: Context) -> str:
     prefix = ctx.bot.config.command_prefix
     if ctx.args:
         command = ctx.bot.registry.get(ctx.args.split()[0])
-        if command is None:
+        # A plugin command that is not for this person, or not for this room, is
+        # described exactly as a command that does not exist: running it would
+        # answer the same, and the plugin's existence is not for everybody.
+        if command is None or not ctx.bot.plugin_access(command, ctx.event).ok:
             raise CommandError(f"I have no `{ctx.args.split()[0]}` command.")
-        lines = [f"**{prefix}{command.name}** - {command.help or 'No description.'}"]
+        lines = [
+            f"**{prefix}{command.name}** - {command.help or 'No description.'}"
+            + (" _(plugin)_" if command.plugin else "")
+        ]
         if command.usage:
             lines.append(f"Usage: `{prefix}{command.usage}`")
         if command.aliases:
@@ -157,13 +207,18 @@ async def help_command(ctx: Context) -> str:
     def can_run(command: Command) -> bool:
         if command.name == "ai" and not model_ok:
             return False
+        if not ctx.bot.plugin_access(command, ctx.event).ok:
+            return False
         return ctx.is_admin or not ctx.bot.admin_only(command)
 
     # A command somebody cannot run is noise in their list. Nothing is kept
-    # secret by leaving it out: running one says plainly who it is for.
+    # secret by leaving it out: running one says plainly who it is for. (A plugin
+    # command is the exception: see above.)
     lines = [
-        f"- `{prefix}{c.usage or c.name}` - {c.help}"
+        f"- `{prefix}{c.usage or c.name}`"
+        + (f" - {c.help}" if c.help else "")
         + (" _(admin)_" if ctx.bot.admin_only(c) else "")
+        + (" _(plugin)_" if c.plugin else "")
         for c in ctx.bot.registry.visible()
         if can_run(c)
     ]
@@ -214,3 +269,21 @@ async def version(ctx: Context) -> str:
 
     model = ctx.bot.config.llm.model or "not configured"
     return f"sable {__version__} · model `{model}`"
+
+
+@registry.command(
+    "plugins",
+    help="List the plugins and how they are doing.",
+    usage="plugins [name]",
+)
+async def plugins(ctx: Context) -> str:
+    # Hard-wired here as well as in Bot.admin_only: what a plugin reports about
+    # itself is for the operator, whatever SABLE_ADMIN_COMMANDS says.
+    if not ctx.is_admin:
+        raise CommandError(f"`{ctx.bot.config.command_prefix}plugins` is for administrators only.")
+    manager = ctx.bot.plugins
+    if manager is None:
+        return "Plugins are off: `SABLE_PLUGINS_DIR` is not set."
+    if ctx.args:
+        return manager.describe(ctx.args.split()[0])
+    return manager.report()

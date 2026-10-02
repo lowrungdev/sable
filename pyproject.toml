@@ -14,6 +14,7 @@ dependencies = [
     "fastapi>=0.115",
     "httpx>=0.27",
     "python-multipart>=0.0.9",
+    "pyyaml>=6.0",
     "uvicorn[standard]>=0.30",
 ]
 
@@ -87,4 +88,9 @@ python_version = "3.11"
 # deliberately not type-correct, and annotating them would add noise, not safety.
 files = ["src/sable"]
 strict = true
-# Pydantic and FastAPI are typed, so no stub packages are needed.
+# Pydantic and FastAPI are typed, so no stub packages are needed. PyYAML ships none,
+# and one import of it is not worth another development dependency.
+
+[[tool.mypy.overrides]]
+module = ["yaml"]
+ignore_missing_imports = true

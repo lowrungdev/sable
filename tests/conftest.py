@@ -290,3 +290,13 @@ def actor_event(shape: ActorShape, text: str = "hello", **kwargs: Any):
 def actor_reaction_event(shape: ActorShape, reaction: str = "👍", **kwargs: Any):
     """A reaction event from this actor shape - the other way into Bot.handle."""
     return reaction_event(reaction, **{**shape.payload_kwargs, **kwargs})
+
+
+@pytest.fixture
+async def rigs(http_client: httpx.AsyncClient) -> AsyncIterator[Any]:
+    """Builds bots with a plugin manager over a fake worker; closes them afterwards."""
+    from plugin_helpers import RigFactory
+
+    factory = RigFactory(http_client)
+    yield factory
+    await factory.close()

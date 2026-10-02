@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from .commands import (
+    Access,
     Command,
     CommandError,
     Context,
@@ -27,6 +28,7 @@ from .history import History
 from .llm import LLMClient, LLMError
 from .mentions import defang_mentions
 from .openwebui import OpenWebUIClient
+from .plugins import PluginFailure, PluginManager
 from .ratelimit import ALLOWED, FIRST_REFUSAL, RateLimiter
 from .state import ConnectionState
 from .talk import TalkClient, TalkError
@@ -96,7 +98,11 @@ class Bot:
         command_registry: Registry | None = None,
     ) -> None:
         self.config = config
-        self.registry = command_registry or registry
+        #: This bot's own commands: a copy, so that plugins registered here (or a
+        #: command a test adds) never reach the module-level built-ins.
+        self.registry = (command_registry or registry).copy()
+        #: The plugin manager, when SABLE_PLUGINS_DIR is set. See attach_plugins.
+        self.plugins: PluginManager | None = None
         self.history = history or History(config.history_turns, config.history_ttl)
         self._limiter = RateLimiter(config.rate_limit)
         self._ask_key = emoji_key(config.ask_reaction)
@@ -130,6 +136,8 @@ class Bot:
         self._mention_anywhere_re = re.compile(rf"(?<!\w)@(?:{alternatives})\b", re.IGNORECASE)
 
     async def aclose(self) -> None:
+        if self.plugins is not None:
+            await self.plugins.aclose()
         await self._llm.aclose()
         if self._owns_http:
             await self._http.aclose()
@@ -141,8 +149,38 @@ class Bot:
         return self.config.llm.enabled
 
     def admin_only(self, command: Command) -> bool:
-        """Is this command restricted to SABLE_ADMIN_USERS?"""
+        """Is this command restricted to SABLE_ADMIN_USERS?
+
+        ``!plugins`` always is, whatever SABLE_ADMIN_COMMANDS says. So is a plugin
+        command whose plugin is ``admins_only``: it is the same question asked in
+        the plugin's own settings.
+        """
+        if command.plugin:
+            if self.plugins is not None and self.plugins.admins_only(command.plugin):
+                return True
+        elif command.name == "plugins":
+            return True
         return self.config.admin_only(command.name, *command.aliases)
+
+    def attach_plugins(self, manager: PluginManager) -> None:
+        """Take a loaded plugin manager and register its commands on this bot."""
+        self.plugins = manager
+        manager.is_admin = self.is_admin_actor
+        for command in manager.commands():
+            self.registry.add(command)
+
+    def plugin_access(self, command: Command, event: TalkEvent) -> Access:
+        """May this person run this command here, as far as its plugin says?
+
+        Built-ins are always OK: who may run them is settled by the rest of the
+        access layers. A plugin command whose plugin is not loaded (no manager)
+        is not here at all.
+        """
+        if not command.plugin:
+            return Access.OK
+        if self.plugins is None:
+            return Access.NOT_HERE
+        return self.plugins.allows(command.plugin, event)
 
     def is_admin_actor(self, event: TalkEvent) -> bool:
         """May whoever caused this event use the restricted paths?
@@ -379,13 +417,29 @@ class Bot:
 
     async def _run_command(self, event: TalkEvent, name: str, args: str) -> None:
         command = self.registry.get(name)
-        if command is None:
+        access = Access.OK if command is None else self.plugin_access(command, event)
+        if command is None or access is Access.NOT_HERE:
+            # A plugin command in a room, or for a person, its plugin does not
+            # serve is answered exactly like one that does not exist, hint
+            # included: nothing here says the plugin is installed.
             log.debug("unknown command %r in %s", name, event.room_token)
             if self.config.unknown_command_hint:
                 await self._safe_reply(
                     event,
                     f"I have no `{name}` command. Try `{self.config.command_prefix}help`.",
                 )
+            return
+
+        if access is Access.NOT_YOU:
+            log.info(
+                "refused %s%s for %s - not allowed by its plugin",
+                self.config.command_prefix,
+                command.name,
+                self._who(event),
+            )
+            await self._safe_reply(
+                event, f"`{self.config.command_prefix}{command.name}` is not available to you."
+            )
             return
 
         if self.admin_only(command) and not self.is_admin_actor(event):
@@ -415,7 +469,7 @@ class Bot:
         except CommandError as exc:
             await self._safe_reply(event, str(exc))
             return
-        except (LLMError, TalkError, httpx.HTTPError) as exc:
+        except (LLMError, TalkError, httpx.HTTPError, PluginFailure) as exc:
             log.warning("command %s failed: %s", command.name, exc)
             await self._report(event, str(exc))
             return
@@ -675,17 +729,43 @@ class Bot:
         return await self.talk.send_message(room_token, message, silent=silent, reply_to=reply_to)
 
     async def _safe_reply(
-        self, event: TalkEvent, message: str, *, reply_to: int | None = None
-    ) -> None:
+        self,
+        event: TalkEvent,
+        message: str,
+        *,
+        reply_to: int | None = None,
+        silent: bool = False,
+    ) -> bool:
         """Reply, treating a failed post as a log line rather than a crash.
 
         Nextcloud being unreachable is not this handler's problem to solve, and
-        an exception here would only surface as a stray traceback.
+        an exception here would only surface as a stray traceback. True if the
+        message was posted.
         """
         try:
-            await self.reply(event, message, reply_to=reply_to)
+            await self.reply(event, message, reply_to=reply_to, silent=silent)
         except (TalkError, httpx.HTTPError, ValueError) as exc:
             log.warning("could not post to %s: %s", event.room_token, exc)
+            return False
+        return True
+
+    # -- on behalf of plugins ----------------------------------------------- #
+    # The plugin manager has already limited what a plugin may ask for; these
+    # only carry it out, and never raise for a Talk failure.
+
+    async def plugin_reply(self, event: TalkEvent, text: str, *, silent: bool = False) -> bool:
+        return await self._safe_reply(event, text, silent=silent)
+
+    async def plugin_send(self, room: str, text: str, *, silent: bool = False) -> bool:
+        try:
+            await self.send(room, defang_mentions(text), silent=silent)
+        except (TalkError, httpx.HTTPError, ValueError) as exc:
+            log.warning("could not post to %s: %s", room, exc)
+            return False
+        return True
+
+    async def plugin_react(self, event: TalkEvent, emoji: str) -> bool:
+        return await self.talk.try_react(event.room_token, event.message_id, emoji)
 
     async def _report(self, event: TalkEvent, detail: str) -> None:
         if not self.config.report_errors:

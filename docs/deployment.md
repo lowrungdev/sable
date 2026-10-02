@@ -114,8 +114,9 @@ Keep all of it:
 | `tmpfs: /tmp:size=256m` | The only writable path, held in RAM and gone on restart. A multipart upload to `/notify` spools here, so it must be larger than `SABLE_MAX_UPLOAD_BYTES` (25 MB by default; 256m leaves room for several at once) |
 | `cap_drop: [ALL]` | No Linux capabilities: it listens on 8080 and makes outbound requests |
 | `security_opt: no-new-privileges:true` | A setuid binary cannot gain privileges |
-| `pids_limit: 256` | A runaway or a fork bomb stops well short of the host's limits |
-| `mem_limit: 768m` | A memory cap, which has to cover the `/tmp` tmpfs when it is full |
+| `pids_limit: 256` | A runaway or a fork bomb stops well short of the host's limits. With plugins on it also has to cover the plugin workers ([sizing](#running-plugins-optional)) |
+| `mem_limit: 768m` | A memory cap, which has to cover the `/tmp` tmpfs when it is full, and the plugin workers' own memory |
+| no `init: true` | sable is PID 1, so its environment, the app password included, is out of a same-uid plugin's reach. Do not add an init ([why](security.md#plugins-and-the-process-boundary)) |
 
 If you raise `SABLE_MAX_UPLOAD_BYTES` above about 200 MB, grow the tmpfs `size=` with it and raise
 `mem_limit` to match, or a large upload can fill the tmpfs before it is finished. A base64 upload
@@ -376,6 +377,67 @@ is rendered without further configuration, and
 [webhooks from other services](configuration.md#webhooks-from-other-services) covers the
 rendering and the format strings that control the wording.
 
+## Running plugins (optional)
+
+[Plugins](plugins.md) are off until `SABLE_PLUGINS_DIR` is set. Each one is a separate process
+running code you mount, so this is a deployment decision as much as a configuration one: read
+[what it does and does not protect](security.md#plugins-and-the-process-boundary) first.
+
+With Compose, put the plugins in a directory beside `compose.yaml` and uncomment the two lines
+already there, the mount and the setting:
+
+```yaml
+    volumes:
+      - ./plugins:/plugins:ro
+    environment:
+      SABLE_PLUGINS_DIR: "/plugins"
+```
+
+- **Mount it read-only (`:ro`).** A plugin that could write to the directory it is loaded from
+  could rewrite itself, or another plugin, and keep the change across restarts. sable warns at
+  startup when the directory is writable to it. A changed plugin takes effect when sable restarts:
+  there is no reload.
+- **Do not add an init process** (`init: true` in Compose, `--init` with `docker run`).
+  `compose.yaml` leaves it out on purpose: sable has to be PID 1, because it marks itself
+  non-dumpable and so a plugin worker, which is the same user, cannot read its environment. An
+  init is a PID 1 that holds the full environment and is not non-dumpable, which would hand the
+  app password to every plugin. The cost of leaving it out: a plugin worker that is killed on a
+  timeout takes its process group with it, but anything it started in a session of its own is
+  orphaned onto PID 1, which does not reap it, so it stays a zombie, using a slot of
+  `pids_limit`, until the container restarts
+  ([accepted risk 18](security.md#accepted-risks)).
+- **Size `pids_limit` and `mem_limit` for the workers.** Each active plugin is a Python process of
+  its own, plus whatever it starts. An idle worker held about 21 MB resident when measured once
+  (Python in WSL, with nothing but the plugin API imported), and a plugin that imports `httpx` or
+  holds data costs more. The 1 GiB limit on a worker is on address space, not memory in use, so
+  the container's `mem_limit` is what actually bounds them together. The `/tmp` tmpfs is theirs to
+  fill as well. Raise both limits by what the plugins you run need; the defaults in `compose.yaml`
+  were sized for sable alone.
+- **Restrict what the container can reach**, if the plugins do not need the internet: a plugin has
+  whatever network the container has. sable has no setting for it; use a Docker network policy or
+  an egress proxy.
+- **systemd**: keep the plugins under `/opt/sable` (the unit's `ReadOnlyPaths` then makes them
+  read-only to the service), and put the environment where the service user cannot read it. The
+  example above keeps `/opt/sable/.env` readable by the `sable` user, which is also the user
+  plugins run as; with plugins on, load it with `EnvironmentFile=` from a file only root can read
+  (systemd reads it before dropping to `User=`) and stop passing `--env-file`. That arrangement
+  was not run for this page. `TasksMax` and `MemoryMax` cover the workers like `pids_limit` and
+  `mem_limit` do, and want the same raising.
+
+Check before restarting, against the real settings:
+
+```bash
+sable --check
+```
+
+It starts each plugin that has rooms, runs its `check()` and shuts it down again, and prints one
+line per plugin ([what it checks](plugins.md#operating)). Then, in a conversation, as an
+administrator, `!plugins` shows what the running process made of them, and a command of the
+plugin's own shows it works. The startup block has a `plugins:` line, `off (SABLE_PLUGINS_DIR is
+empty)` while the setting is empty and a count of what loaded otherwise
+(`2 active, 1 inactive, 1 failed (/plugins)`), and each failed plugin is a warning naming it and
+why.
+
 ## Operations
 
 ### What the log tells you
@@ -400,6 +462,7 @@ sable 0.9 starting
   alerting:       enabled, aliases: alerts
   attachments:    into /sable, up to 25 MB
   hooks:          /hook/komodo -> abcd1234
+  plugins:        off (SABLE_PLUGINS_DIR is empty)
   ignoring:       noisy-integration
   proxy trust:    127.0.0.1, ::1 - believed by sable's own uvicorn, and read by nothing else
   api docs:       disabled (SABLE_API_DOCS=true to serve them)
@@ -520,6 +583,9 @@ it is the only thing that is hard to recreate. For what to lock down, see the
 | Mentions ignored | Pick the account from Talk's mention list, or start the message with its user id. `SABLE_NEXTCLOUD_USER` has to be the id people mention. Set `SABLE_LOG_LEVEL=DEBUG` and watch for `message in <token> was not for me`. |
 | The ⁉️ reaction does nothing | Set `SABLE_LOG_LEVEL=DEBUG` and react again. Silence is by design when the reactor fails the usual checks (room, rate limit, `SABLE_LLM_USERS`, `SABLE_ASK_ADMINS_ONLY`), when the message's author is in `SABLE_IGNORE_USERS`, or when it is a system message; each leaves a log line. If no `received reaction` line appears at all, the reaction never arrived through the chat poll — see [future.md](future.md#talk-features-not-yet-used). |
 | The ⁉️ reaction says `I cannot find that message` | Talk answered 404 to the read-back: the message was deleted, or the account cannot see it. Other read failures are reported separately ([the replies](configuration.md#asking-about-a-message-by-reacting-to-it)). |
+| A plugin's command answers "I have no `x` command" | Deliberate for a room or a state the plugin does not serve: it must be active, with the conversation's token in its `access.rooms` and in `SABLE_ALLOWED_ROOMS` if that is set. `!plugins <name>` as an administrator shows its status, rooms and last error; a plugin with no rooms is `inactive: no rooms set` ([why a plugin may be hidden](plugins.md#who-may-run-a-plugin-command)). |
+| `!plugins` says `failed: …`, or a plugin is missing from it | The reason follows `failed:`. A plugin that is not listed at all is usually a file name sable does not recognise: the log and `sable --check` name settings files that are nearly right ([the layout rules](plugins.md#layout-on-disk)). |
+| `!plugins` says `switched off, retrying in N min` | The worker died or timed out more than three times in five minutes. After the wait one call tries it again ([the breaker](plugins.md#when-a-plugin-fails)). The log has the reason under `plugin <name>`. |
 | `/notify` returns 404 | `SABLE_NOTIFY_TOKEN` is unset, so the route is disabled. |
 | `/hook/<name>` returns 404 | No hook by that name, or `SABLE_HOOKS` is unset. A configured hook with a bad token answers 401 instead, so 404 means the name. |
 | `!reset is for administrators only` | The sender's Nextcloud user id is not in `SABLE_ADMIN_USERS`. The log line names who was refused. Display names are never matched, only user ids. |

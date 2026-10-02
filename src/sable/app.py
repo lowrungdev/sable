@@ -51,6 +51,7 @@ from .files import FilesError
 from .hooks import render, render_with_template
 from .limits import BodyLimitMiddleware
 from .mentions import defang_mentions
+from .plugins import PluginManager, PluginStartupError
 from .poller import Poller
 from .talk import TalkError
 
@@ -172,6 +173,9 @@ def create_app(
             else None
         )
 
+        manager = await load_plugins(config, app.state.bot)
+        app.state.plugins = manager
+
         # What is running, and with what. An operator reading only the first
         # dozen lines of the log should be able to tell whether the thing is
         # configured the way they meant.
@@ -228,6 +232,7 @@ def create_app(
             )
             or "(none)",
         )
+        log.info("  plugins:        %s", plugins_summary(config, manager))
         log.info(
             "  ignoring:       %s",
             ", ".join(config.ignore_users) if config.ignore_users else "(nobody)",
@@ -260,6 +265,8 @@ def create_app(
             # Settings sable cannot rule out but doubts. Said after the block, so
             # the reader has the resolved configuration in front of them.
             log.warning("%s", warning)
+        if manager is not None:
+            manager.log_status()
 
         if config.startup_check:
             await app.state.bot.check_nextcloud()
@@ -273,6 +280,10 @@ def create_app(
             log.info("sable %s stopping", __version__)
             # First, so nothing new is promised a reply while the rest drains.
             await poller.stop()
+            if manager is not None:
+                # Before the drain: a call waiting on a worker would otherwise hold
+                # the drain until its timeout. Whatever is in flight is failed.
+                await manager.aclose()
             if tasks:
                 # In flight or still waiting for a slot: both are tasks that were
                 # promised a 200, so both are worth draining.
@@ -551,6 +562,42 @@ def create_app(
         return Response(f"sable {__version__}\n", media_type="text/plain")
 
     return app
+
+
+async def load_plugins(config: Config, bot: Bot) -> PluginManager | None:
+    """Discover, validate and attach the plugins, if SABLE_PLUGINS_DIR is set.
+
+    A plugin that fails never stops the bot, unless SABLE_PLUGINS_STRICT says it
+    should: then startup is refused, with every failure named.
+    """
+    if not config.plugins_dir:
+        return None
+    manager = PluginManager(config)
+    try:
+        await manager.load_all(bot.registry)
+        failed = manager.failures()
+        if config.plugins_strict and failed:
+            manager.log_status()
+            message = "SABLE_PLUGINS_STRICT is on and " + "; ".join(
+                f"{record.display}: {record.reason}" for record in failed
+            )
+            # Said plainly here as well: uvicorn will print the exception as a
+            # traceback and exit with its own status for a failed startup. Reaching
+            # this means the plugins loaded at the preflight in __main__ and not now.
+            log.error("%s - refusing to start", message)
+            raise PluginStartupError(message)
+    except BaseException:
+        await manager.aclose()
+        raise
+    bot.attach_plugins(manager)
+    return manager
+
+
+def plugins_summary(config: Config, manager: PluginManager | None) -> str:
+    """The plugins line in the startup block."""
+    if manager is None:
+        return "off (SABLE_PLUGINS_DIR is empty)"
+    return manager.summary()
 
 
 #: Who the trusted-proxy list is actually a setting on. __main__ hands it to

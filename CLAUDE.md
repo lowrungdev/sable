@@ -39,6 +39,10 @@ task is done.
 - `poller.py` one long poll per allowed room. `events.py` Talk message to `TalkEvent`.
 - `bot.py` screening, routing, running commands and model calls. `commands.py` registry and the
   built-in commands.
+- `plugins.py` plugins, core side: discovery, the settings schema, `Worker` (one subprocess and
+  its protocol), `PluginManager` (validation, the access decision `allows`, what a plugin may
+  post, `!plugins`). `plugin_host.py` the worker process. `plugin_api.py` what a plugin imports.
+  Author and operator docs: [docs/plugins.md](docs/plugins.md); examples: `examples/plugins/`.
 - `llm.py` chat-completions client. `openwebui.py` Open WebUI backend (it runs the tool loop).
 - `talk.py` Talk client. `files.py` upload and share. `hooks.py` webhook payload to message.
 - `config.py` all settings. `limits.py` body caps. `ratelimit.py` per-person limit.
@@ -64,6 +68,8 @@ path-specific checks):
 4. Is it a trigger at all: prefix command, mention, AI room, or the ask reaction.
 5. Per-person rate limit (`SABLE_RATE_LIMIT`), counted before the checks below.
 6. Then by route. Reaction: `SABLE_ASK_ADMINS_ONLY`, then `SABLE_LLM_USERS`. Command:
+   a plugin's command first meets its plugin's access (`PluginManager.allows`: `NOT_HERE` is
+   answered as an unknown command, `NOT_YOU` as "not available to you"), then
    `SABLE_ADMIN_COMMANDS`/`SABLE_ADMIN_USERS`; a command that calls the model meets
    `SABLE_LLM_USERS` in `answer_with_llm`. Mention or AI-room message: `SABLE_LLM_USERS`.
 7. Tools only in rooms named by `SABLE_LLM_TOOL_ROOMS` (`LLMConfig.tools_in`).
@@ -76,6 +82,24 @@ Admin and model checks refuse bots inside the decision itself (`is_admin_actor`,
 and `/hook/{name}` answer 404 when not configured. `/healthz` is open unless
 `SABLE_HEALTH_TOKEN` is set. Tools are gated per room, and `SABLE_LLM_EXTRA_BODY` may not carry
 tool keys (`TOOL_BODY_KEYS` in `config.py`): that would bypass the room gate.
+
+**Plugins.** Each plugin runs in its own worker process and everything it sends is untrusted.
+Read [docs/plugins.md](docs/plugins.md) and the plugin section of
+[docs/security.md](docs/security.md) before touching them. The rules:
+
+- Never let plugin output or a plugin's settings reach a log, `!plugins`, `--check` or the chat
+  unredacted: text from a worker goes through `PluginRecord.redact` (`Worker._text`), settings
+  values are never printed, and what a plugin posts goes through `_ChatSink` (defanged, capped,
+  its own rooms only). Access is decided in `PluginManager.allows` before a worker is called.
+- `plugin_api.py` imports the standard library and nothing else from `sable`; `plugin_host.py`
+  imports nothing from `sable` but `plugin_api`. Both run in the worker, whose environment is
+  built from nothing (`worker_environment`): never pass `os.environ` through or add a `SABLE_*`.
+- Re-validate what a worker declares (`parse_declaration`); a malformed line is a protocol
+  violation. Each `Bot` has its own `Registry.copy()`, so never register into the module-level one.
+- Plugin tests start real processes and are POSIX-only (`posix_only` in `tests/plugin_helpers.py`);
+  use `tests/fake_worker.py` for misbehaviour and keep real-worker tests few and fast.
+  `examples/plugins` is linted by ruff, skipped by mypy, and loaded by `test_plugin_examples.py`.
+- A change to what a worker can do or see updates the two lists in `docs/security.md`.
 
 ## Conventions and gotchas
 

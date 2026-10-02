@@ -27,7 +27,9 @@ warning: SABLE_ALLOWED_ROOMS is empty, so sable follows every conversation it is
 ```
 
 The `warning:` lines are the [startup warnings](#startup-warnings); there are none when the
-configuration raises no doubts. A bad value exits with status 2 and a message naming the
+configuration raises no doubts. With `SABLE_PLUGINS_DIR` set it also starts every plugin that has
+rooms, asks it what it declares, and prints a line for each
+([what that checks](plugins.md#operating)). A bad value exits with status 2 and a message naming the
 variable: configuration errors are fatal by design, since a failed deploy is better than a
 service that silently ignores half its settings. The running process logs the resolved
 configuration again, in more detail than `--check`
@@ -128,7 +130,7 @@ tools off. An event meets them in this order:
 | 2 | Is the sender ignored? | `SABLE_IGNORE_USERS` | Nobody |
 | 3 | Is it addressed to sable? | The prefix, a mention, `SABLE_AI_ROOMS`, the ⁉️ reaction | Ordinary chatter is not, and costs nothing |
 | 4 | Has the sender set off too many triggers? | `SABLE_RATE_LIMIT` | 20 a minute each, administrators included |
-| 5 | May they run this command? | `SABLE_ADMIN_COMMANDS`, `SABLE_ADMIN_USERS` | Every command is open |
+| 5 | May they run this command? | For a plugin's command, first the plugin's own `access` in its settings file; then `SABLE_ADMIN_COMMANDS`, `SABLE_ADMIN_USERS` | A built-in command is open to everyone; a plugin's to anyone in its rooms |
 | 6 | May they make the model answer? | `SABLE_LLM_USERS` | Everyone |
 | 7 | Is this a room where the model may use tools? | `SABLE_LLM_TOOL_ROOMS` | Nowhere |
 
@@ -138,6 +140,14 @@ gates the model and nothing else: `!ping` still works for somebody it refuses. R
 room, not the person, so on its own it lets anyone in a tools room set the tools off; pair it with
 row 6 (the startup warning says so). `SABLE_ASK_ADMINS_ONLY` narrows the ⁉️ reaction further
 still, to the administrators.
+
+A command that comes from a [plugin](plugins.md) has one more gate in front of row 5, in the
+plugin's own settings file: the rooms it serves, optionally the users, and whether administrators
+only. In a room the plugin does not serve it is answered like a command that does not exist, and
+for somebody it does not serve, "`!x` is not available to you." Then row 5 applies to it as to any
+command, with its name or alias in `SABLE_ADMIN_COMMANDS` or `SABLE_NORMAL_COMMANDS`
+([in full](plugins.md#who-may-run-a-plugin-command)). A plugin's room must also be in
+`SABLE_ALLOWED_ROOMS` when that is set, since row 1 comes first.
 
 Between rows 2 and 3 the account's own messages and anything from another bot (Talk actor type
 `bots`) are dropped, so sable never answers itself or another assistant. A trigger counts against
@@ -350,7 +360,8 @@ can set theirs to yours, which would cost you the commands. Guests and bots have
 they are never administrators.
 
 Restricting a command restricts its aliases too — `reset` covers `!forget` — and naming an alias
-restricts the command behind it. `!help` lists only what the asker can run (so `!ai` and the
+restricts the command behind it. A plugin's commands and aliases can be named in the same lists,
+and `*` closes them with the rest. `!help` lists only what the asker can run (so `!ai` and the
 "mention me" line are left out for somebody outside `SABLE_LLM_USERS`), marking the rest
 `(admin)` for those who can; `!help reset` says who it is for, and running a command you may not
 answers "`!reset` is for administrators only." and logs a warning naming you.
@@ -641,6 +652,7 @@ trusted proxy wins, so anything a client made up sits to the left of its real ad
 why nginx's `$proxy_add_x_forwarded_for` is safe here (unless the list is `*`). A hostname, or a
 range with host bits set (`172.17.0.5/16`), is a startup error: uvicorn would keep it as a
 literal that never matches anything.
+
 ## Process and time
 
 | Variable | Default | Notes |
@@ -653,6 +665,25 @@ literal that never matches anything.
 
 There is no `SABLE_` setting for TLS and no way to disable certificate verification: trusting an
 internal CA is a deployment step ([how](deployment.md#if-your-nextcloud-uses-an-internal-or-self-signed-certificate)).
+
+## Plugins
+
+[Plugins](plugins.md) add commands from a directory of Python files, each run in a process of its
+own. These three settings are all the environment has to say about them: which directory, how long
+a call may take, and whether a plugin that fails to load stops startup. Everything else about a
+plugin (the rooms it serves, who may use it, what it is given) is in its own settings file,
+described in [plugins.md](plugins.md#the-settings-file), and a plugin does nothing anywhere until
+that file names a conversation.
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `SABLE_PLUGINS_DIR` | *(empty)* | The directory of plugins ([layout](plugins.md#layout-on-disk)). **Empty turns plugins off**: nothing is discovered and no process starts. Set, it must exist and be a directory, or startup fails, and it is only available on POSIX hosts. If sable can write to it, a startup warning says to mount it read-only ([why](security.md#plugins-and-the-process-boundary)). |
+| `SABLE_PLUGINS_TIMEOUT` | `30` | Seconds one plugin call may take. A call that runs out is failed, its process is killed, and the next call starts a new one. `1` to `600`. Loading a plugin and running its `check()` have 10 seconds each, whatever this says ([the limits](plugins.md#limits)). |
+| `SABLE_PLUGINS_STRICT` | `false` | A plugin that fails to load stops startup (exit status 2) instead of being skipped with a warning, and `sable --check` exits 2 too. Without it a failed plugin is named in the log and by `!plugins`, and the rest carry on ([failures](plugins.md#when-a-plugin-fails)). It has no effect while `SABLE_PLUGINS_DIR` is empty. |
+
+`!plugins` (administrators only, whatever `SABLE_ADMIN_COMMANDS` says) lists every plugin with its
+status, commands and rooms, and `!plugins <name>` shows one in detail. Neither prints a plugin's
+`settings`. The plugin worker's time zone is `SABLE_TIMEZONE`, or UTC when that is unset.
 
 ## Worked examples
 
@@ -790,6 +821,10 @@ it. Each says what to change.
 | `SABLE_POLL_TIMEOUT is …, but Talk holds a long poll for at most 60 seconds` | The value is clamped. |
 | `SABLE_LLM_BASE_URL … does not end in /api` | For the `openwebui` backend; every question will 404 unless a proxy rewrites the path. |
 | `SABLE_IGNORE_USERS holds whitespace in …` | That can only match a display name, which the person can change. Prefer the user id. |
+| `SABLE_PLUGINS_DIR=… is writable by this process` | A plugin is code that runs on this host. Mount the directory read-only. |
+| `SABLE_PLUGINS_STRICT has no effect while SABLE_PLUGINS_DIR is empty` | There are no plugins to fail. |
+| `plugin <name>: <room> is not in SABLE_ALLOWED_ROOMS, so sable never reads there and the plugin never runs there` | A plugin names a room sable does not follow. Add the token to `SABLE_ALLOWED_ROOMS`, or drop it from the plugin. |
+| `could not make sable's own memory unreadable to plugins (…)` | The protection that keeps a plugin from reading the app password out of sable's process is Linux-only and failed here. Run sable in a container, or on Linux ([security.md](security.md#plugins-and-the-process-boundary)). |
 
 ## Startup errors and what they mean
 
@@ -825,6 +860,9 @@ it. Each says what to change.
 | `SABLE_LLM_POLL_INTERVAL must be greater than zero` | For the `openwebui` backend; a zero would busy-loop against the task endpoint. |
 | `SABLE_MAX_HOOK_BYTES must be greater than zero` / `SABLE_MAX_UPLOAD_BYTES must be greater than zero` | Both also size the request body caps. |
 | `SABLE_TIMEZONE … is not an IANA time zone` | A name like `America/New_York`, not an abbreviation. |
+| `SABLE_PLUGINS_DIR … does not exist or is not a directory` | Mount the plugins directory at that path, or leave the setting empty. |
+| `SABLE_PLUGINS_DIR is not available on this platform` | Workers rely on POSIX process groups and resource limits. Run sable on Linux (a container is the usual way). |
+| `SABLE_PLUGINS_TIMEOUT must be between 1 and 600 seconds` | Pick a number of seconds in that range. |
 
 Runtime problems — 401s, 403s, silence — are in
 [deployment.md](deployment.md#troubleshooting).

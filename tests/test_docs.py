@@ -146,6 +146,9 @@ DOCUMENTED_DEFAULTS = {
     "SABLE_PORT": "port",
     "SABLE_LOG_LEVEL": "log_level",
     "SABLE_LOG_HEALTH_CHECKS": "log_health_checks",
+    "SABLE_PLUGINS_DIR": "plugins_dir",
+    "SABLE_PLUGINS_TIMEOUT": "plugins_timeout",
+    "SABLE_PLUGINS_STRICT": "plugins_strict",
 }
 
 #: The same, for settings that live on config.llm rather than on config.

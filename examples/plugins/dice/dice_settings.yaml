@@ -1,0 +1,19 @@
+# Settings for the dice plugin. The file name pairs it with dice.py: <name>_settings.yaml.
+# Reference: docs/plugins.md
+
+# false switches it off but keeps it listed in !plugins.
+enabled: true
+
+access:
+  # Conversation tokens (the last part of a conversation's URL), quoted. As shipped this is
+  # empty, which keeps the plugin INACTIVE: sable validates it and never runs it.
+  # REPLACE with your own, e.g.  rooms: ["a1b2c3d4"]
+  # A room must also be in SABLE_ALLOWED_ROOMS, if that is set.
+  rooms: []
+  # Nextcloud user ids. Empty means anyone in the rooms above.
+  users: []
+  # true limits it to SABLE_ADMIN_USERS.
+  admins_only: false
+
+# Handed to the plugin as ctx.settings. This plugin has none.
+settings: {}

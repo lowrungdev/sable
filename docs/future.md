@@ -119,6 +119,55 @@ override, but `answer_with_llm` does not pass one.
 Model output is posted verbatim. If prompt injection becomes a real concern rather than a
 theoretical one, the place to intervene is between the completion and the reply.
 
+## Plugins
+
+What [plugins](plugins.md) do not do yet, and what is known about doing it. The isolation items
+are the gaps listed in [security.md](security.md#plugins-and-the-process-boundary); each fix below
+is an idea that has not been tried here, and each would be Linux-specific.
+
+**Reload.** A changed plugin or settings file takes effect when sable restarts. The fix is to
+discover again and replace the workers, which has to settle what happens to commands registered
+by the old set, to calls in flight, and to a name that now clashes. Worth doing when restarting
+the bot to tweak a plugin hurts: a restart costs a few seconds in which nothing is read and
+anything said is not answered ([messages sent while sable is down](#talk-features-not-yet-used)).
+
+**A writable place for plugins.** A plugin can write `/tmp` and nothing else, which is gone when
+the container restarts and is shared with the `/notify` upload spool. A plugin that needs to
+remember something has to keep it elsewhere, in a service of its own. The fix is a directory per
+plugin, writable, outside the code directory, with a size cap; the cost is state that now has to
+be backed up, and a place a plugin can fill.
+
+**Pattern triggers.** Nothing in a plugin matches a message against a regular expression. A
+pattern an author wrote is untrusted input to the matcher: a pathological one can hold a thread
+for as long as it likes. The fixes are to run the match inside the worker, where the timeout
+already kills it, or to use a matching engine that cannot backtrack. Until one of those, there is
+no regex.
+
+**Asking the model.** A plugin cannot make sable call its language model. The right shape is a
+method on `Context` that goes through `answer_with_llm`, so that `SABLE_LLM_USERS` is asked of the
+person who triggered the call, the history rules apply, and the plugin never holds the API key.
+The open question is tools: a plugin in a room that is not a tools room must not be a way to use
+them.
+
+**Keeping a plugin out of files it does not need.** Plugins read whatever the sable user can, which
+includes other plugins' settings files, although a worker is handed its own settings over the pipe
+and never needs the file. Landlock (Linux 5.13 and later) lets a process give up access to paths
+for itself and its children without privileges, so a worker could be confined to its plugin
+directory, the interpreter and `/tmp`, which also closes the readable `.env`. It is called through
+`ctypes`, there is no standard library wrapper, and whether the container runtime's default
+seccomp profile lets it through is not something this was checked against. A newer kernel (6.7)
+adds rules for TCP connections, which would be the egress policy; before that, the network is the
+container's. A user per plugin would separate them more completely, and needs root at start or user
+namespaces, which the image deliberately does without.
+
+**Reaping without an init.** Orphans of a killed worker (what a plugin forked into a session of
+its own) reparent to PID 1, which is sable and does not reap them, so they stay zombies until the
+container restarts. An init would reap them, but it would hold the container's environment in a
+process a plugin can read ([security.md](security.md#plugins-and-the-process-boundary)), so
+`compose.yaml` has none. If sable marked itself a child subreaper (`PR_SET_CHILD_SUBREAPER`) the
+orphans would come to it, and it could reap them itself, with PID 1 staying non-dumpable. It needs
+care not to reap what asyncio is waiting for. Not tried here.
+
 ## Supply chain and image hygiene
 
 The lock file already gives reproducibility and hash verification for Python dependencies. These
@@ -162,7 +211,8 @@ fast and reliable, but nothing exercises a real Nextcloud. A compose-based test 
 throwaway instance would catch API drift that mocks cannot.
 
 `sable --check` prints less than the startup block does, and the gap keeps widening: eight
-settings against the block's twenty (twenty-one with the tools line). It has never named
+settings (and a line per plugin, when plugins are on) against the block's twenty-one (twenty-two
+with the tools line). It has never named
 attachments, hooks or the ignore list, and now also misses the allowed rooms, who may use the
 model, the rate limit, the concurrency ceiling and queue, the ask reaction, the API docs, the
 health check, the proxy trust and every tool the model can reach — most of what somebody runs

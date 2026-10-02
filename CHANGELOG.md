@@ -12,6 +12,25 @@ Format: `## <version>`, optionally followed by a date. Anything until the next
 
 ## Unreleased
 
+- **Plugins: add commands without changing sable.** Point `SABLE_PLUGINS_DIR` at a directory of
+  plugins, each a `<name>.py` with a `<name>_settings.yaml` beside it, and their `!commands`
+  appear in the conversations the settings file names. A plugin does nothing anywhere until it
+  names one, and can be limited to listed users or to administrators. Each plugin runs in a
+  worker process of its own, with an environment that holds no `SABLE_*`, memory, file and CPU
+  limits, and a per-call timeout (`SABLE_PLUGINS_TIMEOUT`); on Linux sable's own process is made
+  unreadable to it. A worker that crashes or hangs is restarted by its next call, and one that
+  keeps doing it (three restarts in five minutes) is switched off for five minutes, then given
+  one trial call. A plugin that fails to load is skipped and named in the log, or stops startup
+  with `SABLE_PLUGINS_STRICT`. `!plugins` (administrators) reports on every plugin, and
+  `sable --check` loads and validates them. This is a containment, not a sandbox: a plugin is code
+  that runs on your host as the sable user, so read the code you mount and mount it read-only
+  ([docs/plugins.md](docs/plugins.md),
+  [what it protects and what it does not](docs/security.md#plugins-and-the-process-boundary),
+  accepted risk 18). `compose.yaml` deliberately has no `init: true` (sable must stay PID 1, or a
+  plugin could read the app password from the init's environment), and its `pids_limit` and
+  `mem_limit` have to cover the workers. `pyyaml` is now a direct dependency.
+- **Two example plugins**, `!roll` and `!up`, in `examples/plugins`, kept working by a test that
+  loads them through the real plugin manager.
 - **One CI check script for every workflow.** `.forgejo/ci.sh` installs the
   pinned uv and the locked dependencies, then runs ruff, ruff format --check,
   mypy and pytest; `test.yml`, `build.yml` and `release.yml` all call it, so a
