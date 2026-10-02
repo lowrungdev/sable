@@ -41,7 +41,7 @@ def parse_target(raw: str) -> tuple[str, int]:
 
 
 def parse_cert_time(value: str) -> dt.datetime:
-    """Parse the format ssl's getpeercert() gives for notBefore/notAfter: 'Jun  1 12:00:00 2026 GMT'.
+    """Parse what getpeercert() gives for notBefore/notAfter: 'Jun  1 12:00:00 2026 GMT'.
 
     Always UTC in practice (OpenSSL only ever reports GMT here), so the trailing zone name
     is dropped rather than trusted to a libc-dependent %Z match.
@@ -57,9 +57,11 @@ def fetch_expiry(host: str, port: int) -> dt.datetime:
     API; run this off the event loop (see `cert`, which uses asyncio.to_thread).
     """
     context = ssl.create_default_context()
-    with socket.create_connection((host, port), timeout=CONNECT_TIMEOUT) as sock:
-        with context.wrap_socket(sock, server_hostname=host) as tls:
-            cert = tls.getpeercert()
+    with (
+        socket.create_connection((host, port), timeout=CONNECT_TIMEOUT) as sock,
+        context.wrap_socket(sock, server_hostname=host) as tls,
+    ):
+        cert = tls.getpeercert()
     # Only reachable with CERT_REQUIRED (create_default_context's own default), which is
     # exactly when getpeercert() is documented to return the decoded fields rather than {}.
     return parse_cert_time(cert["notAfter"])
@@ -83,7 +85,9 @@ async def cert(ctx: Context) -> str:
         # this container does not trust yet) is more useful here than anything built from
         # scratch, and it is exactly what a verified connection is for: this plugin never
         # has to parse a certificate it would not otherwise trust.
-        raise PluginError(f"{host}:{port}'s certificate does not verify: {exc.verify_message}")
+        raise PluginError(
+            f"{host}:{port}'s certificate does not verify: {exc.verify_message}"
+        ) from exc
     except TimeoutError:
         raise PluginError(f"{host}:{port} did not answer within {CONNECT_TIMEOUT:.0f}s.") from None
     except socket.gaierror as exc:
@@ -95,6 +99,7 @@ async def cert(ctx: Context) -> str:
 
     days = (expiry - dt.datetime.now(dt.UTC)).days
     when = expiry.date().isoformat()
+    plural = "s" if days != 1 else ""
     if days <= warn_days:
-        return f"⚠️ **{host}**'s certificate expires in **{days} day{'s' if days != 1 else ''}** ({when})."
+        return f"⚠️ **{host}**'s certificate expires in **{days} day{plural}** ({when})."
     return f"**{host}**'s certificate is good for {days} more days (until {when})."
