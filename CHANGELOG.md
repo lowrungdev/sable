@@ -57,8 +57,8 @@ Format: `## <version>`, optionally followed by a date. Anything until the next
   accepted risk 18). `compose.yaml` deliberately has no `init: true` (sable must stay PID 1, or a
   plugin could read the app password from the init's environment), and its `pids_limit` and
   `mem_limit` have to cover the workers. `pyyaml` is now a direct dependency.
-- **Two example plugins**, `!roll` and `!up`, in `examples/plugins`, kept working by a test that
-  loads them through the real plugin manager.
+- **Three example plugins**, `!roll`, `!up` and `!cert`, in `examples/plugins`, kept working by a
+  test that loads them through the real plugin manager.
 - **One CI check script for every workflow.** `.forgejo/ci.sh` installs the
   pinned uv and the locked dependencies, then runs ruff, ruff format --check,
   mypy and pytest; `test.yml`, `build.yml` and `release.yml` all call it, so a

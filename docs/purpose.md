@@ -149,7 +149,7 @@ Files go up by WebDAV `PUT` and into the conversation by a share with `shareType
 | You want to | Look at |
 | --- | --- |
 | Add a command | [`commands.py`](../src/sable/commands.py), one decorator |
-| Add a command without changing sable | A plugin: [plugins.md](plugins.md), with [two examples](../examples/plugins) |
+| Add a command without changing sable | A plugin: [plugins.md](plugins.md), with [three examples](../examples/plugins) |
 | Change when the model answers | `Bot._route` and `Bot.handle` in [`bot.py`](../src/sable/bot.py) |
 | Keep history across restarts | `History` in [`history.py`](../src/sable/history.py), one small class |
 | Support a backend that isn't OpenAI-shaped | A sibling of [`openwebui.py`](../src/sable/openwebui.py) answering `complete(messages) -> str`, and one branch in `llm_client` |

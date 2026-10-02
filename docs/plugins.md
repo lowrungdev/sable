@@ -367,8 +367,10 @@ async def weather(ctx: Context) -> str | None:
     return f"Sunny in {city}."
 ```
 
-[`examples/plugins`](../examples/plugins) holds two that do real work: `!roll` (input checking,
-`PluginError`) and `!up` (settings, `check()`, outbound HTTP).
+[`examples/plugins`](../examples/plugins) holds three that do real work: `!roll` (input checking,
+`PluginError`), `!up` (settings, `check()`, outbound HTTP) and `!cert` (blocking I/O via
+`asyncio.to_thread`, a verified TLS handshake, a failed verification's own reason surfaced rather
+than a crash).
 
 `sable.plugin_api` is the only part of sable a plugin is written against. It needs nothing but the
 standard library. A plugin does not need to be installed or built: the file is imported from where

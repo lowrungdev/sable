@@ -11,10 +11,10 @@ $EDITOR CHANGELOG.md               # add notes under ## Unreleased
 git commit -am "..." && git push origin dev
 
 # 2. when you are ready to release, name the version
-$EDITOR pyproject.toml             # version = "0.9"
-$EDITOR CHANGELOG.md               # rename ## Unreleased to ## 0.9
+$EDITOR pyproject.toml             # version = "1.1"
+$EDITOR CHANGELOG.md               # rename ## Unreleased to ## 1.1
 uv lock                            # the lock records the project version too
-git commit -am "Release 0.9" && git push origin dev
+git commit -am "Release 1.1" && git push origin dev
 
 # 3. integrate into the history
 git switch main && git merge --no-ff dev && git push origin main
@@ -23,7 +23,7 @@ git switch main && git merge --no-ff dev && git push origin main
 git switch release && git merge --ff-only main && git push origin release
 ```
 
-Step 4 is the release. Forgejo runs the tests, pushes `sable:0.9`, `sable:latest` and a tag
+Step 4 is the release. Forgejo runs the tests, pushes `sable:1.1`, `sable:latest` and a tag
 named after the commit, and creates a Forgejo Release with the tag, the changelog notes and the
 wheel attached, which is what puts it in the repository sidebar. Do not skip the `uv lock`: the
 lock records the project's own version, so `uv sync --locked` refuses a stale one and the release
@@ -44,9 +44,9 @@ main     ────●──────────────●───�
                             \         \
 release  ────────────────────●─────────●──   push → publish
                              │         │
-                            v0.8     v0.9    ← Releases, in the sidebar
+                            v1.0     v1.1    ← Releases, in the sidebar
                              │         │
-registry            sable:0.8   sable:0.9, sable:latest
+registry            sable:1.0   sable:1.1, sable:latest
 ```
 
 ### Why `--no-ff` into `main` but `--ff-only` into `release`
@@ -143,12 +143,12 @@ and leaves that Release untouched.
 
 | Artifact | Where |
 | --- | --- |
-| `…/sable:0.9` | Packages: that release. What a server should pin to. |
+| `…/sable:1.1` | Packages: that release. What a server should pin to. |
 | `…/sable:latest` | Packages: the newest release. |
 | `…/sable:<commit>` | Packages: the full commit sha it was built from, so any image maps back to its source. |
 | `…/sable@sha256:…` | Packages: the digest, printed in the run summary. Immutable, and the only way to pin one exact build. |
-| Release `v0.9` and its git tag | Releases, in the repository sidebar |
-| `sable-0.9-py3-none-any.whl` | Attached to that Release, when the wheel builds |
+| Release `v1.1` and its git tag | Releases, in the repository sidebar |
+| `sable-1.1-py3-none-any.whl` | Attached to that Release, when the wheel builds |
 
 The wheel is archival only, so its step is `continue-on-error`: if it fails, the run warns and the
 release is still created without it.
@@ -158,8 +158,8 @@ To get from a running image back to its source, the workflow stamps the commit i
 the tag list in Packages names the source directly; or use the git tag the Release created:
 
 ```bash
-docker image inspect forgejo.subversive.link/subversive/sable:0.9 --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'
-git checkout v0.9
+docker image inspect forgejo.subversive.link/subversive/sable:1.1 --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'
+git checkout v1.1
 ```
 
 ### What it needs configured
