@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sable"
-version = "0.9"
+version = "1.0"
 description = "A Nextcloud Talk assistant that runs as a user account: command handling, an OpenAI-compatible LLM assistant, and an inbound alerting endpoint."
 readme = "README.md"
 license = "MIT"
