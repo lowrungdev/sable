@@ -1,0 +1,30 @@
+# Settings for the uptime plugin. The file name pairs it with uptime.py: <name>_settings.yaml.
+# Reference: docs/plugins.md
+
+enabled: true
+
+access:
+  # Conversation tokens (the last part of a conversation's URL), quoted. As shipped this is
+  # empty, which keeps the plugin INACTIVE: sable validates it and never runs it.
+  # REPLACE with your own, e.g.  rooms: ["a1b2c3d4"]
+  # A room must also be in SABLE_ALLOWED_ROOMS, if that is set.
+  rooms: []
+  # Nextcloud user ids. Empty means anyone in the rooms above.
+  users: []
+  admins_only: false
+
+# Handed to the plugin as ctx.settings. Every value below is a PLACEHOLDER: the plugin's
+# check() refuses to start while the example hosts or the example token are still here.
+settings:
+  # Seconds to wait for each service, 1 to 20 (sable's own SABLE_PLUGINS_TIMEOUT also
+  # applies to the whole command).
+  timeout: 5
+  services:
+    - name: nextcloud
+      url: "https://cloud.example.org/status.php"
+    - name: grafana
+      url: "https://grafana.example.org/api/health"
+      # Optional. Sent as a Bearer token to this service only. Anything written in this
+      # file can be read by every other plugin on this host: use a token that can only
+      # read a health endpoint, or leave it out.
+      token: "REPLACE-ME"

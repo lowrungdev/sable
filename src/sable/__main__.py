@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import os
 import sys
 from pathlib import Path
 
 from . import __version__
+from .commands import registry
 from .config import Config, ConfigError
 from .logs import quiet_health_checks
+from .plugins import check_plugins
 
 
 def load_dotenv(path: Path) -> int:
@@ -85,7 +88,29 @@ def main(argv: list[str] | None = None) -> int:
         for warning in config.warnings:
             # The same doubts the server logs after its banner.
             print(f"warning: {warning}")
+        if config.plugins_dir:
+            # The full handshake: every enabled plugin with rooms is started, asked
+            # what it declares and what its check says, and shut down again.
+            lines, refused = asyncio.run(check_plugins(config, registry.copy()))
+            print("\n".join(lines))
+            if refused:
+                print("error: SABLE_PLUGINS_STRICT is on and a plugin failed", file=sys.stderr)
+                return 2
         return 0
+
+    if config.plugins_dir and config.plugins_strict:
+        # Before the server starts, so that a plugin that fails to load stops it
+        # with the same exit status as any other configuration error. (The same
+        # check runs again in the server's own startup, which is what protects a
+        # server started some other way.)
+        lines, refused = asyncio.run(check_plugins(config, registry.copy()))
+        if refused:
+            print(
+                "configuration error: SABLE_PLUGINS_STRICT is on and a plugin failed",
+                file=sys.stderr,
+            )
+            print("\n".join(lines), file=sys.stderr)
+            return 2
 
     import uvicorn
 

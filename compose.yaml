@@ -39,12 +39,20 @@ services:
     # setuid binaries and the like cannot gain privileges.
     security_opt:
       - no-new-privileges:true
-    # A runaway or a fork bomb stops well short of the host's limits.
+    # A runaway or a fork bomb stops well short of the host's limits. With plugins
+    # on, every plugin is a process of its own (plus whatever it starts), so these
+    # two limits have to cover them as well as sable itself.
     pids_limit: 256
     # mem_limit is the form plain `docker compose up` always honours. It must
-    # cover the /tmp tmpfs above when full.
+    # cover the /tmp tmpfs above when full, and the plugin workers' own memory.
     mem_limit: 768m
-    # No `init: true`: sable starts no child processes to reap.
+    # Deliberately no `init: true`. sable is PID 1 and marks itself non-dumpable,
+    # so a plugin worker (same uid) cannot read its environment, the app password
+    # included. The cost: a plugin that forks, then gets killed, leaves orphaned
+    # grandchildren that become zombies until the container restarts, bounded by
+    # pids_limit. An init (`init: true`, `docker run --init`) would reap them, but
+    # it is a PID 1 holding the full environment that a same-uid plugin can read:
+    # do not use one with plugins you do not trust (docs/security.md).
 
     env_file:
       - path: .env
@@ -59,6 +67,11 @@ services:
       # differs (RHEL and Fedora: /etc/pki/tls/certs); a missing path becomes an
       # empty directory and every TLS connection fails.
       - ${SABLE_HOST_CA_DIR:-/etc/ssl/certs}:/etc/ssl/certs:ro
+
+      # ===================== Plugins ======================================
+      # A directory of plugins, READ-ONLY: a plugin is code that runs in this
+      # container. Uncomment it together with SABLE_PLUGINS_DIR below.
+      # - ./plugins:/plugins:ro
 
     environment:
       # Points Python at the mounted bundle (httpx would otherwise use certifi).
@@ -265,6 +278,17 @@ services:
       #   SABLE_TRUSTED_PROXIES: "172.17.0.0/16"
       # "" trusts nobody.
       # SABLE_TRUSTED_PROXIES: "127.0.0.1,::1"
+
+      # ===================== Plugins ======================================
+      # The directory of plugins, as mounted above. EMPTY TURNS PLUGINS OFF. A
+      # plugin runs nowhere until its settings file lists conversation tokens.
+      # SABLE_PLUGINS_DIR: "/plugins"
+
+      # Seconds one plugin call may take before its worker is killed; 1 to 600.
+      # SABLE_PLUGINS_TIMEOUT: "30"
+
+      # A plugin that fails to load stops startup instead of being skipped.
+      # SABLE_PLUGINS_STRICT: "false"
 
       # ===================== Process ======================================
       # Leave the bind address alone: it is the container's own interface, and

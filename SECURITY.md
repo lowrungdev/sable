@@ -24,6 +24,11 @@ Do not put tokens, app passwords or other secrets in an issue. Redact them from 
   into logs, replies or responses.
 - Request handling that can be made to fail or exhaust the process (oversized bodies,
   unbounded queues, parsing errors).
+- A way past the plugin isolation: a plugin reading the app password or another `SABLE_*`
+  secret from sable's process or its worker's environment, posting outside its rooms, or getting
+  around the limits the core enforces on it. That a plugin runs as the same user, can reach the
+  network and can read the files that user can read is documented and accepted, not a
+  vulnerability ([plugins and the process boundary](docs/security.md#plugins-and-the-process-boundary)).
 
 Risks the design accepts on purpose, such as sable holding a whole user's credential, are
 listed in [docs/security.md](docs/security.md) together with the threat model. Read it

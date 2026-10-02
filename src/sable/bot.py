@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
@@ -12,6 +13,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from .commands import (
+    Access,
     Command,
     CommandError,
     Context,
@@ -27,6 +29,7 @@ from .history import History
 from .llm import LLMClient, LLMError
 from .mentions import defang_mentions
 from .openwebui import OpenWebUIClient
+from .plugins import PhraseHit, PluginFailure, PluginManager
 from .ratelimit import ALLOWED, FIRST_REFUSAL, RateLimiter
 from .state import ConnectionState
 from .talk import TalkClient, TalkError
@@ -65,10 +68,13 @@ NOT_ALLOWED = "You are not allowed to use the assistant."
 class _Route:
     """What an event is a trigger for. See Bot._route."""
 
-    kind: str  # "reaction", "command" or "llm"
+    kind: str  # "reaction", "command", "llm" or "phrase"
     mentioned: bool = False
     remainder: str = ""
     command: tuple[str, str] | None = None
+    #: The plugin phrase handlers this message would fire. Only ever set for a plain
+    #: message: never for a command, never for one addressed to the bot.
+    phrases: tuple[PhraseHit, ...] = ()
 
 
 class ModelNotAllowed(CommandError):  # noqa: N818 - public name, read as a refusal rather than an error
@@ -96,7 +102,11 @@ class Bot:
         command_registry: Registry | None = None,
     ) -> None:
         self.config = config
-        self.registry = command_registry or registry
+        #: This bot's own commands: a copy, so that plugins registered here (or a
+        #: command a test adds) never reach the module-level built-ins.
+        self.registry = (command_registry or registry).copy()
+        #: The plugin manager, when SABLE_PLUGINS_DIR is set. See attach_plugins.
+        self.plugins: PluginManager | None = None
         self.history = history or History(config.history_turns, config.history_ttl)
         self._limiter = RateLimiter(config.rate_limit)
         self._ask_key = emoji_key(config.ask_reaction)
@@ -130,6 +140,8 @@ class Bot:
         self._mention_anywhere_re = re.compile(rf"(?<!\w)@(?:{alternatives})\b", re.IGNORECASE)
 
     async def aclose(self) -> None:
+        if self.plugins is not None:
+            await self.plugins.aclose()
         await self._llm.aclose()
         if self._owns_http:
             await self._http.aclose()
@@ -141,8 +153,42 @@ class Bot:
         return self.config.llm.enabled
 
     def admin_only(self, command: Command) -> bool:
-        """Is this command restricted to SABLE_ADMIN_USERS?"""
+        """Is this command restricted to SABLE_ADMIN_USERS?
+
+        ``!plugins`` always is, whatever SABLE_ADMIN_COMMANDS says. So is a plugin
+        command whose plugin is ``admins_only``: it is the same question asked in
+        the plugin's own settings.
+        """
+        if command.plugin:
+            if self.plugins is not None and self.plugins.admins_only(command.plugin):
+                return True
+        elif command.name == "plugins":
+            return True
         return self.config.admin_only(command.name, *command.aliases)
+
+    def attach_plugins(self, manager: PluginManager) -> None:
+        """Take a loaded plugin manager and register its commands on this bot."""
+        self.plugins = manager
+        manager.is_admin = self.is_admin_actor
+        # Schedules have no triggering event to post through: the manager posts
+        # their dispatches straight through us, the same ChatPort a command or a
+        # phrase handler's actions already go through.
+        manager.port = self
+        for command in manager.commands():
+            self.registry.add(command)
+
+    def plugin_access(self, command: Command, event: TalkEvent) -> Access:
+        """May this person run this command here, as far as its plugin says?
+
+        Built-ins are always OK: who may run them is settled by the rest of the
+        access layers. A plugin command whose plugin is not loaded (no manager)
+        is not here at all.
+        """
+        if not command.plugin:
+            return Access.OK
+        if self.plugins is None:
+            return Access.NOT_HERE
+        return self.plugins.allows(command.plugin, event)
 
     def is_admin_actor(self, event: TalkEvent) -> bool:
         """May whoever caused this event use the restricted paths?
@@ -323,14 +369,28 @@ class Bot:
         command = split_command(remainder, self.config.command_prefix)
         in_ai_room = self.config.ai_room_allowed(event.room_token)
 
-        if command is None and not mentioned and not in_ai_room:
+        # A plain message, which is what plugin phrases listen to. Not a command and
+        # not addressed to us: those have their own paths, and a phrase firing on top
+        # of "!ping" or "@sable ..." would answer a question nobody asked twice. Only
+        # peeked at here (nothing is consumed), so this is safe for would_handle too.
+        # In an AI room the model answers every message, and a phrase handler may
+        # fire as well: both are for the same message, each its own decision.
+        phrases: tuple[PhraseHit, ...] = ()
+        if command is None and not mentioned and self.plugins is not None:
+            phrases = self.plugins.phrase_hits(event)
+
+        if command is None and not mentioned and not in_ai_room and not phrases:
             log.debug(
                 "message in %s (%r) was not for me - no prefix, no mention, and not an AI room",
                 event.room_token,
                 event.room_name,
             )
             return None
-        return _Route("command" if command is not None else "llm", mentioned, remainder, command)
+        if command is not None:
+            return _Route("command", mentioned, remainder, command)
+        if mentioned or in_ai_room:
+            return _Route("llm", mentioned, remainder, None, phrases)
+        return _Route("phrase", phrases=phrases)
 
     def would_handle(self, event: TalkEvent) -> bool:
         """Would ``handle`` do any work for this event? Synchronous and free of
@@ -348,15 +408,102 @@ class Bot:
         route = self._route(event)
         if route is None:
             return
-        # A trigger from here on: it will run a command or ask the model.
+        if route.kind == "phrase":
+            # An ambient phrase match is never a trigger the per-person limit should
+            # see: it costs the sender nothing, so a broad, cooldown-0 phrase can
+            # never exhaust somebody's budget for a real command. Cooldowns still
+            # start now, with nothing awaited since the route was decided, so that
+            # two handlers cannot both be sent the same message in the same room.
+            firing = self._claim_phrases(route.phrases)
+            if firing:
+                await self._run_phrases(event, firing)
+            return
+        # Everything else - a command, a mention, a reaction, a plain message in an
+        # AI room - costs exactly one token, whatever it triggers alongside it.
         if self._rate_limited(event):
             return
+        firing = self._claim_phrases(route.phrases)
         if route.kind == "reaction":
             await self._run_reaction_query(event)
         elif route.command is not None:
             await self._run_command(event, *route.command)
+        elif firing:
+            # An AI-room message with no mention: the model answers and any phrase
+            # handler fires alongside it, concurrently, for the one token above.
+            outcomes = await asyncio.gather(
+                self._run_llm_reply(event, route.remainder, explicit=route.mentioned),
+                self._run_phrases(event, firing),
+                return_exceptions=True,
+            )
+            failures = [outcome for outcome in outcomes if isinstance(outcome, BaseException)]
+            for extra in failures[1:]:
+                # Only the first failure can be raised; the rest must not vanish.
+                log.error("a concurrent phrase handler or model reply also failed", exc_info=extra)
+            if failures:
+                raise failures[0]
         else:
             await self._run_llm_reply(event, route.remainder, explicit=route.mentioned)
+
+    def _claim_phrases(self, hits: tuple[PhraseHit, ...]) -> list[PhraseHit]:
+        """Start the cooldown of each phrase handler about to be called."""
+        manager = self.plugins
+        if manager is None:
+            return []
+        return [hit for hit in hits if manager.claim_phrase(hit)]
+
+    async def _run_phrases(self, event: TalkEvent, hits: list[PhraseHit]) -> None:
+        """Call the phrase handlers, together; one failing leaves the others alone."""
+        await asyncio.gather(*(self._run_phrase(event, hit) for hit in hits))
+
+    async def _run_phrase(self, event: TalkEvent, hit: PhraseHit) -> None:
+        """One phrase handler. Nobody asked it anything, so whatever goes wrong is for
+        the log and never for the room: no crash notice, no plugin error, no reply.
+        Never raises: this runs inside a plain ``asyncio.gather`` alongside other
+        handlers (and, in an AI room, the model reply), with none of them cancelled
+        if one raises - so nothing here may be let to.
+        """
+        manager = self.plugins
+        if manager is None:
+            return
+        log.info(
+            "%s triggered phrase handler %s/%s in %s",
+            self._who(event),
+            hit.plugin,
+            hit.handler,
+            event.room_token,
+        )
+        try:
+            reply = await manager.run_phrase(hit, event, self)
+        except CommandError as exc:
+            # The handler's own PluginError. For a command this is an answer shown
+            # as the plugin wrote it, unredacted; here it only ever reaches the log,
+            # so it gets the same treatment as any other worker-authored text: one
+            # line, and the plugin's own settings values blanked. Without that, a
+            # phrase handler could inject a fake log line with an embedded newline,
+            # or quote a secret verbatim into the log, neither of which chat ever
+            # sees but a search of the log would.
+            log.info(
+                "plugin %s: phrase handler %s said: %s",
+                hit.plugin,
+                hit.handler,
+                manager.log_safe(hit.plugin, str(exc)),
+            )
+            return
+        except PluginFailure as exc:
+            log.warning("plugin %s: phrase handler %s failed: %s", hit.plugin, hit.handler, exc)
+            return
+        except Exception:
+            log.exception("plugin %s: phrase handler %s crashed", hit.plugin, hit.handler)
+            return
+        if reply:
+            try:
+                await self._safe_reply(event, reply)
+            except Exception:
+                log.exception(
+                    "plugin %s: phrase handler %s's reply could not be posted",
+                    hit.plugin,
+                    hit.handler,
+                )
 
     def _rate_limited(self, event: TalkEvent) -> bool:
         """Count this trigger against its sender; True means drop it, silently.
@@ -379,13 +526,29 @@ class Bot:
 
     async def _run_command(self, event: TalkEvent, name: str, args: str) -> None:
         command = self.registry.get(name)
-        if command is None:
+        access = Access.OK if command is None else self.plugin_access(command, event)
+        if command is None or access is Access.NOT_HERE:
+            # A plugin command in a room, or for a person, its plugin does not
+            # serve is answered exactly like one that does not exist, hint
+            # included: nothing here says the plugin is installed.
             log.debug("unknown command %r in %s", name, event.room_token)
             if self.config.unknown_command_hint:
                 await self._safe_reply(
                     event,
                     f"I have no `{name}` command. Try `{self.config.command_prefix}help`.",
                 )
+            return
+
+        if access is Access.NOT_YOU:
+            log.info(
+                "refused %s%s for %s - not allowed by its plugin",
+                self.config.command_prefix,
+                command.name,
+                self._who(event),
+            )
+            await self._safe_reply(
+                event, f"`{self.config.command_prefix}{command.name}` is not available to you."
+            )
             return
 
         if self.admin_only(command) and not self.is_admin_actor(event):
@@ -415,7 +578,7 @@ class Bot:
         except CommandError as exc:
             await self._safe_reply(event, str(exc))
             return
-        except (LLMError, TalkError, httpx.HTTPError) as exc:
+        except (LLMError, TalkError, httpx.HTTPError, PluginFailure) as exc:
             log.warning("command %s failed: %s", command.name, exc)
             await self._report(event, str(exc))
             return
@@ -675,17 +838,43 @@ class Bot:
         return await self.talk.send_message(room_token, message, silent=silent, reply_to=reply_to)
 
     async def _safe_reply(
-        self, event: TalkEvent, message: str, *, reply_to: int | None = None
-    ) -> None:
+        self,
+        event: TalkEvent,
+        message: str,
+        *,
+        reply_to: int | None = None,
+        silent: bool = False,
+    ) -> bool:
         """Reply, treating a failed post as a log line rather than a crash.
 
         Nextcloud being unreachable is not this handler's problem to solve, and
-        an exception here would only surface as a stray traceback.
+        an exception here would only surface as a stray traceback. True if the
+        message was posted.
         """
         try:
-            await self.reply(event, message, reply_to=reply_to)
+            await self.reply(event, message, reply_to=reply_to, silent=silent)
         except (TalkError, httpx.HTTPError, ValueError) as exc:
             log.warning("could not post to %s: %s", event.room_token, exc)
+            return False
+        return True
+
+    # -- on behalf of plugins ----------------------------------------------- #
+    # The plugin manager has already limited what a plugin may ask for; these
+    # only carry it out, and never raise for a Talk failure.
+
+    async def plugin_reply(self, event: TalkEvent, text: str, *, silent: bool = False) -> bool:
+        return await self._safe_reply(event, text, silent=silent)
+
+    async def plugin_send(self, room: str, text: str, *, silent: bool = False) -> bool:
+        try:
+            await self.send(room, defang_mentions(text), silent=silent)
+        except (TalkError, httpx.HTTPError, ValueError) as exc:
+            log.warning("could not post to %s: %s", room, exc)
+            return False
+        return True
+
+    async def plugin_react(self, event: TalkEvent, emoji: str) -> bool:
+        return await self.talk.try_react(event.room_token, event.message_id, emoji)
 
     async def _report(self, event: TalkEvent, detail: str) -> None:
         if not self.config.report_errors:

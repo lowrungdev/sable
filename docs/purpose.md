@@ -16,9 +16,11 @@ assistant already in it.
 ## What it does
 
 **Commands.** A prefix router over a registry, `!` by default. It ships with `!help`, `!ping`,
-`!whoami`, `!ai`, `!reset` and `!version`, and a new one is a decorated async function that
-returns Markdown. This is the seam most people will use; the rest of the bot exists so that
-writing a command is boring.
+`!whoami`, `!ai`, `!reset` and `!version` (and `!plugins`, for administrators), and a new one is a
+decorated async function that returns Markdown. This is the seam most people will use; the rest of
+the bot exists so that writing a command is boring. A command can also be added without changing
+sable: a plugin is a Python file and a settings file in a directory, run in a process of its own
+and limited to the rooms its settings name ([plugins.md](plugins.md)).
 
 **An assistant.** Mention the account and it answers through any endpoint that speaks OpenAI's
 `/chat/completions` shape, keeping a short rolling history per conversation. React to a message
@@ -82,11 +84,16 @@ Beyond that trade:
   a conversation is Talk's decision, made by whoever invites it.
 - **Not multi-tenant:** one account, one password, one Nextcloud. Run a second instance with a
   second account if you need a second assistant, since they are small.
+- **No sandbox for plugins.** A plugin runs in a process of its own with no secrets in its
+  environment, and the core checks everything it says, but it is the same user in the same
+  container with the network open. That contains a crash and the loss of the password; it does
+  not make hostile code safe, so read what you mount
+  ([what it protects and what it does not](security.md#plugins-and-the-process-boundary)).
 
 ## How it is built
 
 ```
-Nextcloud Talk ◀── long polls, as a user ──────── sable ──┬──▶ command handler ──┐
+Nextcloud Talk ◀── long polls, as a user ──────── sable ──┬──▶ commands/plugins ─┐
    (outbound only)                                        │                      │
                    Prometheus/CI ──POST /notify──▶ ───────┼──▶ model backend ────┤
           Komodo/Grafana ──POST /hook/{name}──▶ ──────────┤   (or Open WebUI,    │
@@ -108,10 +115,18 @@ lets it tell a real mention from a typed name, and ignore its own replies and an
 actor Talk marks as a bot when they come back down the poll, so it cannot loop with itself or
 with another assistant in the room.
 
-*Configuration is environment variables and nothing else.* No file format to learn, no parser to
-maintain, and it drops straight into a container, a systemd unit or a `.env` file. `sable
---check` prints what it resolved to and exits, so a bad configuration fails at deploy time
-rather than on the first message.
+*Plugins are processes, not imports.* A command that somebody else wrote runs in a worker process
+of its own, which sable starts with an empty environment, talks to over a pipe, and kills if it
+hangs. An import into sable's own process would have put the app password within the plugin's
+reach, and one bad plugin could take the bot down with it. The price is a process per plugin and
+a narrow API instead of the whole bot; what the arrangement does and does not guard against is in
+[security.md](security.md#plugins-and-the-process-boundary).
+
+*Configuration is environment variables, and a settings file per plugin.* No file format to
+learn for sable itself, no parser to maintain, and it drops straight into a container, a systemd
+unit or a `.env` file. `sable --check` prints what it resolved to and exits, so a bad
+configuration fails at deploy time rather than on the first message. A plugin's own settings, the
+one thing that does not fit in an environment variable, sit in a YAML file beside it.
 
 *Everything is an explicit seam.* `Bot` takes its HTTP client, model client, history and command
 registry as constructor arguments. That is why the tests cover every endpoint end to end with no
@@ -134,6 +149,7 @@ Files go up by WebDAV `PUT` and into the conversation by a share with `shareType
 | You want to | Look at |
 | --- | --- |
 | Add a command | [`commands.py`](../src/sable/commands.py), one decorator |
+| Add a command without changing sable | A plugin: [plugins.md](plugins.md), with [two examples](../examples/plugins) |
 | Change when the model answers | `Bot._route` and `Bot.handle` in [`bot.py`](../src/sable/bot.py) |
 | Keep history across restarts | `History` in [`history.py`](../src/sable/history.py), one small class |
 | Support a backend that isn't OpenAI-shaped | A sibling of [`openwebui.py`](../src/sable/openwebui.py) answering `complete(messages) -> str`, and one branch in `llm_client` |
@@ -143,7 +159,7 @@ Files go up by WebDAV `PUT` and into the conversation by a share with `shareType
 
 ## Further reading
 
-[configuration.md](configuration.md) documents every setting, [deployment.md](deployment.md)
-covers running it for real, [security.md](security.md) the trust boundaries and the risks that
-are accepted rather than solved, and [future.md](future.md) the known limitations and what it
-would take to lift them. [CONTRIBUTING.md](../CONTRIBUTING.md) is the place to start changing it.
+[configuration.md](configuration.md) documents every setting, [plugins.md](plugins.md) the
+plugins, [deployment.md](deployment.md) covers running it for real, [security.md](security.md)
+the trust boundaries and the risks that are accepted rather than solved, and
+[future.md](future.md) the known limitations and what it would take to lift them. [CONTRIBUTING.md](../CONTRIBUTING.md) is the place to start changing it.

@@ -12,10 +12,11 @@ matters, the app password for that account, which lets it read every conversatio
 in, post and react as it, and read and write that user's Files. It optionally holds a token that
 lets other systems post alerts and an API key for a model backend.
 
-It makes outbound connections only, to Nextcloud and to the model backend. Nothing is accepted
-from Nextcloud unprompted: chat arrives as the response to sable's own requests, so there is no
-inbound endpoint to forge or redirect, and it trusts what Nextcloud's chat API returns over TLS
-and checks it no further. The only routes it serves are `/notify`, `/hook/{name}`, `/healthz`
+It makes outbound connections only, to Nextcloud and to the model backend (and, if you run
+[plugins](#plugins-and-the-process-boundary), to wherever a plugin sends things). Nothing is
+accepted from Nextcloud unprompted: chat arrives as the response to sable's own requests, so there
+is no inbound endpoint to forge or redirect, and it trusts what Nextcloud's chat API returns over
+TLS and checks it no further. The only routes it serves are `/notify`, `/hook/{name}`, `/healthz`
 and `/`.
 
 The three things an attacker would want are to act as the account, which needs the app password
@@ -41,7 +42,9 @@ model ([the layers](configuration.md#how-the-access-layers-combine)).
 | Anything to `GET /healthz` | Nothing by default, which is what a container or Kubernetes probe needs. `SABLE_HEALTH_TOKEN` puts it behind an `X-Health-Token` header, compared in constant time. |
 | Anything to the API schema | Not served at all unless `SABLE_API_DOCS=true`. |
 | A proxy claiming a client address | `X-Forwarded-For` and `X-Forwarded-Proto` are believed only from `SABLE_TRUSTED_PROXIES`. Nothing reads the client address, so this protects the access log rather than access. |
-| Chat text to other people's notifications | Mass mentions in everything posted on behalf of chat or a webhook are defanged ([accepted risk 17](#accepted-risks)). `/notify` text is not. |
+| Chat text to other people's notifications | Mass mentions in everything posted on behalf of chat, a plugin or a webhook are defanged ([accepted risk 17](#accepted-risks)). `/notify` text is not. |
+| A plugin to the account's credentials, to sable's memory and to other plugins | Each plugin runs in a worker process with an environment that holds no `SABLE_*`, and on Linux sable and every worker mark themselves non-dumpable. It is a containment and not a sandbox: same user, same container, open network ([plugins](#plugins-and-the-process-boundary), [accepted risk 18](#accepted-risks)). |
+| A plugin to the conversation | The core decides who may trigger it before the worker is called, and checks everything it posts: its own rooms only, mass mentions defanged, a cap per call. |
 | sable to the model backend | Ordinary HTTPS with certificate verification; the API key travels as a bearer token. |
 
 ## Authentication and integrity
@@ -109,6 +112,7 @@ Each limit is explained where its setting is; this is what each one is for.
 | `SABLE_NEXTCLOUD_PASSWORD` | Everything the account can do: read its rooms, post as it, and read and write its Files, Contacts and Calendar. It cannot be scoped | Create a new app password, update the variable, restart, then revoke the old one |
 | `SABLE_NOTIFY_TOKEN` | Posting into the aliased conversations | Change the variable and restart, then update callers |
 | `SABLE_LLM_API_KEY` | Your model provider's billing. With `SABLE_LLM_BACKEND=openwebui`, also the account whose tools the model can run | At the provider |
+| A plugin's `settings:` | Whatever you put there: a service's API key, say. Every plugin on the host can read every plugin's settings file ([accepted risk 18](#accepted-risks)), so use a token that can do only what that plugin needs | At the service, then edit the file and restart |
 
 All of them come from the environment. `.env` is in both `.gitignore` and `.dockerignore`, and
 `.env.example` ships with the password empty. `compose.yaml` reads the required settings as
@@ -127,9 +131,137 @@ resolving something else, and uv itself is uninstalled in the same layer, so it 
 
 Nothing is written to disk. Conversation history lives in process memory only, and the ⁉️
 reaction reads a message back from Talk when it is used and keeps nothing. The one exception is a
-multipart upload to `/notify`, which Starlette spools to a temporary file. `compose.yaml` and the
-systemd unit lock the rest down to match, and publish the port to `127.0.0.1` only
+multipart upload to `/notify`, which Starlette spools to a temporary file, and, with plugins on,
+whatever a plugin writes to `/tmp`. `compose.yaml` and the systemd unit lock the rest down to
+match, and publish the port to `127.0.0.1` only
 ([container hardening](deployment.md#container-hardening)).
+
+## Plugins and the process boundary
+
+A plugin ([plugins.md](plugins.md)) is code somebody else wrote, run on your host as the same
+user as sable. The threat is a plugin that is buggy, was changed upstream, or was hostile from the
+start, and what it can do to the account, to sable and to the people in its rooms. The question to
+ask before enabling one is what that hands over. What follows is what the design stops, what it
+leaves open, and what an operator has to do about the rest. The two lists are the content: read
+the second before mounting anybody's plugin.
+
+A [phrase trigger](plugins.md#phrases) changes what enabling a plugin can mean, without touching
+any of what follows: a plugin with a phrase handler is not waiting to be addressed, it is reading
+every ordinary message in its rooms looking for a match. The process boundary says nothing about
+how much a plugin listens to - that is a choice made in its settings file, by whoever gives it
+rooms, access and a cooldown of `0` or not - it only bounds what the plugin's own process can do
+and what the core checks before and after a call, exactly as for a command.
+
+A [schedule](plugins.md#schedules) changes it again, the other direction: it is standing *write*
+access on a timer, not read access to traffic. A schedule has no triggering person to check, so it
+bypasses the per-person access gate entirely - a plugin's own `users:`/`admins_only`, and every
+`SABLE_*` setting that gates who may trigger something, none of it applies, because there is no
+actor to apply it to. The only control left is which rooms a schedule is scoped to
+(`access.rooms`) and `SABLE_ALLOWED_ROOMS`: whoever can edit a plugin's settings file decides where
+and how often it posts unprompted, not whoever happens to be in the room at the time. [The boxed
+warning in plugins.md](plugins.md#schedules) is the full statement of what that means; review a
+plugin's declared schedules the same way, before giving it a room.
+
+### What the boundary protects
+
+- **The app password and every other `SABLE_*` secret are not in a worker's environment.** A
+  worker's environment holds no `SABLE_*` and no other secret: a fixed `PATH`, a locale, the time
+  zone, the CA-bundle locations, and two inert interpreter flags the worker's `python -I` ignores
+  anyway. A test sets a secret in the parent's environment and checks that it never reaches a
+  worker.
+- **sable's own memory is not readable by a worker (Linux).** When plugins load, sable marks
+  itself non-dumpable (`prctl(PR_SET_DUMPABLE, 0)`), so another process of the same user cannot
+  read `/proc/<sable>/environ`, `mem` or `maps`. A test runs a core with a secret in its
+  environment and shows a worker is refused with and allowed without it. It is best effort: if the
+  call fails, sable logs a warning at startup saying plugins can read it.
+- **One plugin cannot read another's memory (Linux).** Every worker marks itself non-dumpable
+  before it imports anything, so a plugin's settings, as held in its own process, are out of
+  reach of its siblings. A test checks the same three files against a sibling worker. (The
+  settings *file* is another matter: see the second list.)
+- **A crash, a hang or a runaway is contained.** Each call has a time limit; a worker that
+  outlives it is killed, with its process group, and replaced on the next call; one that keeps
+  dying is switched off by a breaker. Memory (address space), open files, core dumps and CPU time
+  per call are limited in the worker, and the OOM killer is told to take a worker first. A plugin
+  that fails to load never stops the bot or another plugin.
+- **Access is decided by the core, before the worker is called.** A worker never sees a message
+  from a room or a person its plugin may not serve, and it is not told that one exists
+  ([who may run a plugin command](plugins.md#who-may-run-a-plugin-command)).
+- **Everything a plugin says goes through the core, which treats it as untrusted.** `send` is
+  limited to the plugin's own rooms (and `SABLE_ALLOWED_ROOMS`), `react` to the message that
+  triggered the call; text has mass mentions defanged and is clipped; one call may do at most
+  ten actions and post 20,000 characters; and a line that is not valid protocol kills the worker.
+  What a plugin posts comes back down the poll as the account's own message, which sable ignores,
+  so a plugin cannot make sable answer itself.
+- **Secrets in a plugin's settings are kept out of the log and `!plugins`.** Any string of four
+  characters or more in `settings:` is blanked from what the core logs about a worker and from
+  the last error `!plugins` shows. This is best effort, see the second list.
+
+### What it does not protect
+
+None of these is a bug: they follow from running a plugin as an ordinary process of the same user
+instead of in a virtual machine.
+
+- **A plugin runs as the same user, in the same container.** It can read every file that user
+  can: sable's own source, other plugins' directories and **their settings files**, and any
+  `.env` the user can read.
+- **The password in the environment is protected only because sable is PID 1 and non-dumpable.**
+  That is the whole of it. Any other way the secret can be read by the sable user is readable by
+  plugins too: a `.env` file inside the container, a file-based secret mounted readable by that
+  uid, or a process holding a copy of the environment that is not itself non-dumpable. An install
+  that keeps `.env` readable by the service user, such as the systemd example in
+  [deployment.md](deployment.md#systemd), hands the app password to every plugin whatever the
+  environment says; with plugins on, load it through the unit's `EnvironmentFile=` from a file
+  only root can read instead (not tested for this page).
+- **Do not run an init process in front of sable.** An init (`init: true` in Compose, `--init`
+  with `docker run`) becomes PID 1 and starts with the container's whole environment, as the same
+  user, and nothing marks it non-dumpable, so a plugin could read the app password from
+  `/proc/1/environ`. This follows from how Docker's init works; it was not run against a live
+  container for this page. `compose.yaml` leaves it out, and a test checks that. What that costs:
+  a worker's orphaned grandchildren (a plugin that forks and is then killed) are not reaped. They
+  stay zombies, bounded by `pids_limit`, until the container restarts.
+- **It can signal and kill other processes of that user, including sable.** A plugin can stop the
+  bot, or any other worker. The restart policy brings the container back; nothing stops it
+  doing it again.
+- **It can write `/tmp`**, which is shared with the core: the spool for `/notify` uploads. A
+  plugin that fills it makes uploads fail. If the plugin directory or the install tree is
+  writable by the account, a plugin can change itself, another plugin, or sable's source, and
+  persist across restarts. sable warns at startup if the plugins directory is writable and does
+  not check the rest.
+- **Its network access is unrestricted.** A plugin can reach loopback (sable's own port),
+  Nextcloud, and the internet. It cannot sign in as the account, because it does not hold the
+  password, but it can send out the text of every message that triggered it, anything in its own
+  settings, and whatever it read from other plugins' settings files. sable has no setting for
+  this: restrict it with a container network policy or an egress proxy.
+- **A worker can leave processes behind that the kill does not reach.** It runs in its own session
+  and process group, which is killed on a timeout, but a process that starts a new session
+  (`setsid`, a double fork) is outside it. Only a PID namespace or a cgroup bounds that, which is
+  what the container's `pids_limit` and `mem_limit` are. Nothing reaps the orphans left behind
+  (see the init paragraph above).
+- **The per-worker limits are all there is per worker, and there is no aggregate.** A worker is
+  limited to 1 GiB of address space, 64 open files and a CPU budget per call. Nothing bounds all
+  the workers together except the container's `pids_limit` and `mem_limit`, which have to be sized
+  for them as well as for sable.
+- **The memory protection is Linux only.** On another POSIX system a plugin can read sable's
+  environment, and sable says so at startup. Where a process holds `CAP_SYS_PTRACE`, or runs as
+  root, no flag stops it reading another; the image runs as uid 10001 and `compose.yaml` drops all
+  capabilities.
+- **A plugin can post anything the room can render, as the account, in its rooms.** Markdown,
+  links, images, a message that reads as somebody else's, and mentions of single people (only
+  mass mentions are defanged). Each trigger lets it post up to ten times; the only rate limit is
+  the per-person [`SABLE_RATE_LIMIT`](configuration.md#rate-limit) on triggers.
+- **Redaction is best effort.** It blanks exact strings of four characters or more from text the
+  core handles. It does not catch a value that was transformed (encoded, split), a shorter value,
+  or something the plugin read from elsewhere, and it does not touch what a plugin chooses to
+  post.
+- **A phrase handler's breadth is a configuration choice, not something isolation bounds.** A
+  short, cooldown-`0` [`@on_phrase`](plugins.md#phrases) in a plugin's rooms is, in effect, standing
+  read access to everything ordinary said there, mentioned display names and shared file names
+  included - the core still decides *who* may trigger it, not *how much of the room it hears*.
+  Review a plugin's declared phrases (`!plugins <name>`) the way you would review a permission,
+  before giving it a room.
+- **Plugin settings are visible to every plugin.** Anything in a settings file is readable by the
+  other plugins on the host, and by whoever can read the directory.
+- **POSIX only.** No plugin runs on Windows.
 
 ## What leaves your infrastructure
 
@@ -138,7 +270,10 @@ history of that conversation and the speakers' display names. Nothing else leave
 backend is a hosted API, chat content leaves your network; a local backend such as Ollama, vLLM
 or llama.cpp avoids the question, and an empty `SABLE_LLM_MODEL` disables the assistant while
 leaving commands working. Attachments do not leave: they are uploaded into your own Nextcloud,
-in the account's Files, and shared from there.
+in the account's Files, and shared from there. The exception to "nothing else leaves" is a
+plugin, which has network access of its own and receives the text of the commands sent to it:
+what it sends, and where, is up to its code
+([accepted risk 18](#accepted-risks)).
 
 With `SABLE_LLM_BACKEND=openwebui` the question also creates a conversation in that Open WebUI
 account, which is deleted once the answer has been read unless `SABLE_LLM_KEEP_CHATS` is on.
@@ -256,6 +391,24 @@ These are known and deliberate. Decide for yourself whether they are acceptable.
     is never defanged, and the zero-width space stays in the posted text, where somebody copying
     it out will find an invisible character.
 
+18. **A plugin is code you run, and the process isolation is a containment, not a sandbox.**
+    Enabling one gives it, in the rooms you list: the right to post, react and send as the
+    account, the text and sender of every command addressed to it, and, on the host, everything an
+    unprivileged process of the sable user and a network connection can reach: other plugins'
+    settings files, any readable file, the loopback interface and the internet, the ability to
+    signal other processes of that user, and `/tmp`. What the isolation does is deny it the
+    account's password and sable's memory, hold it to limits, and make the core decide who may
+    reach it and check everything it says ([both lists](#plugins-and-the-process-boundary)). It
+    does not stop it phoning home, reading a secret you gave another plugin, or filling `/tmp`.
+    Read the code of what you mount, mount the directory read-only, give each plugin only the
+    rooms it needs, restrict the container's egress to what the plugins need, and size
+    `pids_limit` and `mem_limit` for them. Keep sable as PID 1 (no `init: true` or `--init`), and
+    keep the app password out of every file the sable user can read: the environment is safe from
+    plugins only because sable is PID 1 and non-dumpable. If you would not give the plugin's author a shell as
+    the sable user in that container, do not mount the plugin. Running a second sable, with its
+    own account and container, for plugins you trust less is the stronger separation, and costs
+    nothing but the account.
+
 ## Hardening checklist
 
 - [ ] A dedicated Nextcloud account for sable that owns nothing else, and whose display name
@@ -270,10 +423,15 @@ These are known and deliberate. Decide for yourself whether they are acceptable.
 - [ ] Nothing exposed that does not need to be: the port bound to localhost or a private network,
       and dropped entirely if nothing calls `/notify`, `/hook` or `/healthz`
 - [ ] `SABLE_NOTIFY_TOKEN` distinct from every other credential, or unset if unused
-- [ ] Egress restricted to Nextcloud and the model backend
+- [ ] Egress restricted to Nextcloud and the model backend, and to whatever your plugins need
 - [ ] `SABLE_REPORT_ERRORS=false` if upstream errors should not reach the room
 - [ ] Every custom command reviewed as code anyone in the room can trigger, or named in
       `SABLE_ADMIN_COMMANDS`
+- [ ] If plugins are on: the directory mounted read-only, every plugin read before it was mounted,
+      its `access.rooms` the rooms it needs and not `"*"`, `pids_limit` and `mem_limit` sized for
+      the workers, no init process in front of sable, and no copy of the password in a file the
+      service user can read (on a bare-metal install, the environment loaded from a file only
+      root can read) ([accepted risk 18](#accepted-risks))
 - [ ] `SABLE_API_DOCS` left off, so the schema is not served to whoever can reach the port
 - [ ] `SABLE_TRUSTED_PROXIES` naming your proxy — the default is loopback, which a proxy in
       another container is not

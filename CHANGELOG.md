@@ -12,6 +12,53 @@ Format: `## <version>`, optionally followed by a date. Anything until the next
 
 ## Unreleased
 
+- **Plugins: scheduled triggers.** `@schedule(cron="0 8 * * 1-5")` or `@schedule(every="10m")`
+  runs a plugin handler on a timer, independent of any chat message. `cron` is the standard
+  5-field form (numeric only, with ranges, steps and lists), evaluated in `SABLE_TIMEZONE`;
+  `every` is a duration, at least a minute. A schedule fires once per room in its `access.rooms`
+  (`"*"` expands to every room the account currently follows), each room its own independent
+  call; a missed run (downtime, a switched-off plugin) is never replayed. A plugin that is
+  inactive, disabled or failed has no schedule at all; one that is switched off has each due fire
+  skipped and logged at INFO (not alarmingly) until it recovers. A room's fire is skipped (logged
+  once, at WARNING) rather than piled on top of an earlier one still in flight for the same
+  handler, so a schedule that cannot drain its own rooms within its own interval cannot build an
+  unbounded backlog; a room list entirely excluded by `SABLE_ALLOWED_ROOMS` likewise warns once
+  instead of silently never firing again. A cron is deduplicated by local wall time, not the UTC
+  instant, so it cannot double-fire across a "fall back" DST transition; `N/step` on a bare number
+  now means the real-crontab range from `N` to the field's maximum, not just `N` alone. Shutdown
+  waits at most the usual grace for a schedule's in-flight calls, never a hung handler's own (much
+  longer) call timeout. Failures are logged, never posted - nobody asked. `!plugins` and
+  `!plugins <name>` show each schedule in words, with its next one or two fire times (about 400
+  days out, so an ordinary low-frequency schedule still shows one) or a plain note when the
+  combined schedule limit dropped it; `--check` validates them too.
+- **Plugins: phrase triggers.** `@on_phrase(any=[...], whole_words=True, cooldown=30)` runs a
+  plugin handler for ordinary messages that contain one of its phrases. Matching is literal and
+  done by sable (case-insensitive, Unicode-normalised, never a pattern a plugin wrote), a
+  command or a message to the bot never fires one, the access rules are the same as for
+  commands, and each handler has a cooldown per room. At most three handlers fire for one
+  message, round-robined across plugins so one plugin's handlers can never starve another's; a
+  failing one is logged and never posted, and an ambient phrase match - whether it fires or
+  not - never costs a rate-limit token, unlike a command or a mention. `!plugins` lists the
+  phrase handlers.
+- **Plugins: add commands without changing sable.** Point `SABLE_PLUGINS_DIR` at a directory of
+  plugins, each a `<name>.py` with a `<name>_settings.yaml` beside it, and their `!commands`
+  appear in the conversations the settings file names. A plugin does nothing anywhere until it
+  names one, and can be limited to listed users or to administrators. Each plugin runs in a
+  worker process of its own, with an environment that holds no `SABLE_*`, memory, file and CPU
+  limits, and a per-call timeout (`SABLE_PLUGINS_TIMEOUT`); on Linux sable's own process is made
+  unreadable to it. A worker that crashes or hangs is restarted by its next call, and one that
+  keeps doing it (three restarts in five minutes) is switched off for five minutes, then given
+  one trial call. A plugin that fails to load is skipped and named in the log, or stops startup
+  with `SABLE_PLUGINS_STRICT`. `!plugins` (administrators) reports on every plugin, and
+  `sable --check` loads and validates them. This is a containment, not a sandbox: a plugin is code
+  that runs on your host as the sable user, so read the code you mount and mount it read-only
+  ([docs/plugins.md](docs/plugins.md),
+  [what it protects and what it does not](docs/security.md#plugins-and-the-process-boundary),
+  accepted risk 18). `compose.yaml` deliberately has no `init: true` (sable must stay PID 1, or a
+  plugin could read the app password from the init's environment), and its `pids_limit` and
+  `mem_limit` have to cover the workers. `pyyaml` is now a direct dependency.
+- **Two example plugins**, `!roll` and `!up`, in `examples/plugins`, kept working by a test that
+  loads them through the real plugin manager.
 - **One CI check script for every workflow.** `.forgejo/ci.sh` installs the
   pinned uv and the locked dependencies, then runs ruff, ruff format --check,
   mypy and pytest; `test.yml`, `build.yml` and `release.yml` all call it, so a

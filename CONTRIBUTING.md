@@ -35,6 +35,9 @@ src/sable/
   events.py       turns a Talk message into a TalkEvent
   bot.py          decides whether an event is a trigger, then runs it
   commands.py     the command registry and the built-in commands
+  plugins.py      plugins, core side: discovery, settings, workers, access, `!plugins`
+  plugin_host.py  plugins, worker side: the process that imports one plugin
+  plugin_api.py   what a plugin imports: `@command`, `@on_phrase`, `@schedule`, `Context`, `PluginError` (stdlib only)
   llm.py          OpenAI-compatible /chat/completions client
   openwebui.py    Open WebUI backend, where Open WebUI runs the tool loop
   talk.py         Nextcloud Talk client (rooms, chat, reactions, who am I)
@@ -48,17 +51,23 @@ src/sable/
   state.py        tracks whether Nextcloud and the model are reachable
   logs.py         keeps the health-check access lines out of the log
 tests/            offline test suite, one file per module plus test_docs.py
-docs/             purpose, configuration, deployment, security, future, releasing
+docs/             purpose, configuration, plugins, deployment, security, future, releasing
+examples/plugins/ two small plugins to copy, loaded by a test so they keep working
 Agents/           notes for people and models changing sable, incl. the Talk API reference
 .forgejo/         issue and pull request templates, and the workflows in workflows/
 ```
 
 A message travels `poller.py` (one long poll per conversation) → `events.parse_message` →
 `Bot.would_handle` (a side-effect-free filter) → `Bot.handle` as a background task (rate limit,
-then a command, the model, or the ask reaction) → `talk.py`. `/notify` and `/hook/{name}` enter
-at `app.py` instead and never pass through `Bot.handle`. Why it is built this way:
-[docs/purpose.md](docs/purpose.md); which setting gates which step:
-[how the access layers combine](docs/configuration.md#how-the-access-layers-combine).
+then a command, the model, or the ask reaction) → `talk.py`. A plugin's command takes the command
+path, through `PluginManager` to a worker process and back; a plugin's phrase handler takes its
+own path off a plain message (`PluginManager.phrase_hits`/`claim_phrase`, then the same worker
+call), never through the rate limit. A plugin's schedule handler takes no path off a message at
+all: `PluginManager`'s own background tick (`start_scheduler`/`scheduler_tick`) calls straight
+into a worker on a timer, with no `Bot.would_handle`/`handle` or rate limit involved, and no
+actor to check. `/notify` and `/hook/{name}` enter at `app.py` instead and never pass through
+`Bot.handle`. Why it is built this way: [docs/purpose.md](docs/purpose.md); which setting gates
+which step: [how the access layers combine](docs/configuration.md#how-the-access-layers-combine).
 
 ## Getting started in 5 minutes
 
@@ -109,7 +118,17 @@ environment.
 | `test_config.py`, `test_operator_config.py` | parsing, validation, warnings; a realistic `.env` |
 | `test_events.py`, `test_hooks.py`, `test_mentions.py`, `test_ratelimit.py`, `test_history.py`, `test_logs.py` | the smaller modules |
 | `test_main.py`, `test_version.py` | `--check`; the version and its changelog section |
+| `test_plugins.py`, `test_plugin_api.py` | plugin discovery and the settings schema; the author API |
+| `test_plugin_manager.py`, `test_plugin_worker.py` | the plugin manager and the chat flow, and the core's side of the worker (hangs, crashes, limits), against `fake_worker.py` |
+| `test_plugin_phrases.py` | `@on_phrase`: the matcher, cooldowns, the fairness cap, and what `would_handle`/`handle`, the rate limiter and the poller do with a phrase |
+| `test_plugin_schedules.py` | `@schedule`: cron and `every=` parsing, fire detection on a fake clock, fan-out across rooms, the backlog guard, shutdown, and `!plugins`/`--check` reporting |
+| `test_plugin_host.py`, `test_plugin_e2e.py`, `test_plugin_examples.py` | the real worker process, end to end; `examples/plugins` |
 | `test_docs.py` | the documentation, read back as claims about the code |
+
+The plugin tests start real Python processes and are **POSIX-only**: they skip elsewhere, so on
+Windows run the suite in WSL. `uv run pytest tests/test_plugin_e2e.py` runs one file; the plugin
+files together took about half a minute of the suite's 45 seconds when measured, in WSL. Nothing
+in them needs a network beyond loopback.
 
 `tests/test_docs.py` fails when:
 
@@ -128,6 +147,15 @@ the test.
 ## How do I...
 
 ### Add a command
+
+Two ways, depending on who is adding it. A command that is part of sable goes in the built-in
+registry, below. A command for one deployment, or by somebody who should not need to change sable,
+is a [plugin](docs/plugins.md): two files in a directory, with examples in
+[`examples/plugins`](examples/plugins). Changing how plugins themselves work is a different task:
+read [docs/plugins.md](docs/plugins.md) and the plugin section of
+[docs/security.md](docs/security.md#plugins-and-the-process-boundary) first.
+
+To add a built-in:
 
 - [ ] Add an async function to `src/sable/commands.py` with `@registry.command(name, help=...)`.
   It takes a `Context` and returns Markdown, or `None` to stay silent. Raise `CommandError` for

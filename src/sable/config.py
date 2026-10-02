@@ -31,6 +31,10 @@ TOKEN_RE = re.compile(r"^[a-z0-9]{4,64}\Z")
 #: The longest a Talk long poll can be asked to wait (Talk clamps to this).
 MAX_POLL_TIMEOUT = 60
 
+#: Bounds on SABLE_PLUGINS_TIMEOUT, in seconds.
+MIN_PLUGINS_TIMEOUT = 1
+MAX_PLUGINS_TIMEOUT = 600
+
 #: How sable talks to a model backend.
 LLM_BACKENDS = frozenset({"openai", "openwebui"})
 
@@ -364,6 +368,15 @@ class Config:
     #: was true when it was trained, confidently and wrongly.
     timezone: str = ""
 
+    # --- plugins -------------------------------------------------------------
+    #: Directory of plugins (see docs). Empty means the feature is off: nothing
+    #: is discovered, no worker process ever starts.
+    plugins_dir: str = ""
+    #: Seconds one plugin call may take before its worker process is killed.
+    plugins_timeout: int = 30
+    #: A plugin that fails to load stops startup instead of being skipped.
+    plugins_strict: bool = False
+
     # --- process -----------------------------------------------------------
     host: str = "0.0.0.0"  # noqa: S104 - a container service must listen on all interfaces
     port: int = 8080
@@ -595,6 +608,9 @@ class Config:
             trusted_proxies=_csv_or("SABLE_TRUSTED_PROXIES", DEFAULT_TRUSTED_PROXIES),
             health_token=_str("SABLE_HEALTH_TOKEN"),
             timezone=_str("SABLE_TIMEZONE"),
+            plugins_dir=_str("SABLE_PLUGINS_DIR"),
+            plugins_timeout=_int("SABLE_PLUGINS_TIMEOUT", 30),
+            plugins_strict=_bool("SABLE_PLUGINS_STRICT", False),
             host=_str("SABLE_HOST", "0.0.0.0"),  # noqa: S104 - same default as above
             port=_int("SABLE_PORT", 8080),
             log_level=_str("SABLE_LOG_LEVEL", "INFO").upper(),
@@ -717,7 +733,37 @@ class Config:
                     f"SABLE_TIMEZONE={config.timezone!r} is not an IANA time zone "
                     f"name such as America/New_York or Europe/Berlin ({exc})"
                 ) from exc
+        if not MIN_PLUGINS_TIMEOUT <= config.plugins_timeout <= MAX_PLUGINS_TIMEOUT:
+            raise ConfigError(
+                f"SABLE_PLUGINS_TIMEOUT must be between {MIN_PLUGINS_TIMEOUT} and "
+                f"{MAX_PLUGINS_TIMEOUT} seconds (got {config.plugins_timeout})"
+            )
+        if config.plugins_dir:
+            if os.name != "posix":
+                raise ConfigError(
+                    "SABLE_PLUGINS_DIR is not available on this platform: each plugin runs "
+                    "in a worker process that is isolated with POSIX process groups, "
+                    "resource limits and a scrubbed environment, which only POSIX has. Run "
+                    "sable on Linux (a container is the usual way) or leave it empty."
+                )
+            if not os.path.isdir(config.plugins_dir):
+                raise ConfigError(
+                    f"SABLE_PLUGINS_DIR={config.plugins_dir!r} does not exist or is not a "
+                    "directory. Mount the plugins directory there (read-only) or leave the "
+                    "setting empty."
+                )
         warnings: list[str] = []
+        if config.plugins_dir and os.access(config.plugins_dir, os.W_OK):
+            warnings.append(
+                f"SABLE_PLUGINS_DIR={config.plugins_dir} is writable by this process. A "
+                "plugin is code that runs on this host: mount the directory read-only "
+                "(a Docker volume with :ro), so that nothing sable can reach changes it."
+            )
+        if config.plugins_strict and not config.plugins_dir:
+            warnings.append(
+                "SABLE_PLUGINS_STRICT has no effect while SABLE_PLUGINS_DIR is empty: "
+                "there are no plugins to fail."
+            )
         if poll_timeout > MAX_POLL_TIMEOUT:
             warnings.append(
                 f"SABLE_POLL_TIMEOUT is {poll_timeout}, but Talk holds a long poll "
