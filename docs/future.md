@@ -153,6 +153,27 @@ person who triggered the call, the history rules apply, and the plugin never hol
 The open question is tools: a plugin in a room that is not a tools room must not be a way to use
 them.
 
+**Posting a file.** `Context` can reply, send and react; it cannot attach a file, though
+`FilesClient` already does the WebDAV-upload-then-share that `/notify` uses, so the plumbing
+exists. The open question is how the bytes reach the core: over the wire, like every other action,
+is simplest but bound by the protocol's own line cap (1 MiB, well under a megabyte of real file once
+base64'd); having the plugin write to its own directory and send a path instead avoids that, reusing
+the size cap and streaming `/notify`'s attachment path already has, at the cost of the core reading
+a file instead of a message. Either way it needs its own per-call budget - a file does not fit the
+existing ten-actions-and-20,000-characters shape - and the same room restriction `send` already
+has.
+
+**Reload the whole process without restarting the container.** An admin command that calls
+`os.execv` on sable's own interpreter: same PID, same container, but every piece of in-memory state
+(`Config`, `Bot`, the poller, the plugin manager, the rate limiter, history, cooldowns) is rebuilt
+from scratch by the startup path that already exists, because it is, as far as the kernel is
+concerned, a fresh process. Simpler than reloading plugins in place (below) for exactly that reason:
+nothing has to be surgically swapped while the bot keeps running, because nothing keeps running.
+The one thing that has to happen first is the existing graceful shutdown - stopping the poller and
+killing every plugin worker through the same path shutdown already uses - since `execv` replaces
+this process without touching the children it already spawned; skipping that step would orphan
+every running worker. `GET /healthz` goes quiet for the gap, same as any restart.
+
 **Keeping a plugin out of files it does not need.** Plugins read whatever the sable user can, which
 includes other plugins' settings files, although a worker is handed its own settings over the pipe
 and never needs the file. Landlock (Linux 5.13 and later) lets a process give up access to paths
