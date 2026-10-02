@@ -100,7 +100,7 @@ block, put both services on one network and let the proxy reach `sable:8080` dir
 calls sable from outside the host you can drop it regardless.
 
 To run a published release instead of building, replace the `build:` and `image:` lines with
-`image: forgejo.subversive.link/subversive/sable:1.0`. Pin the version rather than `latest`, so a
+`image: forgejo.subversive.link/subversive/sable:1.1`. Pin the version rather than `latest`, so a
 `docker compose pull` cannot move you ([what is published](releasing.md#what-gets-published)).
 
 #### Container hardening
@@ -231,7 +231,7 @@ Confirm the path works:
 
 ```bash
 curl -fsS https://sable.example.org/healthz
-# {"status":"ok","version":"1.0","user":"sable","llm":"gpt-4o-mini","notify":true,"nextcloud":true}
+# {"status":"ok","version":"1.1","user":"sable","llm":"gpt-4o-mini","notify":true,"nextcloud":true}
 
 # ...or, with SABLE_HEALTH_TOKEN set:
 curl -fsS -H "X-Health-Token: $SABLE_HEALTH_TOKEN" https://sable.example.org/healthz
@@ -306,7 +306,7 @@ In the conversation, within a minute of the invitation:
 
 ```
 !ping                 →  pong 🏓
-!version              →  sable 1.0 · model gpt-4o-mini
+!version              →  sable 1.1 · model gpt-4o-mini
 @sable are you there  →  the model's answer, with @sable picked from Talk's mention list
 ```
 
@@ -446,7 +446,7 @@ At `INFO`, sable logs its own lifecycle, its configuration, and every use — an
 the interesting lines are not buried:
 
 ```
-sable 1.0 starting
+sable 1.1 starting
   listening on:   http://0.0.0.0:8080
   nextcloud:      https://cloud.example.org as sable
   receiving:      long polls of up to 30s, conversations rescanned every 60s
@@ -469,7 +469,7 @@ sable 1.0 starting
   health check:   GET /healthz (open)
   log level:      INFO
 signed in to https://cloud.example.org as sable (Sable)
-sable 1.0 ready
+sable 1.1 ready
 following conversation abcd1234 ('Team chat')
 Alice (users/alice) ran !ping in abcd1234
 Alice (users/alice) asked the model in abcd1234 (22 chars)
@@ -478,8 +478,8 @@ Alice (users/alice) asked the model about message 12 in abcd1234, written by Bob
 relayed an alert to abcd1234 (alias alerts) as message 4242
 left conversation zzzz9999 ('Lunch'): not in SABLE_ALLOWED_ROOMS and not a /notify or /hook destination
 no longer in conversation abcd1234 ('Team chat') - no further messages from it
-sable 1.0 stopping
-sable 1.0 stopped
+sable 1.1 stopping
+sable 1.1 stopped
 ```
 
 With the Open WebUI backend the block gains a `tools:` line between `model:` and `concurrency:`.

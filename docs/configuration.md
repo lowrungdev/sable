@@ -14,7 +14,7 @@ on the command line override their variables in turn. Under Docker Compose the
 `sable --check` validates everything and exits without starting a server:
 
 ```
-sable 1.0 config OK
+sable 1.1 config OK
   nextcloud:  https://cloud.example.org
   account:    sable (password set)
   polling:    30s long polls, rooms rescanned every 60s

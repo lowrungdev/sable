@@ -10,7 +10,7 @@ is not worth publishing.
 Format: `## <version>`, optionally followed by a date. Anything until the next
 `##` heading is the body.
 
-## 1.0
+## 1.1
 
 - **Plugins: scheduled triggers.** `@schedule(cron="0 8 * * 1-5")` or `@schedule(every="10m")`
   runs a plugin handler on a timer, independent of any chat message. `cron` is the standard
