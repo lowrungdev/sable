@@ -170,6 +170,10 @@ class Bot:
         """Take a loaded plugin manager and register its commands on this bot."""
         self.plugins = manager
         manager.is_admin = self.is_admin_actor
+        # Schedules have no triggering event to post through: the manager posts
+        # their dispatches straight through us, the same ChatPort a command or a
+        # phrase handler's actions already go through.
+        manager.port = self
         for command in manager.commands():
             self.registry.add(command)
 

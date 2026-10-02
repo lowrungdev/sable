@@ -150,19 +150,79 @@ def on_phrase_call(rid: int, ctx: dict) -> None:
         result(rid, f"{STATE['plugin']}/{ctx['name']} matched {ctx['match']}")
 
 
+def on_schedule_call(rid: int, ctx: dict) -> None:
+    """A schedule handler. What it does is the ``schedule`` setting for its handler
+    id: ``reply`` (the default: a string naming the plugin/handler/room),
+    ``none``, ``ctx``, ``crash``, ``hang``, ``error`` (a PluginError),
+    ``exception``, ``send`` (an explicit ``ctx.send`` into its own room, as an
+    action rather than a return value), ``reply-action`` (an explicit
+    ``ctx.reply``, which should behave the same as ``send`` for a schedule) or
+    ``react`` (tries ``ctx.react``, which should always be refused: a schedule has
+    no triggering message)."""
+    behaviour = STATE["settings"].get("schedule", {}).get(ctx["name"], "reply")
+    if behaviour == "none":
+        result(rid, None)
+    elif behaviour == "ctx":
+        result(rid, json.dumps(ctx))
+    elif behaviour == "crash":
+        os._exit(3)
+    elif behaviour == "hang":
+        time.sleep(3600)
+    elif behaviour == "error":
+        send({"op": "result", "id": rid, "ok": False, "error": "no thanks", "user_visible": True})
+    elif behaviour == "exception":
+        send(
+            {
+                "op": "result",
+                "id": rid,
+                "ok": False,
+                "error": "ValueError: boom",
+                "user_visible": False,
+            }
+        )
+    elif behaviour == "send":
+        answer = act(rid, "send", room=ctx["room"], text=f"sent to {ctx['room']}")
+        result(rid, json.dumps(answer))
+    elif behaviour == "send-foreign":
+        target = STATE["settings"].get("foreign_room", "zzzz9999")
+        answer = act(rid, "send", room=target, text="sneaky")
+        result(rid, json.dumps(answer))
+    elif behaviour == "reply-action":
+        answer = act(rid, "reply", text=f"replied in {ctx['room']}")
+        result(rid, json.dumps(answer))
+    elif behaviour == "react":
+        answer = act(rid, "react", emoji="\U0001f44d")
+        result(rid, json.dumps(answer))
+    elif behaviour == "sleep":
+        time.sleep(float(STATE["settings"].get("sleep_seconds", 0.2)))
+        result(rid, f"slept in {ctx['room']}; max in flight {STATE['max_inflight']}")
+    elif behaviour == "fail-for-one":
+        if ctx["room"] == STATE["settings"].get("fail_room"):
+            send({"op": "result", "id": rid, "ok": False, "error": "nope", "user_visible": True})
+        else:
+            result(rid, f"ok in {ctx['room']}")
+    else:
+        result(rid, f"{STATE['plugin']}/{ctx['name']} fired in {ctx['room']}")
+
+
 def on_call(msg: dict) -> None:
     rid = msg["id"]
     ctx = msg["ctx"]
-    if ctx.get("trigger") == "phrase":
-        on_phrase_call(rid, ctx)
-        return
-    args = ctx.get("args", "")
-    word, _, rest = args.partition(" ")
+    trigger = ctx.get("trigger")
+    # Tracked for every kind of call (not just commands): a schedule's fan-out is
+    # exactly what test_at_most_four_schedule_calls_are_in_flight reads this for.
     with STATE_LOCK:
         STATE["inflight"] += 1
         STATE["max_inflight"] = max(STATE["max_inflight"], STATE["inflight"])
     try:
-        COMMANDS.get(word, unknown)(rid, rest, ctx)
+        if trigger == "phrase":
+            on_phrase_call(rid, ctx)
+        elif trigger == "schedule":
+            on_schedule_call(rid, ctx)
+        else:
+            args = ctx.get("args", "")
+            word, _, rest = args.partition(" ")
+            COMMANDS.get(word, unknown)(rid, rest, ctx)
     finally:
         with STATE_LOCK:
             STATE["inflight"] -= 1

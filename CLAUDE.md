@@ -41,10 +41,11 @@ task is done.
   built-in commands.
 - `plugins.py` plugins, core side: discovery, the settings schema, `Worker` (one subprocess and
   its protocol), `PluginManager` (validation, the access decision `allows`, `PhraseMatcher` and
-  `phrase_hits`/`claim_phrase` for phrase triggers, what a plugin may post, `!plugins`).
-  `plugin_host.py` the worker process. `plugin_api.py` what a plugin imports, including the
-  `@command` and `@on_phrase` decorators. Author and operator docs:
-  [docs/plugins.md](docs/plugins.md); examples: `examples/plugins/`.
+  `phrase_hits`/`claim_phrase` for phrase triggers, the scheduler task (`start_scheduler`,
+  `scheduler_tick`, `_maybe_fire`/`_fire` for `@schedule` triggers), what a plugin may post,
+  `!plugins`). `plugin_host.py` the worker process. `plugin_api.py` what a plugin imports,
+  including the `@command`, `@on_phrase` and `@schedule` decorators and `CronSpec`/`parse_cron`.
+  Author and operator docs: [docs/plugins.md](docs/plugins.md); examples: `examples/plugins/`.
 - `llm.py` chat-completions client. `openwebui.py` Open WebUI backend (it runs the tool loop).
 - `talk.py` Talk client. `files.py` upload and share. `hooks.py` webhook payload to message.
 - `config.py` all settings. `limits.py` body caps. `ratelimit.py` per-person limit.
@@ -79,6 +80,11 @@ path-specific checks):
 Admin and model checks refuse bots inside the decision itself (`is_admin_actor`,
 `can_use_model`), not only in `_screen`. Keep it so.
 
+A plugin's `@schedule` trigger never enters this list at all: there is no actor, so none of rows
+4-6 apply, and `PluginManager` decides it separately (active, room in `access.rooms` and
+`SABLE_ALLOWED_ROOMS`) in `_schedule_rooms`/`_fire`, on its own background tick, not through
+`bot.py`.
+
 **HTTP layer.** `limits.py` caps request bodies before authentication, so oversize requests get
 413 before any token check. Tokens are compared as bytes with `hmac.compare_digest`. `/notify`
 and `/hook/{name}` answer 404 when not configured. `/healthz` is open unless
@@ -97,7 +103,10 @@ Read [docs/plugins.md](docs/plugins.md) and the plugin section of
   through `PluginRecord.redact` (`Worker._text`) first, and settings values themselves are never
   printed anywhere. What a plugin posts, `PluginError` text included, still goes through
   `_ChatSink` (defanged, capped, its own rooms only). Access is decided in `PluginManager.allows`
-  before a worker is called, for a phrase handler exactly as for a command.
+  before a worker is called, for a phrase handler exactly as for a command; a schedule has no
+  actor for `allows` to check at all, so its own access decision lives in `_schedule_rooms`
+  instead (active, room in `access.rooms` and `SABLE_ALLOWED_ROOMS` - never `users:`/`admins_only`,
+  which a schedule has no sender to apply them to).
 - `plugin_api.py` imports the standard library and nothing else from `sable`; `plugin_host.py`
   imports nothing from `sable` but `plugin_api`. Both run in the worker, whose environment is
   built from nothing (`worker_environment`): never pass `os.environ` through or add a `SABLE_*`.

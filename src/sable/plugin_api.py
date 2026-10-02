@@ -3,7 +3,7 @@
 A plugin is a Python file that declares handlers with decorators and answers
 each call with a Markdown string (or ``None`` for silence)::
 
-    from sable.plugin_api import Context, PluginError, command, on_phrase
+    from sable.plugin_api import Context, PluginError, command, on_phrase, schedule
 
     @command("weather", aliases=("wx",), help="Forecast for a city", usage="weather <city>")
     async def weather(ctx: Context) -> str | None:
@@ -14,6 +14,10 @@ each call with a Markdown string (or ``None`` for silence)::
     @on_phrase(any=["good morning", "gm"], whole_words=True, cooldown="1h")
     async def greet(ctx: Context) -> str | None:
         return f"Good morning, {ctx.actor_name}!"
+
+    @schedule(cron="0 8 * * 1-5")  # or schedule(every="10m")
+    async def standup(ctx: Context) -> str | None:
+        return "Stand-up in 5 minutes!"
 
 This module is deliberately pure: standard library only, nothing imported from
 the rest of ``sable``. It runs inside the worker process, where the host
@@ -32,11 +36,13 @@ import re
 import unicodedata
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from types import MappingProxyType
 from typing import Any, Literal, Protocol
 
 __all__ = [
     "Context",
+    "CronSpec",
     "Declarations",
     "Handler",
     "PluginActionError",
@@ -51,7 +57,10 @@ __all__ = [
     "freeze",
     "on_phrase",
     "parse_cooldown",
+    "parse_cron",
+    "parse_every",
     "reset_declarations",
+    "schedule",
 ]
 
 #: A command (or alias) name: lowercase, starts with a letter. The same rule
@@ -87,6 +96,20 @@ ID_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 _COOLDOWN_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 #: re.ASCII: '\d' matches only '0'-'9', not every Unicode decimal digit.
 _COOLDOWN_RE = re.compile(r"^(\d{1,9})([smhd])$", re.ASCII)
+#: A schedule's ``every=`` must be at least this long: it runs unattended, with
+#: nobody to notice a runaway loop, and at most :data:`MAX_COOLDOWN` (a week) -
+#: past that, a cron expression says it more clearly anyway.
+MIN_EVERY_SECONDS = 60
+#: The five fields of a cron expression, in order: (label, lowest, highest). The
+#: weekday field accepts 0-7; 7 is folded into 0, since both traditionally mean
+#: Sunday.
+_CRON_FIELDS = (
+    ("minute", 0, 59),
+    ("hour", 0, 23),
+    ("day", 1, 31),
+    ("month", 1, 12),
+    ("weekday", 0, 7),
+)
 
 Handler = Callable[["Context"], Awaitable["str | None"]]
 
@@ -235,21 +258,33 @@ class PhraseDecl:
     handler: Handler
 
 
+@dataclass(frozen=True, slots=True)
+class ScheduleDecl:
+    """One ``@schedule``, as the host reads it. Exactly one of ``cron``/``every`` is
+    set; ``every`` is in seconds, already converted from whatever form it was
+    declared in."""
+
+    id: str
+    cron: str | None
+    every: int | None
+    handler: Handler
+
+
 @dataclass(slots=True)
 class Declarations:
     """Everything a plugin declared, in declaration order.
 
-    One list per kind of trigger. Step 3 adds ``schedules`` beside them without
-    touching this shape.
+    One list per kind of trigger.
     """
 
     commands: list[CommandDecl] = field(default_factory=list)
     phrases: list[PhraseDecl] = field(default_factory=list)
+    schedules: list[ScheduleDecl] = field(default_factory=list)
 
     @property
     def count(self) -> int:
         """Handlers of every kind, for the per-plugin cap."""
-        return len(self.commands) + len(self.phrases)
+        return len(self.commands) + len(self.phrases) + len(self.schedules)
 
 
 #: The host imports exactly one plugin per process, so a module-level collection
@@ -265,13 +300,18 @@ _taken_ids: set[str] = set()
 
 def declarations() -> Declarations:
     """A snapshot of what has been declared since the last reset."""
-    return Declarations(commands=list(_declarations.commands), phrases=list(_declarations.phrases))
+    return Declarations(
+        commands=list(_declarations.commands),
+        phrases=list(_declarations.phrases),
+        schedules=list(_declarations.schedules),
+    )
 
 
 def reset_declarations() -> None:
     """Forget every declaration."""
     _declarations.commands.clear()
     _declarations.phrases.clear()
+    _declarations.schedules.clear()
     _taken.clear()
     _taken_ids.clear()
 
@@ -542,6 +582,257 @@ def on_phrase(
                 cooldown=seconds,
                 handler=ok,
             )
+        )
+        return handler
+
+    return decorate
+
+
+def parse_every(value: object) -> int:
+    """A schedule's ``every=`` interval, in whole seconds: an int, or text like
+    cooldown's ("30s", "5m", "1h", "1d"). At least a minute (this runs unattended,
+    with nobody to notice a runaway loop) and at most a week.
+
+    Raises :class:`PluginDeclarationError`.
+    """
+    if isinstance(value, bool):
+        raise PluginDeclarationError("every must be a number of seconds or text like '5m'")
+    if isinstance(value, int):
+        seconds = value
+    elif isinstance(value, str):
+        found = _COOLDOWN_RE.match(value.strip())
+        if found is None:
+            raise PluginDeclarationError(
+                f"every {value[:20]!r} is not understood: use seconds (300) or text like "
+                "'5m', '1h' or '1d'"
+            )
+        seconds = int(found.group(1)) * _COOLDOWN_UNITS[found.group(2)]
+    else:
+        raise PluginDeclarationError(
+            f"every must be a number of seconds or text like '5m', not {type(value).__name__}"
+        )
+    if not MIN_EVERY_SECONDS <= seconds <= MAX_COOLDOWN:
+        raise PluginDeclarationError(
+            f"every is {seconds} seconds; it must be between {MIN_EVERY_SECONDS} (a minute) and "
+            f"{MAX_COOLDOWN} (a week)"
+        )
+    return seconds
+
+
+def _cron_weekday(moment: datetime) -> int:
+    """Cron's weekday numbering (0 = Sunday ... 6 = Saturday), from Python's own
+    (``date.weekday()``: 0 = Monday ... 6 = Sunday)."""
+    return (moment.weekday() + 1) % 7
+
+
+def _cron_int(text: str, label: str, lo: int, hi: int) -> int:
+    if not text.isdigit():
+        raise PluginDeclarationError(
+            f"the {label} field has {text[:20]!r}, which is not a whole number"
+        )
+    value = int(text)
+    if not lo <= value <= hi:
+        raise PluginDeclarationError(f"the {label} field's {value} is out of range ({lo}-{hi})")
+    return value
+
+
+def _parse_cron_field(text: str, label: str, lo: int, hi: int) -> tuple[frozenset[int], bool]:
+    """One of the five space-separated fields: a comma-separated list of ``*``,
+    a number, or a range (``a-b``), any of which may carry a ``/step``. Numeric
+    only - no month or weekday names, to keep the grammar small. Returns the
+    values it names and whether it was exactly ``*`` (the whole range).
+
+    A bare number with a step (``0/5``, no ``-``) is real crontab's "every step
+    units, starting here" - the implicit range runs from that number up to the
+    field's own maximum, exactly as ``*/5`` does from the field's minimum. So
+    ``0/5`` for minutes is ``{0,5,10,...,55}``, and ``10/20`` for hours is
+    ``{10}`` (the next value, 30, is clipped by the field's own 0-23 range). A
+    bare number with NO step still means exactly that one value, same as always.
+    """
+    if not text:
+        raise PluginDeclarationError(f"the {label} field is empty")
+    values: set[int] = set()
+    for term in text.split(","):
+        if not term:
+            raise PluginDeclarationError(f"the {label} field has an empty entry between commas")
+        base, slash, step_text = term.partition("/")
+        step = 1
+        if slash:
+            if not step_text.isdigit() or int(step_text) == 0:
+                raise PluginDeclarationError(
+                    f"the {label} field's step {step_text[:20]!r} must be a positive whole number"
+                )
+            step = int(step_text)
+        if base == "*":
+            start, end = lo, hi
+        elif "-" in base:
+            left, _, right = base.partition("-")
+            start = _cron_int(left, label, lo, hi)
+            end = _cron_int(right, label, lo, hi)
+            if start > end:
+                raise PluginDeclarationError(f"the {label} field's range {base!r} goes backwards")
+        else:
+            start = _cron_int(base, label, lo, hi)
+            # A bare number alone means just that value; with a step, it is the
+            # start of an implicit range to the field's maximum (see above).
+            end = hi if slash else start
+        values.update(range(start, end + 1, step))
+    if hi == 7:  # weekday: 0 and 7 both mean Sunday
+        values = {0 if v == 7 else v for v in values}
+    return frozenset(values), text == "*"
+
+
+@dataclass(frozen=True, slots=True)
+class CronSpec:
+    """A parsed 5-field cron expression (minute hour day month weekday), numeric
+    only, with ``*``, ranges, steps and lists (``1-5``, ``*/15``, ``1,3,5``).
+
+    Built once, by :func:`parse_cron`, and reused to test any number of moments
+    against it with no further parsing - which is what the core's scheduler does,
+    once a minute, for every active cron schedule.
+    """
+
+    minutes: frozenset[int]
+    hours: frozenset[int]
+    days: frozenset[int]
+    months: frozenset[int]
+    weekdays: frozenset[int]
+    #: Whether the day-of-month / weekday fields were given as something other than
+    #: ``*``, which decides how the two combine - see :meth:`matches`.
+    day_restricted: bool
+    weekday_restricted: bool
+
+    def matches(self, moment: datetime) -> bool:
+        """Does this local moment (in whatever zone the caller means) satisfy the
+        expression? Minute-granular: seconds and smaller are not looked at, as in
+        cron itself."""
+        if moment.minute not in self.minutes or moment.hour not in self.hours:
+            return False
+        if moment.month not in self.months:
+            return False
+        day_ok = moment.day in self.days
+        weekday_ok = _cron_weekday(moment) in self.weekdays
+        if self.day_restricted and self.weekday_restricted:
+            # The one well-known quirk of the 5-field format: with BOTH day-of-month
+            # and weekday restricted, a match on either is enough (not both) - cron
+            # has always worked this way, however surprising it looks at first.
+            return day_ok or weekday_ok
+        return day_ok and weekday_ok
+
+    def next_after(self, moment: datetime, *, horizon_minutes: int = 64_800) -> datetime | None:
+        """The first matching minute strictly after ``moment``, or ``None`` if there
+        is none within ``horizon_minutes`` (45 days, by default).
+
+        The horizon exists because a cron expression can name a day that never
+        occurs (day 31 in a month that never has one; February 30), in which case
+        no minute ever matches - without a limit, the search would never return.
+        For display only (``!plugins <name>``'s "next run"): live firing never
+        calls this, it only tests the current minute with :meth:`matches`, which
+        costs the same whether the expression is common or impossible.
+        """
+        candidate = (moment + timedelta(minutes=1)).replace(second=0, microsecond=0)
+        for _ in range(horizon_minutes):
+            if self.matches(candidate):
+                return candidate
+            candidate += timedelta(minutes=1)
+        return None
+
+
+def parse_cron(expr: object) -> CronSpec:
+    """Validate and parse a 5-field cron expression: minute hour day month weekday.
+
+    Raises :class:`PluginDeclarationError` with a message naming the field and
+    what is wrong with it.
+    """
+    if not isinstance(expr, str):
+        raise PluginDeclarationError(f"cron must be a string, not {type(expr).__name__}")
+    parts = expr.split()
+    if len(parts) != 5:
+        raise PluginDeclarationError(
+            f"cron {expr[:60]!r} must have 5 space-separated fields (minute hour day month "
+            f"weekday), got {len(parts)}"
+        )
+    parsed = [
+        _parse_cron_field(part, label, lo, hi)
+        for part, (label, lo, hi) in zip(parts, _CRON_FIELDS, strict=True)
+    ]
+    (minutes, _), (hours, _), (days, day_wild), (months, _), (weekdays, weekday_wild) = parsed
+    return CronSpec(minutes, hours, days, months, weekdays, not day_wild, not weekday_wild)
+
+
+def schedule(
+    *args: Any,
+    cron: str | None = None,
+    every: int | str | None = None,
+) -> Callable[[Handler], Handler]:
+    """Declare a handler that runs on a timer, independent of any chat message.
+
+    ::
+
+        @schedule(cron="0 8 * * 1-5")
+        async def standup(ctx): ...
+
+        @schedule(every="10m")
+        async def poll(ctx): ...
+
+    Exactly one of ``cron`` or ``every``. ``cron`` is the standard five-field form
+    (minute hour day-of-month month weekday; numeric only, with ``*``, ranges,
+    steps and lists: ``1-5``, ``*/15``, ``1,3,5``), evaluated in ``SABLE_TIMEZONE``.
+    A step also applies to a bare number, not just ``*`` or a range, same as real
+    crontab: ``0/5`` for minutes means ``{0,5,10,...,55}`` (every 5 minutes,
+    starting at 0), not just the single minute 0. ``every`` is a duration -
+    seconds, or text like cooldown's ("30s", "5m", "1h", "1d") - at least a minute.
+
+    The handler is called once per room in the plugin's ``access.rooms`` (``"*"``
+    expands to every room the account currently follows) each time it is due, with
+    its own :class:`Context`: ``ctx.room`` is that one room, and there is no
+    triggering message, so ``ctx.args``, ``ctx.argv``, ``ctx.text`` and
+    ``ctx.match`` are all empty, ``ctx.actor_id``/``actor_name``/``user_id`` are
+    empty, ``ctx.message_id`` is 0 and ``ctx.is_admin`` is False. ``ctx.reply`` and
+    ``ctx.send`` are equivalent for a schedule - both post into a room the plugin
+    may post to, with nothing to thread under - and ``ctx.react`` always fails,
+    since there is no message to react to. Returning a string posts it exactly
+    like a command or phrase handler's return.
+
+    A missed run (the bot was down, the plugin was switched off) is never replayed:
+    the next check only looks forward from now.
+
+    Validated here, at decoration time, like :func:`command`.
+    """
+    if args:
+        raise PluginDeclarationError(
+            '@schedule needs arguments: write @schedule(cron="...") or @schedule(every="...")'
+        )
+    if (cron is None) == (every is None):
+        raise PluginDeclarationError("@schedule needs exactly one of cron= or every=, not both")
+    cron_text: str | None
+    seconds: int | None
+    if cron is not None:
+        if not isinstance(cron, str):
+            raise PluginDeclarationError(f"cron must be a string, not {type(cron).__name__}")
+        parse_cron(cron)  # raises PluginDeclarationError; the parsed form itself is not kept here
+        cron_text, seconds = cron, None
+    else:
+        cron_text, seconds = None, parse_every(every)
+
+    def decorate(handler: Handler) -> Handler:
+        ok = _check_handler(handler)
+        ident = getattr(handler, "__name__", "")
+        if not isinstance(ident, str) or not ID_RE.fullmatch(ident):
+            raise PluginDeclarationError(
+                f"{_label(handler)} has no usable name: a schedule handler's id is its function "
+                "name, letters, digits and '_', starting with a letter or '_'"
+            )
+        if ident in _taken_ids:
+            raise PluginDeclarationError(
+                f"the handler id {ident!r} is declared more than once (a handler's id is its "
+                "function name, unique across all kinds of trigger in the plugin)"
+            )
+        if _declarations.count >= MAX_HANDLERS:
+            raise PluginDeclarationError(f"a plugin may declare at most {MAX_HANDLERS} handlers")
+        _taken_ids.add(ident)
+        _declarations.schedules.append(
+            ScheduleDecl(id=ident, cron=cron_text, every=seconds, handler=ok)
         )
         return handler
 

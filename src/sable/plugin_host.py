@@ -318,6 +318,7 @@ class _Host:
         self._check = check
         self._handlers = {f"command:{decl.name}": decl.handler for decl in found.commands}
         self._handlers.update({f"phrase:{decl.id}": decl.handler for decl in found.phrases})
+        self._handlers.update({f"schedule:{decl.id}": decl.handler for decl in found.schedules})
         return {
             "commands": [
                 {"name": d.name, "aliases": list(d.aliases), "help": d.help, "usage": d.usage}
@@ -332,8 +333,7 @@ class _Host:
                 }
                 for d in found.phrases
             ],
-            # Step 3 fills this; the key is part of the wire format already.
-            "schedules": [],
+            "schedules": [{"id": d.id, "cron": d.cron, "every": d.every} for d in found.schedules],
             "has_check": check is not None,
         }
 

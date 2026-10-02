@@ -173,7 +173,7 @@ async def test_help_text_from_a_plugin_is_flattened(rigs, tmp_path) -> None:
     assert rig.bot.registry.get("go").help == "line one line two [31m"  # type: ignore[union-attr]
 
 
-async def test_phrases_are_listed_and_schedules_still_only_parsed(rigs, tmp_path) -> None:
+async def test_phrases_and_schedules_are_both_listed(rigs, tmp_path) -> None:
     declared = {
         "declare": {
             "commands": [cmd("go")],
@@ -189,7 +189,7 @@ async def test_phrases_are_listed_and_schedules_still_only_parsed(rigs, tmp_path
     assert len(record.declared.phrases) == 1
     assert len(record.declared.schedules) == 1
     assert "phrases: `greet`" in rig.manager.report()
-    assert "1 schedule(s)" in rig.manager.report()
+    assert "schedules: `standup` (cron 0 8 * * 1-5)" in rig.manager.report()
 
 
 async def test_a_check_that_rejects_fails_the_plugin_with_its_words(rigs, tmp_path) -> None:

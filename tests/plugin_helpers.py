@@ -8,6 +8,7 @@ import os
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -33,17 +34,32 @@ def fake_command(record: PluginRecord, cpu_seconds: int) -> list[str]:
     return [sys.executable, "-I", "-S", str(FAKE), str(record.entry)]
 
 
-class FakeClock:
-    """A monotonic clock a test moves by hand."""
+#: A fixed, deterministic start for the fake wall clock: a Monday (matters for
+#: cron's weekday field), midnight UTC.
+WALL_START = datetime(2024, 1, 1, 0, 0, tzinfo=UTC)
 
-    def __init__(self, start: float = 1000.0) -> None:
+
+class FakeClock:
+    """A monotonic clock a test moves by hand - and, in lockstep, a wall-clock
+    datetime, for schedules: cron needs real calendar time, which a monotonic
+    float cannot give it, but both advance together from one ``.advance()`` call,
+    so a test never has to keep two fakes in sync by hand.
+    """
+
+    def __init__(self, start: float = 1000.0, wall_start: datetime = WALL_START) -> None:
         self.now = start
+        self._wall = wall_start
 
     def __call__(self) -> float:
         return self.now
 
+    def wall(self) -> datetime:
+        """The matching wall-clock moment, for ``PluginManager(wall_clock=...)``."""
+        return self._wall
+
     def advance(self, seconds: float) -> None:
         self.now += seconds
+        self._wall += timedelta(seconds=seconds)
 
 
 def write_plugin(
@@ -145,6 +161,7 @@ class RigFactory:
             load_timeout=load_timeout,
             command=command,
             clock=clock,
+            wall_clock=clock.wall,
         )
         await manager.load_all(bot.registry)
         if attach:

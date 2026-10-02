@@ -152,6 +152,16 @@ how much a plugin listens to - that is a choice made in its settings file, by wh
 rooms, access and a cooldown of `0` or not - it only bounds what the plugin's own process can do
 and what the core checks before and after a call, exactly as for a command.
 
+A [schedule](plugins.md#schedules) changes it again, the other direction: it is standing *write*
+access on a timer, not read access to traffic. A schedule has no triggering person to check, so it
+bypasses the per-person access gate entirely - a plugin's own `users:`/`admins_only`, and every
+`SABLE_*` setting that gates who may trigger something, none of it applies, because there is no
+actor to apply it to. The only control left is which rooms a schedule is scoped to
+(`access.rooms`) and `SABLE_ALLOWED_ROOMS`: whoever can edit a plugin's settings file decides where
+and how often it posts unprompted, not whoever happens to be in the room at the time. [The boxed
+warning in plugins.md](plugins.md#schedules) is the full statement of what that means; review a
+plugin's declared schedules the same way, before giving it a room.
+
 ### What the boundary protects
 
 - **The app password and every other `SABLE_*` secret are not in a worker's environment.** A

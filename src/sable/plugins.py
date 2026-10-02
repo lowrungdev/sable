@@ -54,10 +54,12 @@ import signal
 import stat
 import sys
 import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol, TypeVar
+from zoneinfo import ZoneInfo
 
 import yaml
 from pydantic import (
@@ -80,15 +82,19 @@ from .plugin_api import (
     ID_RE,
     MAX_COOLDOWN,
     MAX_PHRASES,
+    MIN_EVERY_SECONDS,
+    CronSpec,
     PluginDeclarationError,
     check_breadth,
     check_phrases,
     fold,
+    parse_cron,
 )
 
 __all__ = [
     "Access",
     "CallOutcome",
+    "CronSpec",
     "PhraseHit",
     "PhraseMatcher",
     "PluginFailure",
@@ -176,6 +182,26 @@ MAX_COOLDOWN_ENTRIES = 10_000
 #: identity) skips normalisation entirely and is matched in full. Talk's own limit
 #: is 32,000 characters.
 MAX_MATCH_TEXT = 4_000
+#: Schedules across every plugin, summed. The per-plugin 4-in-flight cap bounds how
+#: many of one plugin's calls run at once, but not how many distinct timers the
+#: scheduler tracks, nor how fast its own queue of waiting calls could grow if
+#: dispatches kept arriving faster than that plugin's worker can serve them (many
+#: plugins, each with several ``every=60`` schedules fanning out to many rooms) -
+#: this is the backstop for that. Generous: a real deployment needs nowhere near it.
+MAX_TOTAL_SCHEDULES = 256
+#: The horizon ``!plugins <name>``/``--check`` search for a cron's upcoming fire
+#: times, in minutes - display only, nothing to do with live firing (which only
+#: ever tests the current minute, at the same cost regardless). Wider than
+#: :meth:`CronSpec.next_after`'s own default (45 days) so an ordinary low-frequency
+#: schedule (quarterly, yearly) still shows a next time instead of looking
+#: indistinguishable from a day that can never occur (February 30).
+SCHEDULE_DISPLAY_HORIZON_MINUTES = 400 * 24 * 60
+#: How often the scheduler looks for due schedules. Cron fires on the minute and
+#: ``every=`` is at least a minute, so this has no need to be fine-grained; short
+#: enough that nothing due waits long, cheap enough to run constantly (checking is
+#: a handful of set lookups per schedule, nothing that touches a worker unless
+#: something is actually due).
+SCHEDULER_TICK_SECONDS = 5.0
 #: Restarts allowed in the window before a plugin is switched off.
 MAX_RESTARTS = 3
 RESTART_WINDOW = 300.0
@@ -257,6 +283,23 @@ def _encode_safe(text: str) -> str:
     display oddly.
     """
     return text.encode("utf-8", "replace").decode("utf-8")
+
+
+def _human_duration(seconds: int) -> str:
+    """``seconds`` as a short phrase: "10 minutes", "1 hour", "2 days"."""
+    for unit, size in (("day", 86400), ("hour", 3600), ("minute", 60)):
+        if seconds % size == 0 and seconds // size >= 1:
+            count = seconds // size
+            return f"{count} {unit}{'s' if count != 1 else ''}"
+    return f"{seconds} second{'s' if seconds != 1 else ''}"
+
+
+def _schedule_when(sched: DeclaredSchedule) -> str:
+    """A schedule's timing, in words: the raw cron expression, or the ``every=``
+    interval written out."""
+    if sched.cron is not None:
+        return f"cron {sched.cron}"
+    return f"every {_human_duration(sched.every or 0)}"
 
 
 def _visible_text(text: str) -> str:
@@ -693,13 +736,39 @@ class DeclaredPhrase(BaseModel):
 
 
 class DeclaredSchedule(BaseModel):
-    """Step 3. Parsed so the wire format is already settled; nothing acts on it yet."""
+    """A handler that runs on a timer. Re-checked here, by the same rules as the
+    author's decorator: the worker is untrusted. ``every`` arrives on the wire
+    already converted to whole seconds (the worker did that at decoration time);
+    ``cron`` arrives as the original expression text and is parsed again here."""
 
     model_config = ConfigDict(extra="ignore")
 
-    id: str = Field(max_length=64)
+    id: str
     cron: str | None = Field(default=None, max_length=100)
-    every: str | None = Field(default=None, max_length=100)
+    every: StrictInt | None = Field(default=None, ge=MIN_EVERY_SECONDS, le=MAX_COOLDOWN)
+
+    @field_validator("id")
+    @classmethod
+    def _id(cls, value: str) -> str:
+        if not ID_RE.fullmatch(value):
+            raise ValueError(f"{_safe(value, 40)!r} is not a legal handler id")
+        return value
+
+    @field_validator("cron")
+    @classmethod
+    def _cron_is_valid(cls, value: str | None) -> str | None:
+        if value is not None:
+            try:
+                parse_cron(value)
+            except PluginDeclarationError as exc:
+                raise ValueError(str(exc)) from exc
+        return value
+
+    @model_validator(mode="after")
+    def _exactly_one(self) -> DeclaredSchedule:
+        if (self.cron is None) == (self.every is None):
+            raise ValueError("exactly one of cron or every must be set")
+        return self
 
 
 class Declaration(BaseModel):
@@ -849,6 +918,63 @@ class _PhraseEntry:
     cooldown: int
 
 
+@dataclass
+class _ScheduleEntry:
+    """One ``@schedule`` handler, as the scheduler tracks it between ticks.
+
+    Exactly one of ``cron``/``every`` is set, matching the declaration. The rest is
+    mutable bookkeeping, updated in place by :meth:`PluginManager._maybe_fire`:
+    never re-read from the plugin's declaration, so a restarted worker's handshake
+    (which re-declares the same schedule) does not reset a cron's dedupe or an
+    ``every=``'s phase.
+    """
+
+    plugin: str
+    handler: str
+    cron: CronSpec | None
+    every: int | None
+    #: Monotonic time (``PluginManager._clock``) this schedule's ``every=`` counts
+    #: from: when the plugin was loaded, never a fixed epoch - so plugins loaded at
+    #: different moments do not all align on the same wall-clock boundary (no
+    #: thundering herd), and a restart of the WORKER (not the whole manager) does
+    #: not shift the phase.
+    origin: float = 0.0
+    #: How many ``every=`` intervals have been handled (fired or skipped) so far.
+    #: Advanced to the current count whether or not a fire actually happened, so
+    #: that time the plugin was unavailable is never replayed as a catch-up burst.
+    every_done: int = 0
+    #: The naive LOCAL (year, month, day, hour, minute) a cron schedule was last
+    #: handled (fired or skipped), so a tick that runs twice inside one minute - or
+    #: a clock that is adjusted - cannot fire it twice for that minute. Keyed off
+    #: local wall time, not the UTC epoch minute: on a "fall back" DST day, the same
+    #: local minute (say 02:30) is visited twice at two UTC-distinct instants, and
+    #: keying off the epoch would fire it twice. Local time repeats too, but only
+    #: once a year, and it is what the author wrote the cron expression against.
+    cron_done_minute: tuple[int, int, int, int, int] | None = None
+    #: Whether "rooms currently followed" was unavailable the last time this
+    #: schedule's rooms were resolved (only set for ``"*"``), so the warning about
+    #: it is said once per failure, not on every tick while it persists.
+    star_warned: bool = False
+    #: Like ``star_warned``, but for a schedule with an explicit (non-``"*"``) room
+    #: list that SABLE_ALLOWED_ROOMS has entirely excluded: without this, such a
+    #: schedule would simply never fire again, forever, with nothing in the log to
+    #: explain why.
+    rooms_warned: bool = False
+    #: Dispatch tasks still running from this schedule's most recent fire (one per
+    #: room). Checked by :meth:`PluginManager._fire` before starting a new cohort:
+    #: if the previous one has not finished draining, firing again would pile more
+    #: tasks on top of it, and - if the handler's own time-per-room times its room
+    #: count exceeds the schedule's interval - that backlog never catches up and
+    #: grows without bound. We skip the occurrence instead (see the dedupe comment
+    #: on ``_maybe_fire``: the bookkeeping still advances, so it is not replayed).
+    active_tasks: set[asyncio.Task[None]] = field(default_factory=set)
+    #: Whether we have already warned (once, at WARNING) that this schedule's
+    #: previous cohort was still draining when the next occurrence came due, so a
+    #: sustained backlog logs once rather than every tick. Cleared once the cohort
+    #: finishes.
+    backlog_warned: bool = False
+
+
 # --------------------------------------------------------------------------- #
 # Discovery
 # --------------------------------------------------------------------------- #
@@ -879,6 +1005,11 @@ class PluginRecord:
     #: True for the later of two plugins with one name. It is listed and says why it
     #: failed, but the name belongs to the first: nothing looks the duplicate up.
     duplicate: bool = False
+    #: ``PluginManager._clock()`` the moment this plugin's handshake completed - an
+    #: ``every=`` schedule counts from here, not a fixed epoch, so that plugins
+    #: loaded at different moments (handshakes run with limited concurrency, so
+    #: they do not all finish at once) do not all tick in lockstep.
+    loaded_at: float = 0.0
 
     def redact(self, text: str) -> str:
         for secret in self.secrets:
@@ -1848,13 +1979,27 @@ class _Budget:
 
 
 class _ChatSink:
-    """Carries out a worker's actions for one call, and refuses what is not allowed."""
+    """Carries out a worker's actions for one call, and refuses what is not allowed.
 
-    def __init__(self, record: PluginRecord, port: ChatPort, event: TalkEvent, config: Config):
+    ``event`` is the triggering message for a command or a phrase; ``None`` for a
+    schedule, which has none. Without one, ``reply`` behaves exactly like ``send``
+    into ``room`` (there is nothing to thread a reply under), and ``react`` is
+    always refused (there is nothing to react to).
+    """
+
+    def __init__(
+        self,
+        record: PluginRecord,
+        port: ChatPort,
+        config: Config,
+        room: str,
+        event: TalkEvent | None = None,
+    ) -> None:
         self.record = record
         self.port = port
-        self.event = event
         self.config = config
+        self.room = room
+        self.event = event
         self.budget = _Budget()
 
     def may_post_to(self, room: str) -> bool:
@@ -1867,6 +2012,8 @@ class _ChatSink:
 
     async def __call__(self, action: str, args: dict[str, Any]) -> str | None:
         if action == "react":
+            if self.event is None:
+                return "react needs a triggering message, which a schedule call does not have"
             emoji = args.get("emoji")
             if not isinstance(emoji, str) or not emoji.strip() or len(emoji) > REACTION_LIMIT:
                 return "react needs an emoji"
@@ -1884,7 +2031,7 @@ class _ChatSink:
             return None  # nothing to say is not an error
         if not isinstance(silent, bool):
             return "silent must be true or false"
-        room = self.event.room_token
+        room = self.room
         if action == "send":
             target = args.get("room")
             if not isinstance(target, str) or not self.may_post_to(target):
@@ -1894,9 +2041,12 @@ class _ChatSink:
         allowed = self.budget.take(text)
         if allowed is None:
             return "this call has used up its actions or its characters"
-        if action == "reply":
+        if action == "reply" and self.event is not None:
             posted = await self.port.plugin_reply(self.event, allowed, silent=silent)
         else:
+            # A schedule's "reply" has no triggering message to thread under, so
+            # it posts exactly like `send` into its own dispatch room - the author
+            # docs say the two are equivalent for a schedule.
             posted = await self.port.plugin_send(room, allowed, silent=silent)
         return None if posted else "the message could not be posted"
 
@@ -1926,6 +2076,7 @@ class PluginManager:
         load_timeout: float = LOAD_TIMEOUT,
         command: CommandFactory = default_command,
         clock: Callable[[], float] = time.monotonic,
+        wall_clock: Callable[[], datetime] | None = None,
         quiet: bool = False,
     ) -> None:
         self.config = config
@@ -1936,20 +2087,49 @@ class PluginManager:
         self._timeout = float(config.plugins_timeout) if timeout is None else timeout
         self._load_timeout = load_timeout
         self._command = command
+        #: Monotonic seconds, for the breaker's restart window, phrase cooldowns and
+        #: an ``every=`` schedule's elapsed time. Never wall-clock time: see
+        #: ``_wall_clock`` below for that.
         self._clock = clock
+        #: The real, local date and time, for evaluating cron expressions - which
+        #: are inherently about the calendar, not an elapsed duration, so the
+        #: monotonic clock above cannot drive them. Defaults to "now" in
+        #: SABLE_TIMEZONE (or the host's zone if that is unset), exactly like
+        #: bot.now(); injectable so a test can move it without sleeping, the same
+        #: way the monotonic clock already is.
+        self._wall_clock = wall_clock or self._default_wall_clock
         self.records: list[PluginRecord] = []
         self.notes: list[str] = []
         self._by_name: dict[str, PluginRecord] = {}
         #: Why the process could not be made uninspectable; empty if it was.
         self.hardening_problem = ""
         self.is_admin: Callable[[TalkEvent], bool] = self._config_admin
+        #: Every room the account currently follows, for a schedule's "*" - set by
+        #: whoever owns that information (the poller, via the bot); None resolves
+        #: to nothing followed, so "*" never fires rather than guessing.
+        self.known_rooms: Callable[[], list[str]] = list
+        #: Where a schedule's dispatch is actually posted. Set by Bot.attach_plugins
+        #: (the bot implements ChatPort); schedules never fire without one.
+        self.port: ChatPort | None = None
         self._phrases: list[_PhraseEntry] = []
         #: When each (plugin, handler, room) may fire again, on the injected clock.
         #: Oldest first: a handler that fires is moved to the end.
         self._cooldowns: dict[tuple[str, str, str], float] = {}
+        self._schedules: list[_ScheduleEntry] = []
+        #: The same entries, by (plugin, handler id), for !plugins <name>'s "next
+        #: fire" display - the live entry holds the bookkeeping that display needs.
+        self._schedule_lookup: dict[tuple[str, str], _ScheduleEntry] = {}
+        self._scheduler_task: asyncio.Task[None] | None = None
+        #: Schedule dispatches in flight, so shutdown can wait for them and nothing
+        #: is lost to Python's "task was never awaited" garbage collection.
+        self._fire_tasks: set[asyncio.Task[None]] = set()
 
     def _config_admin(self, event: TalkEvent) -> bool:
         return not event.actor.is_bot and self.config.is_admin_user(event.actor.user_id)
+
+    def _default_wall_clock(self) -> datetime:
+        tz = self.config.timezone
+        return datetime.now(ZoneInfo(tz)) if tz else datetime.now().astimezone()
 
     # -- loading ------------------------------------------------------------- #
 
@@ -1981,6 +2161,8 @@ class PluginManager:
         await self._enforce_plugin_cap()
         self._by_name = {r.name: r for r in self.records if r.name and not r.duplicate}
         self._phrases = self._index_phrases()
+        self._schedules = self._index_schedules()
+        self._schedule_lookup = {(e.plugin, e.handler): e for e in self._schedules}
         return self.records
 
     async def _enforce_plugin_cap(self) -> None:
@@ -2023,6 +2205,38 @@ class PluginManager:
                     decl.cooldown,
                 )
                 for decl in sorted(record.declared.phrases, key=lambda d: d.id)
+            )
+        return found
+
+    def _index_schedules(self) -> list[_ScheduleEntry]:
+        """Every active plugin's schedule handlers, in plugin-name then handler-id
+        order, capped at :data:`MAX_TOTAL_SCHEDULES` combined (see its docstring).
+        A cron expression is re-parsed here from the declared text - the
+        declaration was already validated, so this cannot raise.
+        """
+        found: list[_ScheduleEntry] = []
+        over_cap = 0
+        for record in sorted(self.records, key=lambda r: r.name):
+            if record.status is not Status.ACTIVE or record.declared is None:
+                continue
+            for decl in sorted(record.declared.schedules, key=lambda d: d.id):
+                if len(found) >= MAX_TOTAL_SCHEDULES:
+                    over_cap += 1
+                    continue
+                found.append(
+                    _ScheduleEntry(
+                        record.name,
+                        decl.id,
+                        parse_cron(decl.cron) if decl.cron is not None else None,
+                        decl.every,
+                        origin=record.loaded_at,
+                    )
+                )
+        if over_cap:
+            log.warning(
+                "plugins: %d schedule(s) past the combined limit of %d are not scheduled",
+                over_cap,
+                MAX_TOTAL_SCHEDULES,
             )
         return found
 
@@ -2085,6 +2299,7 @@ class PluginManager:
         record.worker = worker
         try:
             record.declared = await worker.start(config.settings)
+            record.loaded_at = self._clock()
         except PluginFailure as exc:
             record.fail(str(exc))
             await worker.aclose()
@@ -2305,12 +2520,260 @@ class PluginManager:
         record = self._by_name.get(hit.plugin)
         if record is None:
             raise PluginFailure(f"the `{hit.plugin}` plugin is not running")
-        sink = _ChatSink(record, port, event, self.config)
+        sink = _ChatSink(record, port, self.config, event.room_token, event)
         payload = self._payload(
             hit.plugin, "phrase", hit.handler, "", [], event, self.is_admin(event), hit.phrase
         )
         outcome = await self.call(hit.plugin, f"phrase:{hit.handler}", payload, sink)
         return self._settle(record, f"the {hit.handler} handler", outcome, sink)
+
+    # -- schedules ------------------------------------------------------------- #
+    #
+    # Nobody triggers a schedule - there is no actor and no room until the fire
+    # itself picks one - so the access question is not "who may run this" (the
+    # allows() users/admins_only checks, which a schedule has no actor to satisfy
+    # and must never silently require) but only "is this plugin running, and is
+    # the room one of its own". That check lives here, not in allows(), on purpose.
+
+    def start_scheduler(self) -> None:
+        """Start the background task that checks schedules against the clock.
+
+        Idempotent, and a no-op when nothing has a schedule: there is nothing to
+        tick for.
+        """
+        if self._scheduler_task is None and self._schedules:
+            self._scheduler_task = asyncio.create_task(
+                self._run_scheduler(), name="sable-plugin-scheduler"
+            )
+
+    async def _run_scheduler(self) -> None:
+        while True:
+            try:
+                await self.scheduler_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("plugins: the scheduler tick failed")
+            await asyncio.sleep(SCHEDULER_TICK_SECONDS)
+
+    async def scheduler_tick(self, moment: datetime | None = None) -> None:
+        """Check every schedule against ``moment`` (the wall clock, by default) and
+        fire whatever is due. Returns as soon as the due ones are DISPATCHED, not
+        when they finish: each fire runs in its own background task (tracked in
+        ``_fire_tasks``), so one plugin's slow or stuck handler can never delay
+        checking - or firing - anyone else's schedule. Tests call this directly,
+        with an explicit ``moment``, instead of waiting on the real loop.
+        """
+        wall = moment if moment is not None else self._wall_clock()
+        mono = self._clock()
+        # The naive LOCAL minute, not the UTC epoch minute: see the comment on
+        # _ScheduleEntry.cron_done_minute for why (a "fall back" DST day visits the
+        # same local minute at two different UTC instants, and keying off the
+        # epoch would fire a cron whose hour matches that local hour twice).
+        minute_key = (wall.year, wall.month, wall.day, wall.hour, wall.minute)
+        for entry in self._schedules:
+            try:
+                await self._maybe_fire(entry, wall, mono, minute_key)
+            except Exception:
+                log.exception("plugin %s: checking schedule %s failed", entry.plugin, entry.handler)
+
+    async def wait_for_schedules(self) -> None:
+        """Wait for every schedule dispatch currently running. For tests, and for
+        :meth:`aclose`, which must not close a worker out from under one."""
+        if self._fire_tasks:
+            await asyncio.gather(*list(self._fire_tasks), return_exceptions=True)
+
+    async def _maybe_fire(
+        self,
+        entry: _ScheduleEntry,
+        wall: datetime,
+        mono: float,
+        minute_key: tuple[int, int, int, int, int],
+    ) -> None:
+        """Decide whether ``entry`` is due, exactly once per matching minute (cron)
+        or interval (``every=``), and fire it if so.
+
+        Missed runs are never replayed: the bookkeeping (``cron_done_minute`` /
+        ``every_done``) is advanced to the current minute or interval count
+        whichever way this returns - fired, or skipped because the plugin is not
+        available right now - so a bot that was down, or a plugin that was
+        switched off, never produces a burst of catch-up fires once it is back.
+        This is the one place that matters, and it is easy to get backwards: advance
+        the bookkeeping BEFORE checking whether the plugin can actually be fired.
+        """
+        if entry.cron is not None:
+            if entry.cron_done_minute == minute_key:
+                return
+            if not entry.cron.matches(wall):
+                return
+            entry.cron_done_minute = minute_key
+        else:
+            every = _present(entry.every)
+            due_count = int((mono - entry.origin) // every)
+            if due_count <= entry.every_done:
+                return
+            entry.every_done = due_count
+        await self._fire(entry)
+
+    async def _fire(self, entry: _ScheduleEntry) -> None:
+        """Fan out one due fire: one independent dispatch per room.
+
+        If the previous fire's cohort of per-room dispatches has not finished
+        draining yet, this occurrence is SKIPPED rather than piling more tasks on
+        top of it (see ``_ScheduleEntry.active_tasks``) - the dedupe bookkeeping in
+        ``_maybe_fire`` has already advanced either way, so this is not a replay
+        once the backlog clears, just a quieter way of saying "still busy".
+        """
+        record = self._by_name.get(entry.plugin)
+        if record is None or record.status is not Status.ACTIVE or record.worker is None:
+            return  # the plugin is gone entirely - nothing to log, nothing to fire
+        if record.worker.blocked:
+            # Routine, not alarming: a plugin whose breaker is open is expected to
+            # miss its fires until it recovers. INFO, not WARNING.
+            log.info(
+                "plugin %s: schedule %s was due, but the plugin is switched off; skipped",
+                entry.plugin,
+                entry.handler,
+            )
+            return
+        if entry.active_tasks:
+            if not entry.backlog_warned:
+                log.warning(
+                    "plugin %s: schedule %s is still draining %d room(s) from its previous "
+                    "fire; skipping this occurrence instead of piling more on top (the handler "
+                    "may be too slow for its own interval, or there are too many rooms)",
+                    entry.plugin,
+                    entry.handler,
+                    len(entry.active_tasks),
+                )
+                entry.backlog_warned = True
+            return
+        rooms = self._schedule_rooms(record, entry)
+        if rooms is None:
+            return
+        for room in rooms:
+            # Fire-and-forget: each room's dispatch is independent of the others: a
+            # worker that fails one room's call must not hold up another's, or the
+            # next schedule's check. The worker's own per-plugin 4-in-flight
+            # semaphore (Worker._slots) already queues a dispatch past that limit
+            # rather than drop it - a plugin with 5 rooms on one schedule produces 5
+            # concurrent calls here, and the 5th simply waits its turn there. The
+            # entry.active_tasks check above is what keeps that queueing bounded
+            # across repeated fires, not just within one.
+            self._spawn_fire(entry, self._dispatch_schedule(entry.plugin, entry.handler, room))
+
+    def _spawn_fire(self, entry: _ScheduleEntry, coro: Coroutine[Any, Any, None]) -> None:
+        task = asyncio.create_task(coro)
+        self._fire_tasks.add(task)
+        entry.active_tasks.add(task)
+
+        def _done(done: asyncio.Task[None]) -> None:
+            self._fire_tasks.discard(done)
+            entry.active_tasks.discard(done)
+            if not entry.active_tasks:
+                # The cohort has fully drained: a future backlog gets its own warning.
+                entry.backlog_warned = False
+
+        task.add_done_callback(_done)
+
+    def _schedule_rooms(self, record: PluginRecord, entry: _ScheduleEntry) -> list[str] | None:
+        """The concrete rooms this fire dispatches to: the plugin's own list, or -
+        for ``"*"`` - every room the account currently follows. ``None`` if there is
+        nothing postable to dispatch to at all: the caller skips this fire rather
+        than guess or dispatch to nothing, and a warning is logged once per
+        occurrence (cleared once rooms resolve again), not on every tick while it
+        persists.
+        """
+        rooms = _present(record.config).access.rooms
+        if "*" not in rooms:
+            entry.star_warned = False
+            resolved = [room for room in rooms if self.config.room_allowed(room)]
+            if not resolved:
+                if not entry.rooms_warned:
+                    log.warning(
+                        "plugin %s: schedule %s's rooms (%s) are all excluded by "
+                        "SABLE_ALLOWED_ROOMS; skipped",
+                        entry.plugin,
+                        entry.handler,
+                        ", ".join(rooms) or "none",
+                    )
+                    entry.rooms_warned = True
+                return None
+            entry.rooms_warned = False
+            return resolved
+        known = [room for room in self.known_rooms() if self.config.room_allowed(room)]
+        if not known:
+            if not entry.star_warned:
+                log.warning(
+                    "plugin %s: schedule %s uses rooms: ['*'], but no room the account follows "
+                    "is known yet; skipped (this is normal right at startup, before the first "
+                    "room scan)",
+                    entry.plugin,
+                    entry.handler,
+                )
+                entry.star_warned = True
+            return None
+        entry.star_warned = False
+        return known
+
+    async def _dispatch_schedule(self, plugin: str, handler: str, room: str) -> None:
+        """One room's dispatch of a scheduled fire. Nobody asked, so exactly like a
+        phrase handler: whatever goes wrong is for the log, never for the room, and
+        one room's failure here never touches another room's dispatch of the same
+        fire (each is its own independent call, caught independently).
+        """
+        port = self.port
+        record = self._by_name.get(plugin)
+        if port is None or record is None:
+            return
+        log.info("firing schedule %s/%s into %s", plugin, handler, room)
+        sink = _ChatSink(record, port, self.config, room)
+        payload = self._schedule_payload(plugin, handler, room)
+        try:
+            outcome = await self.call(plugin, f"schedule:{handler}", payload, sink)
+            reply = self._settle(record, f"the {handler} schedule", outcome, sink)
+        except CommandError as exc:
+            # The handler's own PluginError: for a command or a phrase this is
+            # shown as the plugin wrote it; nobody triggered this one, so like a
+            # phrase's it only ever reaches the log, redacted and one-lined exactly
+            # like any other worker-authored text that ends up there.
+            log.info(
+                "plugin %s: schedule %s said: %s", plugin, handler, self.log_safe(plugin, str(exc))
+            )
+            return
+        except PluginFailure as exc:
+            log.warning("plugin %s: schedule %s failed: %s", plugin, handler, exc)
+            return
+        except Exception:
+            log.exception("plugin %s: schedule %s crashed", plugin, handler)
+            return
+        if reply:
+            try:
+                await port.plugin_send(room, reply, silent=False)
+            except Exception:
+                log.exception("plugin %s: schedule %s's reply could not be posted", plugin, handler)
+
+    @staticmethod
+    def _schedule_payload(plugin: str, handler: str, room: str) -> dict[str, Any]:
+        """The context a scheduled handler is called with. There is no triggering
+        message, so everything about who sent it is empty; ``room`` is this one
+        dispatch's room - the only thing that varies across a schedule's fan-out.
+        """
+        return {
+            "plugin": plugin,
+            "trigger": "schedule",
+            "name": handler,
+            "args": "",
+            "argv": [],
+            "room": room,
+            "actor_id": "",
+            "user_id": "",
+            "actor_name": "",
+            "is_admin": False,
+            "message_id": 0,
+            "text": "",
+            "match": "",
+        }
 
     # -- calling ------------------------------------------------------------- #
 
@@ -2383,7 +2846,7 @@ class PluginManager:
         if record is None:
             raise PluginFailure(f"the `{plugin}` plugin is not running")
         event = ctx.event
-        sink = _ChatSink(record, ctx.bot, event, self.config)
+        sink = _ChatSink(record, ctx.bot, self.config, event.room_token, event)
         payload = self._payload(plugin, "command", command, ctx.args, ctx.argv, event, ctx.is_admin)
         outcome = await self.call(plugin, f"command:{command}", payload, sink)
         return self._settle(record, f"the {command} handler", outcome, sink)
@@ -2442,7 +2905,8 @@ class PluginManager:
         if declared.phrases:
             parts.append(f"phrases: {', '.join(p.id for p in declared.phrases)}")
         if declared.schedules:
-            parts.append(f"{len(declared.schedules)} schedule(s)")
+            described = ", ".join(f"{s.id} ({_schedule_when(s)})" for s in declared.schedules)
+            parts.append(f"schedules: {described}")
         return "; ".join(parts)
 
     def check_lines(self) -> list[str]:
@@ -2478,7 +2942,9 @@ class PluginManager:
                 if declared.phrases:
                     line += " - phrases: " + ", ".join(f"`{p.id}`" for p in declared.phrases)
                 if declared.schedules:
-                    line += f" - {len(declared.schedules)} schedule(s)"
+                    line += " - schedules: " + ", ".join(
+                        f"`{s.id}` ({_schedule_when(s)})" for s in declared.schedules
+                    )
             if record.rooms:
                 line += f" - rooms: {', '.join(record.rooms)}"
             lines.append(line)
@@ -2517,8 +2983,9 @@ class PluginManager:
                     )
                 lines.append(text)
             lines.extend(self._describe_phrase(phrase) for phrase in declared.phrases)
-            if declared.schedules:
-                lines.append(f"Schedules: {len(declared.schedules)}")
+            lines.extend(
+                self._describe_schedule(record.name, sched) for sched in declared.schedules
+            )
         if record.worker is not None and record.worker.restart_count:
             lines.append(f"Restarts since sable started: {record.worker.restart_count}")
         if record.last_error:
@@ -2537,10 +3004,78 @@ class PluginManager:
         how = "whole words" if phrase.whole_words else "anywhere in a word"
         return f"Phrase handler `{phrase.id}`: {shown[:600]} ({how}, cooldown {phrase.cooldown}s)"
 
+    def _describe_schedule(self, plugin: str, sched: DeclaredSchedule) -> str:
+        """A schedule handler for ``!plugins <name>``: when it runs, and - cheap to
+        compute, from the live entry's own bookkeeping, so looked up rather than
+        recomputed from scratch - its next one or two fire times in
+        SABLE_TIMEZONE.
+
+        The live entry can be missing from the lookup for one reason only, for a
+        plugin that is itself ACTIVE: :data:`MAX_TOTAL_SCHEDULES` dropped it. Say so
+        explicitly - that looks identical to an ordinary, working schedule
+        otherwise, which is exactly the ambiguity this line exists to avoid. If the
+        entry IS found but genuinely never matches anything within the (generous,
+        display-only) horizon - an impossible day of the month, say - say that too,
+        rather than silently showing no "next" line at all.
+        """
+        line = f"Schedule `{sched.id}`: {_schedule_when(sched)}"
+        entry = self._schedule_lookup.get((plugin, sched.id))
+        if entry is None:
+            return line + " - past the combined schedule limit, not running"
+        upcoming = self._next_fire_times(entry, count=2)
+        if upcoming:
+            when = ", ".join(moment.strftime("%Y-%m-%d %H:%M %Z") for moment in upcoming)
+            line += f" - next: {when}"
+        elif entry.cron is not None:
+            line += " - no fire found in the next year"
+        return line
+
+    def _next_fire_times(self, entry: _ScheduleEntry, *, count: int) -> list[datetime]:
+        """The next ``count`` times ``entry`` would fire, from now - for display
+        only (see :meth:`_describe_schedule`); live firing never calls this."""
+        if entry.cron is not None:
+            found: list[datetime] = []
+            moment = self._wall_clock()
+            for _ in range(count):
+                nxt = entry.cron.next_after(
+                    moment, horizon_minutes=SCHEDULE_DISPLAY_HORIZON_MINUTES
+                )
+                if nxt is None:
+                    break
+                found.append(nxt)
+                moment = nxt
+            return found
+        every = _present(entry.every)
+        wall, mono = self._wall_clock(), self._clock()
+        return [
+            wall + timedelta(seconds=entry.origin + (entry.every_done + 1 + i) * every - mono)
+            for i in range(count)
+        ]
+
     # -- ending -------------------------------------------------------------- #
 
     async def aclose(self) -> None:
-        """Shut every worker down, process groups included. Safe to call twice."""
+        """Stop the scheduler, give its fires a bounded grace to finish, then shut
+        every worker down, process groups included. Safe to call twice.
+
+        New fires must stop being started before the workers they would call are
+        closed out from under them, so the scheduler is stopped first. But waiting
+        for every in-flight fire is bounded by ``SHUTDOWN_GRACE`` - the same grace
+        a worker itself gets to exit - and NOT by any per-call timeout a schedule's
+        own handler might be sitting inside (which can be minutes): one hung
+        scheduled call must not delay every plugin's shutdown. Whatever has not
+        finished when the grace runs out keeps running in the background; closing
+        the worker right after generally ends it anyway (the call then fails and
+        its task quietly self-discards), exactly as a hung command or phrase call
+        is already handled.
+        """
+        if self._scheduler_task is not None:
+            self._scheduler_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._scheduler_task
+            self._scheduler_task = None
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(self.wait_for_schedules(), SHUTDOWN_GRACE)
         await asyncio.gather(
             *(record.worker.aclose() for record in self.records if record.worker is not None)
         )

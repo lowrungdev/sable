@@ -12,6 +12,25 @@ Format: `## <version>`, optionally followed by a date. Anything until the next
 
 ## Unreleased
 
+- **Plugins: scheduled triggers.** `@schedule(cron="0 8 * * 1-5")` or `@schedule(every="10m")`
+  runs a plugin handler on a timer, independent of any chat message. `cron` is the standard
+  5-field form (numeric only, with ranges, steps and lists), evaluated in `SABLE_TIMEZONE`;
+  `every` is a duration, at least a minute. A schedule fires once per room in its `access.rooms`
+  (`"*"` expands to every room the account currently follows), each room its own independent
+  call; a missed run (downtime, a switched-off plugin) is never replayed. A plugin that is
+  inactive, disabled or failed has no schedule at all; one that is switched off has each due fire
+  skipped and logged at INFO (not alarmingly) until it recovers. A room's fire is skipped (logged
+  once, at WARNING) rather than piled on top of an earlier one still in flight for the same
+  handler, so a schedule that cannot drain its own rooms within its own interval cannot build an
+  unbounded backlog; a room list entirely excluded by `SABLE_ALLOWED_ROOMS` likewise warns once
+  instead of silently never firing again. A cron is deduplicated by local wall time, not the UTC
+  instant, so it cannot double-fire across a "fall back" DST transition; `N/step` on a bare number
+  now means the real-crontab range from `N` to the field's maximum, not just `N` alone. Shutdown
+  waits at most the usual grace for a schedule's in-flight calls, never a hung handler's own (much
+  longer) call timeout. Failures are logged, never posted - nobody asked. `!plugins` and
+  `!plugins <name>` show each schedule in words, with its next one or two fire times (about 400
+  days out, so an ordinary low-frequency schedule still shows one) or a plain note when the
+  combined schedule limit dropped it; `--check` validates them too.
 - **Plugins: phrase triggers.** `@on_phrase(any=[...], whole_words=True, cooldown=30)` runs a
   plugin handler for ordinary messages that contain one of its phrases. Matching is literal and
   done by sable (case-insensitive, Unicode-normalised, never a pattern a plugin wrote), a

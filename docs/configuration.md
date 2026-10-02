@@ -150,7 +150,9 @@ command, with its name or alias in `SABLE_ADMIN_COMMANDS` or `SABLE_NORMAL_COMMA
 `SABLE_ALLOWED_ROOMS` when that is set, since row 1 comes first. A plugin's
 [phrase triggers](plugins.md#phrases) follow the identical rooms/users/admins_only rule, including
 being inactive until the plugin has rooms set, but never reach row 5's built-in command layer and
-never count against row 4.
+never count against row 4. A plugin's [schedules](plugins.md#schedules) also follow the
+room-scoping rule - `access.rooms` and `SABLE_ALLOWED_ROOMS` both - but have no per-person gate at
+all: there is no sender for `users:`/`admins_only`, row 4 or row 5 to ask about.
 
 Between rows 2 and 3 the account's own messages and anything from another bot (Talk actor type
 `bots`) are dropped, so sable never answers itself or another assistant. A trigger counts against

@@ -175,6 +175,10 @@ def create_app(
 
         manager = await load_plugins(config, app.state.bot)
         app.state.plugins = manager
+        if manager is not None:
+            # A schedule's "*" expands to every room the account currently
+            # follows; the poller is the one thing that knows that.
+            manager.known_rooms = lambda: poller.following
 
         # What is running, and with what. An operator reading only the first
         # dozen lines of the log should be able to tell whether the thing is
@@ -272,6 +276,8 @@ def create_app(
             await app.state.bot.check_nextcloud()
         if receiving:
             poller.start()
+            if manager is not None:
+                manager.start_scheduler()
 
         log.info("sable %s ready", __version__)
         try:

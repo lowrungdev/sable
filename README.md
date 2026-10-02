@@ -7,7 +7,8 @@ credential is that user's app password, which cannot be scoped, so give it an ac
 
 - Commands: `!help`, `!ping`, `!ai` and whatever you add, as a decorated async function, or as a
   [plugin](docs/plugins.md): a Python file and a settings file in a mounted directory, run in a
-  process of its own. A plugin can also answer to a phrase in ordinary chat, not just a command.
+  process of its own. A plugin can also answer to a phrase in ordinary chat, not just a command,
+  or run on its own timer (cron or a plain interval).
 - An assistant that answers through any OpenAI-compatible model backend, or through Open WebUI
   with tools.
 - Alerts into a conversation from CI, Alertmanager or a cron job with `POST /notify`, optionally
@@ -40,7 +41,7 @@ minute `!ping` answers `pong`.
 | --- | --- |
 | [purpose.md](docs/purpose.md) | What this is for, what it leaves alone, and how it is built |
 | [configuration.md](docs/configuration.md) | Every environment variable, with provider recipes and worked examples |
-| [plugins.md](docs/plugins.md) | Adding commands and phrase triggers without changing sable: the layout, the settings file, the author API, access and failures |
+| [plugins.md](docs/plugins.md) | Adding commands, phrase and schedule triggers without changing sable: the layout, the settings file, the author API, access and failures |
 | [deployment.md](docs/deployment.md) | Running it for real: the account, Docker, systemd, TLS, verifying, plugins, operating |
 | [security.md](docs/security.md) | Trust boundaries, how secrets are handled, and the risks that are accepted rather than solved |
 | [releasing.md](docs/releasing.md) | Branches, the version scheme, and the Forgejo pipeline that publishes |

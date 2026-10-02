@@ -152,7 +152,7 @@ How the pieces behave:
 
 ## Triggers
 
-A plugin declares what it answers to. Two kinds so far.
+A plugin declares what it answers to. Three kinds: a command, a phrase, or a timer.
 
 ### Commands
 
@@ -251,6 +251,105 @@ like a command's.
 > cooldown-0 phrases amounts to standing read access to that room's traffic. Review a plugin's
 > declared phrases the way you would review its permissions before enabling it: `!plugins <name>`
 > shows them for exactly this reason.
+
+### Schedules
+
+A plugin can also run on a timer, independent of any chat message:
+
+```python
+from sable.plugin_api import Context, schedule
+
+
+@schedule(cron="0 8 * * 1-5")
+async def standup(ctx: Context) -> str | None:
+    return "Stand-up in 5 minutes!"
+
+
+@schedule(every="10m")
+async def poll(ctx: Context) -> str | None:
+    return "Still here."
+```
+
+`@schedule(*, cron=None, every=None)` takes exactly one of the two - neither, or both, is a
+declaration error. The handler's id, for `!plugins`, the log and its own bookkeeping, is its
+function name, exactly like a phrase handler's, and unique across every kind of trigger in the
+plugin.
+
+**`cron="minute hour day month weekday"`** is the standard five-field form, numeric only - no
+month or weekday names, to keep the grammar small. Each field takes `*`, a number, a range
+(`1-5`), or a comma-separated list of any of those (`1,3,5`), and any of them may carry a `/step`.
+`standup` above runs at 08:00 on Monday through Friday (the weekday field: `0` and `7` both mean
+Sunday, `1` Monday, ... `6` Saturday). `*/15` on minutes means every 15 minutes (`0, 15, 30, 45`);
+so does `0/15` - but a step on a bare number is real crontab's reading, "every step units,
+starting here": an implicit range from that number up to the field's own maximum, not just that
+one value. So `0/5` on minutes is `{0, 5, 10, ..., 55}` (every 5 minutes, starting at 0 - the same
+set `*/5` gives), while `10/20` on hours (0-23) is just `{10}`: the next value, 30, falls outside
+the field's own range and is dropped. A bare number with no step still means exactly that one
+value, as always.
+
+**The famous gotcha**: when day-of-month *and* weekday are both restricted (neither is left as
+`*`), a cron fires when *either* matches, not when both do. `cron="0 0 1 * 1"` is not "the first
+of the month, if it's a Monday" - it is the first of the month, OR any Monday. Leave one of the
+two fields as `*` for a plain AND, which is what every other combination of fields already is.
+
+Evaluated in `SABLE_TIMEZONE` ([Process and time](configuration.md#process-and-time)) - the host's
+own local zone when that is unset, not UTC, the same default sable's own clock uses elsewhere.
+That is a different default from the plugin worker's own `TZ` environment variable, which is
+`UTC` when `SABLE_TIMEZONE` is unset ([the environment a plugin runs in](#the-environment-a-plugin-runs-in)).
+A cron is checked once a tick ([Limits](#limits)) and never fires twice for the same minute,
+including across a "fall back" daylight-saving transition where one local minute happens twice:
+the dedupe is keyed to local wall time, not the underlying instant.
+
+**`every="duration"`** is a plain interval: an integer number of seconds, or text like cooldown's
+("30s", "5m", "1h", "1d"). At least a minute (`MIN_EVERY_SECONDS` - this runs unattended, with
+nobody to notice a runaway loop) and at most a week, the same ceiling `@on_phrase`'s cooldown has.
+It counts from when the plugin loaded, not a fixed clock boundary, so two schedules loaded at
+different moments do not fire in lockstep.
+
+**The Context a schedule handler gets has no triggering user or message.** `ctx.actor_id`,
+`ctx.user_id` and `ctx.actor_name` are empty, `ctx.is_admin` is `False`, `ctx.message_id` is `0`,
+and `ctx.args`, `ctx.argv`, `ctx.text` and `ctx.match` are all empty - there was never a message to
+take them from. `ctx.room` is the one room this particular dispatch is for. `ctx.reply` and
+`ctx.send` are equivalent for a schedule: both post into a room the plugin may post to (there is
+nothing to thread a reply under), confined to the plugin's own `access.rooms` exactly as `ctx.send`
+always is. `ctx.react` always fails - there is no message to react to.
+
+**Fan-out.** A schedule fires once per matching moment and dispatches independently into *every*
+room in its `access.rooms` (`"*"` expands to every room the account currently follows) - N rooms
+means up to N concurrent calls to the handler, one per room, each with its own budget (the same
+10-action, 20,000-character cap any call gets). That is bounded by the same 4-calls-in-flight cap a
+command or a phrase already shares per plugin: a schedule with more than 4 rooms does not run more
+than 4 calls at once, the rest simply queue for a slot rather than being dropped.
+
+**A schedule's interval has to be long enough to finish.** If the previous fire's rooms have not
+all finished - replied, sent, crashed, or timed out - by the time the next occurrence is due, that
+occurrence is skipped outright and logged once, rather than piling another cohort of calls on top
+of the one still draining: a handler too slow for its own rooms would otherwise build a backlog
+that never catches up. This is also why `every=` has a 60-second floor: short enough for most
+things, long enough that a slow handler across a roomful of dispatches has a real chance to drain
+before it is asked to run again.
+
+**Access.** Nobody triggers a schedule - there is no actor and no message - so the person-level
+checks that gate a command or a phrase do not apply to it at all: a plugin's own `users:` and
+`admins_only` in its settings file have no effect on its schedules, and neither do
+`SABLE_ADMIN_COMMANDS`, `SABLE_RATE_LIMIT` or `SABLE_LLM_USERS`. What still applies is whether the
+plugin is active, and whether the room being fired into is one of its own `access.rooms` and is
+also allowed by `SABLE_ALLOWED_ROOMS` - excluded by either, that room is simply never dispatched
+to. An explicit room list `SABLE_ALLOWED_ROOMS` excludes entirely is logged once as a warning,
+since otherwise a schedule like that would never fire again with nothing in the log to say why.
+
+**A missed run is never replayed.** The scheduler only ever asks "is a matching minute, or a whole
+interval, due right now" - it keeps no backlog of minutes or intervals it did not get to check. A
+plugin that was down, switched off by the breaker, or not loaded yet when sable started resumes
+from "now" the next time it is checked; it never produces a burst of catch-up fires for whatever it
+missed.
+
+> **A schedule is standing write access on a timer.** It can post into every room it is scoped to,
+> on its own schedule, with no human ever asking it to and no per-person gate able to stop it - not
+> `SABLE_LLM_USERS`, not a plugin's own `users:`/`admins_only`, nothing. Review a plugin's
+> schedules - its `cron` or `every`, and its rooms - the way you would review a cron job's
+> crontab entry, because that is exactly what it is: `!plugins <name>` shows each one's next fire
+> times for exactly this reason.
 
 ## Writing a plugin
 
@@ -419,6 +518,11 @@ The worker is not started, and is not told anything, for an event the plugin may
 A [phrase handler](#phrases) is decided by steps 1 and 2 only - there is no command name for step
 3 to apply to - and, unlike a command, never counts against the rate limit.
 
+A [schedule](#schedules) is decided differently again: there is no sender for step 2 to ask about,
+so only step 1 applies - active, and the room in `access.rooms` and `SABLE_ALLOWED_ROOMS` both -
+and it never touches the rate limit either. A plugin's `users:` and `admins_only` restrict only its
+commands and phrases, never its schedules.
+
 `!plugins` is not a plugin command. It is a built-in that only administrators can use, whatever
 `SABLE_ADMIN_COMMANDS` says, and it is left out of `!help` for everybody else.
 
@@ -470,11 +574,13 @@ skipped.
   nothing, a flood of actions) is killed and counted as a crash.
 - **The circuit breaker.** A plugin may be restarted three times in five minutes. The next time
   it needs a restart inside that window it is **switched off**. For five minutes after, its commands
-  answer like commands that do not exist, `!plugins` shows `switched off, retrying in 4 min`, and
-  the startup count calls it failed. After the five minutes one call is let through: if it works
-  the plugin is whole again and its past is forgiven, and if it fails it is off for another five
-  minutes. So a plugin cannot be kept off for good by whoever can crash it, and one that is
-  broken costs a worker start every five minutes, not one per message.
+  answer like commands that do not exist, its schedules' due fires are skipped (logged at INFO,
+  not replayed once it recovers - [missed runs](#schedules)), `!plugins` shows
+  `switched off, retrying in 4 min`, and the startup count calls it failed. After the five minutes
+  one call is let through: if it works the plugin is whole again and its past is forgiven, and if
+  it fails it is off for another five minutes. So a plugin cannot be kept off for good by whoever
+  can crash it, and one that is broken costs a worker start every five minutes, not one per
+  message.
 - **A restart that declares something different** (different commands, a different `help`) is a
   different plugin, and is switched off until sable restarts.
 
@@ -498,7 +604,7 @@ All of these are constants in [`plugins.py`](../src/sable/plugins.py), apart fro
 | CPU time in one call | 10 times the timeout, in CPU seconds (a backstop for a loop the clock cannot interrupt; renewed for every call) |
 | A line from a worker | 1 MiB |
 | A worker's output to stderr in the log | 1,000 characters a line, 200 lines per 10 seconds |
-| Shutdown | a worker is asked to exit and has 2 seconds before it is killed |
+| Shutdown | a worker is asked to exit and has 2 seconds before it is killed; schedule dispatches still in flight get the same 2 seconds to finish before workers are closed out from under them |
 | Plugins / handlers per plugin | 64 / 32 |
 | Plugin file / settings file | 256 KiB / 64 KiB |
 | Phrases per handler, and their length after stripping | 1 to 20 phrases, 2 to 100 characters each |
@@ -506,6 +612,10 @@ All of these are constants in [`plugins.py`](../src/sable/plugins.py), apart fro
 | Phrase handlers fired per message | 3, round-robined across plugins |
 | Cooldowns remembered at once | 10,000, oldest-to-expire evicted first |
 | Of a non-ASCII message, what is searched for a phrase | its first 4,000 characters |
+| An `every=` interval | 60 seconds to 604,800 seconds (a week), the same ceiling a phrase's cooldown has |
+| Schedules, summed across every plugin | 256 (`MAX_TOTAL_SCHEDULES`); the rest are named in the log and shown as not running |
+| How often the scheduler checks for due schedules | every 5 seconds (`SCHEDULER_TICK_SECONDS`); cron accuracy is to the nearest tick, not the exact second |
+| `!plugins <name>`'s next-fire display, how far ahead it looks | about 400 days - display only; live firing has no such limit, it just checks every tick forever |
 
 A worker also asks the kernel to prefer it as the victim when memory runs out
 (`oom_score_adj`), best effort. There is no limit on all the workers together other than the
@@ -524,7 +634,7 @@ container's: see [what to size](deployment.md#running-plugins-optional).
   - `dice` - active - `!roll` - rooms: a1b2c3d4
   - `greeter` - switched off, retrying in 4 min - rooms: a1b2c3d4
   - `uptime` - inactive: no rooms set
-  - `weather` - active - `!weather` - phrases: `greet` - rooms: a1b2c3d4, e5f6g7h8
+  - `weather` - active - `!weather` - phrases: `greet` - schedules: `standup` (cron 0 8 * * 1-5) - rooms: a1b2c3d4, e5f6g7h8
   `!plugins <name>` for one in detail.
   ```
 
@@ -536,9 +646,15 @@ container's: see [what to size](deployment.md#running-plugins-optional).
   work, not a count of the literal word "failed".
 
   `!plugins weather` shows one: the file, rooms, users, each command with its usage and aliases,
-  each phrase handler with its phrases and cooldown, restarts since sable started, and the last
-  error. Neither shows a plugin's `settings`. The statuses are `active`, `restarting` (the worker
-  died and the next call starts a new one), `inactive: no rooms set`, `disabled`, `failed: <reason>`,
+  each phrase handler with its phrases and cooldown, each schedule with its `cron`/`every` and its
+  next one or two fire times (`Schedule \`standup\`: cron 0 8 * * 1-5 - next: 2024-01-02 08:00 UTC,
+  2024-01-03 08:00 UTC`), restarts since sable started, and the last error. A schedule the combined
+  `MAX_TOTAL_SCHEDULES` cap dropped says so instead of a next time
+  (`... - past the combined schedule limit, not running`), and one whose cron never matches
+  anything within the display horizon says that too (`... - no fire found in the next year`), so
+  neither looks like an ordinary schedule that just happens to fire a long way off. Neither shows
+  a plugin's `settings`. The statuses are `active`, `restarting` (the worker died and the next call
+  starts a new one), `inactive: no rooms set`, `disabled`, `failed: <reason>`,
   `switched off, retrying in N min`, `switched off, retrying on the next use` (the five minutes are
   up; the next call is the trial), and plain `switched off` (it declared something different after
   a restart, and stays off until sable itself restarts).
@@ -548,9 +664,10 @@ container's: see [what to size](deployment.md#running-plugins-optional).
   (exit 2). Run it against the real settings before restarting:
 
   ```
-    plugins:   2 active, 1 failed (/plugins)
+    plugins:   3 active, 1 failed (/plugins)
       dice: active (commands: roll, dice)
       greeter: active (commands: none; phrases: greet)
+      weather: active (commands: weather; schedules: standup (cron 0 8 * * 1-5))
       uptime: failed: its check rejected the settings: service 1 still has the placeholder url: replace it with your own
   ```
 - **The log.** Each plugin is named in it as `plugin <name>`. What a worker writes to stderr

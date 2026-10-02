@@ -37,7 +37,7 @@ src/sable/
   commands.py     the command registry and the built-in commands
   plugins.py      plugins, core side: discovery, settings, workers, access, `!plugins`
   plugin_host.py  plugins, worker side: the process that imports one plugin
-  plugin_api.py   what a plugin imports: `@command`, `@on_phrase`, `Context`, `PluginError` (stdlib only)
+  plugin_api.py   what a plugin imports: `@command`, `@on_phrase`, `@schedule`, `Context`, `PluginError` (stdlib only)
   llm.py          OpenAI-compatible /chat/completions client
   openwebui.py    Open WebUI backend, where Open WebUI runs the tool loop
   talk.py         Nextcloud Talk client (rooms, chat, reactions, who am I)
@@ -62,10 +62,12 @@ A message travels `poller.py` (one long poll per conversation) → `events.parse
 then a command, the model, or the ask reaction) → `talk.py`. A plugin's command takes the command
 path, through `PluginManager` to a worker process and back; a plugin's phrase handler takes its
 own path off a plain message (`PluginManager.phrase_hits`/`claim_phrase`, then the same worker
-call), never through the rate limit. `/notify` and `/hook/{name}` enter
-at `app.py` instead and never pass through `Bot.handle`. Why it is built this way:
-[docs/purpose.md](docs/purpose.md); which setting gates which step:
-[how the access layers combine](docs/configuration.md#how-the-access-layers-combine).
+call), never through the rate limit. A plugin's schedule handler takes no path off a message at
+all: `PluginManager`'s own background tick (`start_scheduler`/`scheduler_tick`) calls straight
+into a worker on a timer, with no `Bot.would_handle`/`handle` or rate limit involved, and no
+actor to check. `/notify` and `/hook/{name}` enter at `app.py` instead and never pass through
+`Bot.handle`. Why it is built this way: [docs/purpose.md](docs/purpose.md); which setting gates
+which step: [how the access layers combine](docs/configuration.md#how-the-access-layers-combine).
 
 ## Getting started in 5 minutes
 
@@ -119,6 +121,7 @@ environment.
 | `test_plugins.py`, `test_plugin_api.py` | plugin discovery and the settings schema; the author API |
 | `test_plugin_manager.py`, `test_plugin_worker.py` | the plugin manager and the chat flow, and the core's side of the worker (hangs, crashes, limits), against `fake_worker.py` |
 | `test_plugin_phrases.py` | `@on_phrase`: the matcher, cooldowns, the fairness cap, and what `would_handle`/`handle`, the rate limiter and the poller do with a phrase |
+| `test_plugin_schedules.py` | `@schedule`: cron and `every=` parsing, fire detection on a fake clock, fan-out across rooms, the backlog guard, shutdown, and `!plugins`/`--check` reporting |
 | `test_plugin_host.py`, `test_plugin_e2e.py`, `test_plugin_examples.py` | the real worker process, end to end; `examples/plugins` |
 | `test_docs.py` | the documentation, read back as claims about the code |
 
