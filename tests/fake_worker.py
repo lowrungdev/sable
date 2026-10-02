@@ -114,9 +114,48 @@ def result(rid: int, reply: str | None = None, **extra) -> None:
     send({"op": "result", "id": rid, "ok": True, "reply": reply, **extra})
 
 
+def on_phrase_call(rid: int, ctx: dict) -> None:
+    """A phrase handler. What it does is the ``phrase`` setting for its handler id:
+    ``reply`` (the default), ``none``, ``ctx``, ``mention``, ``crash``, ``hang``,
+    ``error`` (a PluginError), ``leak`` (a PluginError quoting a setting and an
+    embedded newline, as a hostile or buggy handler might) or ``exception``."""
+    behaviour = STATE["settings"].get("phrase", {}).get(ctx["name"], "reply")
+    if behaviour == "none":
+        result(rid, None)
+    elif behaviour == "ctx":
+        result(rid, json.dumps(ctx))
+    elif behaviour == "mention":
+        result(rid, "@all heads up")
+    elif behaviour == "crash":
+        os._exit(3)
+    elif behaviour == "hang":
+        time.sleep(3600)
+    elif behaviour == "error":
+        send({"op": "result", "id": rid, "ok": False, "error": "no thanks", "user_visible": True})
+    elif behaviour == "leak":
+        key = STATE["settings"]["api_key"]
+        text = f"bad key {key}\nFAKE LOG LINE: pwned"
+        send({"op": "result", "id": rid, "ok": False, "error": text, "user_visible": True})
+    elif behaviour == "exception":
+        send(
+            {
+                "op": "result",
+                "id": rid,
+                "ok": False,
+                "error": "ValueError: boom",
+                "user_visible": False,
+            }
+        )
+    else:
+        result(rid, f"{STATE['plugin']}/{ctx['name']} matched {ctx['match']}")
+
+
 def on_call(msg: dict) -> None:
     rid = msg["id"]
     ctx = msg["ctx"]
+    if ctx.get("trigger") == "phrase":
+        on_phrase_call(rid, ctx)
+        return
     args = ctx.get("args", "")
     word, _, rest = args.partition(" ")
     with STATE_LOCK:

@@ -17,8 +17,10 @@ from sable.commands import Command, Registry, registry
 from sable.config import Config, ConfigError
 from sable.plugins import (
     MAX_ENTRY_BYTES,
+    MAX_PLUGIN_FILES,
     MAX_PLUGINS,
     MAX_SETTINGS_BYTES,
+    PluginManager,
     SettingsError,
     Status,
     bootstrap_source,
@@ -101,8 +103,13 @@ def test_the_later_of_two_plugins_with_one_name_is_rejected_and_names_the_first(
     write_plugin(tmp_path, "weather", directory="b")
     first, second = discover(tmp_path)[0]
     assert first.status is not Status.FAILED
+    assert first.duplicate is False
     assert second.status is Status.FAILED
-    assert "a/weather.py" in second.reason
+    assert second.duplicate is True
+    assert "'weather' is already used by a/weather.py" in second.reason
+    # Told apart in lists, since both are called weather.
+    assert first.display == "weather"
+    assert second.display == "weather (b/weather.py)"
 
 
 def test_directories_starting_with_a_dot_or_an_underscore_are_skipped(tmp_path: Path) -> None:
@@ -177,14 +184,6 @@ def test_an_oversize_settings_file_is_rejected(tmp_path: Path) -> None:
     write_plugin(tmp_path, "big", raw_yaml="#" * (MAX_SETTINGS_BYTES + 1))
     records, _ = discover(tmp_path)
     assert records[0].status is Status.FAILED
-
-
-def test_at_most_sixty_four_plugins_are_taken(tmp_path: Path) -> None:
-    for i in range(MAX_PLUGINS + 3):
-        write_plugin(tmp_path, f"p{i:03d}")
-    records, _ = discover(tmp_path)
-    assert [r.status is Status.FAILED for r in records[:MAX_PLUGINS]] == [False] * MAX_PLUGINS
-    assert all(r.status is Status.FAILED and "more than" in r.reason for r in records[MAX_PLUGINS:])
 
 
 def test_records_come_in_sorted_path_order(tmp_path: Path) -> None:
@@ -787,3 +786,72 @@ def test_compose_does_not_run_an_init_process() -> None:
         "read. Remove it; the trade-off is explained in docs/security.md "
         "(plugins and the process boundary)."
     )
+
+
+# --------------------------------------------------------------------------- #
+# The cap counts plugins that would be started (further, with a real handshake,
+# in test_plugin_manager.py: only a plugin that actually loads should count or be
+# counted against, whatever stage a DIFFERENT plugin failed at - see L7).
+# --------------------------------------------------------------------------- #
+
+
+def scanned(root: Path) -> PluginManager:
+    """Discovery and the checks that need no worker, which is where the cap is applied."""
+    manager = PluginManager(make_config(plugins_dir=str(root)))
+    manager.records, manager.notes = discover(root)
+    manager._prepare_all()
+    return manager
+
+
+def test_inactive_and_disabled_plugins_take_no_place(tmp_path) -> None:
+    for number in range(10):
+        write_plugin(tmp_path, f"a{number:02d}", rooms=None)  # inactive
+    for number in range(5):
+        write_plugin(tmp_path, f"b{number:02d}", enabled=False)
+    for number in range(MAX_PLUGINS):
+        write_plugin(tmp_path, f"c{number:02d}")
+    manager = scanned(tmp_path)
+    counts = dict.fromkeys(Status, 0)
+    for record in manager.records:
+        counts[record.status] += 1
+    assert counts[Status.ACTIVE] == MAX_PLUGINS
+    assert counts[Status.INACTIVE] == 10
+    assert counts[Status.DISABLED] == 5
+    assert counts[Status.FAILED] == 0
+
+
+def test_a_failed_settings_file_takes_no_place_either(tmp_path) -> None:
+    for number in range(5):
+        write_plugin(tmp_path, f"a{number}", raw_yaml="surprise: true\n")
+    for number in range(MAX_PLUGINS):
+        write_plugin(tmp_path, f"p{number:02d}")
+    manager = scanned(tmp_path)
+    assert sum(r.status is Status.ACTIVE for r in manager.records) == MAX_PLUGINS
+
+
+def crowded(root: Path, total: int) -> None:
+    """``total`` plugins broken at the structure stage, spread over directories (a
+    directory is only read up to 256 files)."""
+    for number in range(total):
+        folder = root / f"d{number // 90:02d}"
+        folder.mkdir(exist_ok=True)
+        (folder / f"x{number:03d}_settings.yaml").write_text("x: 1\n")
+
+
+def test_the_scan_is_bounded_and_says_what_it_did_not_read(tmp_path) -> None:
+    crowded(tmp_path, MAX_PLUGIN_FILES + 14)
+    records, _ = discover(tmp_path)
+    assert len(records) == MAX_PLUGIN_FILES + 1
+    assert records[0].label == "d00/x000.py"
+    last = records[-1]
+    assert last.status is Status.FAILED
+    assert last.display == "(and 14 more settings files)"
+    assert f"at most {MAX_PLUGIN_FILES}" in last.reason
+    assert "found 14 more" in last.reason
+
+
+def test_a_scan_within_the_bound_has_no_overflow_record(tmp_path) -> None:
+    crowded(tmp_path, MAX_PLUGIN_FILES)
+    records, _ = discover(tmp_path)
+    assert len(records) == MAX_PLUGIN_FILES
+    assert not any(r.label.startswith("(and") for r in records)

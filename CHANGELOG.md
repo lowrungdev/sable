@@ -12,6 +12,15 @@ Format: `## <version>`, optionally followed by a date. Anything until the next
 
 ## Unreleased
 
+- **Plugins: phrase triggers.** `@on_phrase(any=[...], whole_words=True, cooldown=30)` runs a
+  plugin handler for ordinary messages that contain one of its phrases. Matching is literal and
+  done by sable (case-insensitive, Unicode-normalised, never a pattern a plugin wrote), a
+  command or a message to the bot never fires one, the access rules are the same as for
+  commands, and each handler has a cooldown per room. At most three handlers fire for one
+  message, round-robined across plugins so one plugin's handlers can never starve another's; a
+  failing one is logged and never posted, and an ambient phrase match - whether it fires or
+  not - never costs a rate-limit token, unlike a command or a mention. `!plugins` lists the
+  phrase handlers.
 - **Plugins: add commands without changing sable.** Point `SABLE_PLUGINS_DIR` at a directory of
   plugins, each a `<name>.py` with a `<name>_settings.yaml` beside it, and their `!commands`
   appear in the conversations the settings file names. A plugin does nothing anywhere until it

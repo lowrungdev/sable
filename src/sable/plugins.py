@@ -60,16 +60,37 @@ from pathlib import Path
 from typing import Any, Protocol, TypeVar
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from .commands import Access, Command, CommandError, Context, Registry
 from .config import TOKEN_HINT, TOKEN_RE, Config
 from .events import CONTROL_RE, REACTION_LIMIT, TalkEvent
 from .mentions import defang_mentions
+from .plugin_api import (
+    DEFAULT_COOLDOWN,
+    ID_RE,
+    MAX_COOLDOWN,
+    MAX_PHRASES,
+    PluginDeclarationError,
+    check_breadth,
+    check_phrases,
+    fold,
+)
 
 __all__ = [
     "Access",
     "CallOutcome",
+    "PhraseHit",
+    "PhraseMatcher",
     "PluginFailure",
     "PluginManager",
     "PluginRecord",
@@ -98,6 +119,9 @@ NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}\Z")
 MAX_ENTRY_BYTES = 256 * 1024
 MAX_SETTINGS_BYTES = 64 * 1024
 MAX_PLUGINS = 64
+#: Settings files looked at in one scan, valid or not, so that a directory full of
+#: rubbish cannot make startup read it all. The first ones in path order are taken.
+MAX_PLUGIN_FILES = 256
 #: Bounds on how much of the directory is even looked at, so a hostile or broken
 #: mount cannot make startup wander.
 MAX_DIRECTORIES = 256
@@ -136,6 +160,22 @@ MAX_ACTIONS_PER_CALL = 10
 MAX_CHARS_PER_CALL = 20_000
 #: More action messages than this in one call is a flood, and a violation.
 MAX_ACT_MESSAGES_PER_CALL = MAX_ACTIONS_PER_CALL * 10
+#: Phrase handlers that may fire for one message, round-robined across plugins so
+#: that no one plugin's handlers can starve another's (see PluginManager.phrase_hits).
+MAX_PHRASE_FIRES_PER_MESSAGE = 3
+#: Cooldowns remembered at once. Past this, expired ones go first, then whichever
+#: remaining entry is soonest to expire (never by insertion order: a long cooldown
+#: claimed early must not be evicted ahead of a short one claimed later).
+MAX_COOLDOWN_ENTRIES = 10_000
+#: Only the leading characters of a message are ever folded and searched for
+#: phrases. Unicode NFKC normalisation of a long run of combining marks over one
+#: base character is quadratic in CPython - a crafted ~32,000 character message
+#: (one base character plus thousands of alternating combining marks) can stall
+#: normalisation for over a second. Capping the input before normalising, not
+#: after, keeps the worst case under ~10ms; ASCII text (where NFKC is always the
+#: identity) skips normalisation entirely and is matched in full. Talk's own limit
+#: is 32,000 characters.
+MAX_MATCH_TEXT = 4_000
 #: Restarts allowed in the window before a plugin is switched off.
 MAX_RESTARTS = 3
 RESTART_WINDOW = 300.0
@@ -204,6 +244,19 @@ def _safe(text: str, limit: int = 80) -> str:
 
 def _one_line(text: str, limit: int = MAX_ERROR_TEXT) -> str:
     return " ".join(CONTROL_RE.sub(" ", text).split())[:limit]
+
+
+def _encode_safe(text: str) -> str:
+    """``text``, with anything that cannot be encoded as UTF-8 (most often a lone
+    surrogate) replaced, so that printing or logging it can never raise.
+
+    A backstop, not the defence: a phrase that holds a surrogate is refused at
+    declaration time (see ``check_phrases`` in ``plugin_api.py``). This only keeps a
+    plugin that somehow has one anyway (an old declaration, a validation this does
+    not yet cover) from being able to crash ``!plugins <name>`` rather than merely
+    display oddly.
+    """
+    return text.encode("utf-8", "replace").decode("utf-8")
 
 
 def _visible_text(text: str) -> str:
@@ -608,14 +661,35 @@ class DeclaredCommand(BaseModel):
 
 
 class DeclaredPhrase(BaseModel):
-    """Step 2. Parsed so the wire format is already settled; nothing acts on it yet."""
+    """A handler for messages containing some phrases. Re-checked here, by the same
+    rules as the author's decorator: the worker is untrusted."""
 
     model_config = ConfigDict(extra="ignore")
 
-    id: str = Field(max_length=64)
-    any: list[str] = Field(default_factory=list, max_length=64)
-    whole_words: bool = True
-    cooldown: float | None = Field(default=None, ge=0)
+    id: str
+    any: list[str] = Field(min_length=1, max_length=MAX_PHRASES)
+    whole_words: StrictBool = True
+    cooldown: StrictInt = Field(default=DEFAULT_COOLDOWN, ge=0, le=MAX_COOLDOWN)
+
+    @field_validator("id")
+    @classmethod
+    def _id(cls, value: str) -> str:
+        if not ID_RE.fullmatch(value):
+            raise ValueError(f"{_safe(value, 40)!r} is not a legal handler id")
+        return value
+
+    @field_validator("any")
+    @classmethod
+    def _phrases(cls, value: list[str]) -> list[str]:
+        return list(check_phrases(value))
+
+    @model_validator(mode="after")
+    def _not_too_broad(self) -> DeclaredPhrase:
+        try:
+            check_breadth(self.any, self.whole_words)
+        except PluginDeclarationError as exc:
+            raise ValueError(str(exc)) from exc
+        return self
 
 
 class DeclaredSchedule(BaseModel):
@@ -650,9 +724,13 @@ class Declaration(BaseModel):
                 if name in names:
                     raise ValueError(f"the command name {name!r} is declared twice")
                 names.add(name)
+        ids: set[str] = set()
         for ident in [p.id for p in self.phrases] + [s.id for s in self.schedules]:
             if not ident:
                 raise ValueError("a handler has no id")
+            if ident in ids:
+                raise ValueError(f"the handler id {ident!r} is declared twice")
+            ids.add(ident)
         return self
 
     @property
@@ -668,6 +746,107 @@ def parse_declaration(raw: object) -> Declaration:
         return Declaration.model_validate(raw)
     except ValidationError as exc:
         raise PluginFailure(f"invalid declaration: {_pydantic_problems(exc)}") from exc
+
+
+# --------------------------------------------------------------------------- #
+# Phrases
+# --------------------------------------------------------------------------- #
+
+_WORD = re.compile(r"\w")
+
+
+class PhraseMatcher:
+    """Finds a literal phrase in a message. Never a pattern a plugin wrote.
+
+    Both sides are NFKC-normalised and casefolded (:func:`sable.plugin_api.fold`).
+    With ``whole_words`` a phrase must not be touched by a word character on a side
+    where its own edge is a word character: ``gm`` is in "gm!" and "say gm" and not in
+    "gmail", while ``:)`` or ``c++`` have non-word edges and match anywhere (the ``+``
+    side). Without it, any substring matches.
+
+    One compiled expression per phrase that needs a boundary, built from the escaped
+    literal and lookarounds only, so nothing in it can backtrack. A plain substring test
+    goes first: it is linear in the message, and it is what keeps a long phrase from
+    being tried at every position of a long message that does not even contain it. (One
+    alternation of all the phrases measured at 60-70 ms on a 32,000 character message of
+    near misses; this is under 5.)
+    """
+
+    def __init__(self, phrases: Sequence[str], whole_words: bool) -> None:
+        self._items: list[tuple[str, str, re.Pattern[str] | None]] = []
+        for declared in phrases:
+            folded = fold(declared).strip()
+            if not folded:
+                continue
+            pattern = None
+            if whole_words:
+                before = r"(?<!\w)" if _WORD.match(folded[0]) else ""
+                after = r"(?!\w)" if _WORD.match(folded[-1]) else ""
+                if before or after:
+                    pattern = re.compile(before + re.escape(folded) + after)
+            self._items.append((declared, folded, pattern))
+
+    def match(self, folded_text: str) -> str | None:
+        """The first declared phrase found in ``folded_text`` (already folded), or None."""
+        for declared, folded, pattern in self._items:
+            if folded not in folded_text:
+                continue
+            if pattern is None or pattern.search(folded_text):
+                return declared
+        return None
+
+
+#: The attribute :func:`_folded_for_matching` caches its result under, on the event
+#: itself. A name unlikely to collide with anything Talk or the rest of sable uses.
+_FOLD_CACHE_ATTR = "_sable_phrase_fold"
+
+
+def _folded_for_matching(text: str) -> str:
+    """``text``, ready to search for phrases: casefolded, and NFKC-normalised unless
+    it is already plain ASCII (where NFKC is always the identity, so normalising
+    would only cost time for nothing). Capped to :data:`MAX_MATCH_TEXT` BEFORE
+    normalising non-ASCII text, not after: the cost that needs capping is inside
+    normalisation itself, and slicing the result first would not avoid it.
+    """
+    if text.isascii():
+        return text.casefold()
+    return fold(text[:MAX_MATCH_TEXT])
+
+
+def _folded_message(event: TalkEvent) -> str:
+    """The event's message, folded for phrase matching - computed once and cached on
+    the event itself, because both ``would_handle`` and ``handle`` classify the same
+    event (see ``Bot._route``) and folding is the expensive part worth not doing
+    twice. ``TalkEvent`` is a frozen dataclass; ``object.__setattr__`` is how a cache
+    is attached to one without changing its declared, compared and hashed fields.
+    """
+    cached = getattr(event, _FOLD_CACHE_ATTR, None)
+    if isinstance(cached, str):
+        return cached
+    folded = _folded_for_matching(event.message)
+    object.__setattr__(event, _FOLD_CACHE_ATTR, folded)
+    return folded
+
+
+@dataclass(frozen=True)
+class PhraseHit:
+    """A phrase handler a message would fire."""
+
+    plugin: str
+    handler: str
+    #: The declared phrase that matched.
+    phrase: str
+    #: The handler's cooldown in seconds.
+    cooldown: int
+    room: str
+
+
+@dataclass
+class _PhraseEntry:
+    plugin: str
+    handler: str
+    matcher: PhraseMatcher
+    cooldown: int
 
 
 # --------------------------------------------------------------------------- #
@@ -697,6 +876,9 @@ class PluginRecord:
     #: The strings in its settings, longest first: blanked out of every message
     #: that carries text the plugin wrote, since a plugin may quote its own key.
     secrets: list[str] = field(default_factory=list, repr=False)
+    #: True for the later of two plugins with one name. It is listed and says why it
+    #: failed, but the name belongs to the first: nothing looks the duplicate up.
+    duplicate: bool = False
 
     def redact(self, text: str) -> str:
         for secret in self.secrets:
@@ -712,7 +894,13 @@ class PluginRecord:
 
     @property
     def display(self) -> str:
-        return self.name or f"(invalid name) {self.label}"
+        if self.duplicate:
+            return f"{self.name} ({self.label})"
+        if self.name:
+            return self.name
+        if self.label.startswith("("):
+            return self.label
+        return f"(invalid name) {self.label}"
 
     @property
     def state(self) -> str:
@@ -770,6 +958,7 @@ def discover(root: Path) -> tuple[list[PluginRecord], list[str]]:
     records: list[PluginRecord] = []
     notes: list[str] = []
     owners: dict[str, str] = {}
+    unread = 0
     root = root.resolve()
     try:
         directories, more = _entries(root, MAX_DIRECTORIES)
@@ -811,9 +1000,9 @@ def discover(root: Path) -> tuple[list[PluginRecord], list[str]]:
                 continue
             stem = entry.name.removesuffix("_settings.yaml")
             label = _safe(f"{directory.name}/{stem}.py")
-            if len(records) >= 2 * MAX_PLUGINS:
-                notes.append("too many plugin files; the rest were not looked at")
-                return records, notes
+            if len(records) >= MAX_PLUGIN_FILES:
+                unread += 1
+                continue
             record = PluginRecord(name="", label=label, settings_path=Path(entry.path))
             records.append(record)
             name = stem.lower()
@@ -824,19 +1013,23 @@ def discover(root: Path) -> tuple[list[PluginRecord], list[str]]:
                 )
                 continue
             record.name = name
-            if len(records) > MAX_PLUGINS:
-                record.fail(
-                    f"more than {MAX_PLUGINS} plugins in the directory; this one is not loaded"
-                )
-                continue
             if name in owners:
-                record.fail(f"the name is already used by {owners[name]}")
+                # The first, in path order, keeps the name; this one never shadows it.
+                record.duplicate = True
+                record.fail(f"the name {name!r} is already used by {owners[name]}")
                 continue
             owners[name] = label
             if problem := _structure_problem(entry, by_name.get(f"{stem}.py"), stem):
                 record.fail(problem)
                 continue
             record.entry = Path(directory.path) / f"{stem}.py"
+    if unread:
+        overflow = PluginRecord(name="", label=f"(and {unread} more settings files)")
+        overflow.fail(
+            f"not looked at: sable reads at most {MAX_PLUGIN_FILES} plugin settings files, in "
+            f"path order, and found {unread} more after them"
+        )
+        records.append(overflow)
     return records, notes
 
 
@@ -1750,6 +1943,10 @@ class PluginManager:
         #: Why the process could not be made uninspectable; empty if it was.
         self.hardening_problem = ""
         self.is_admin: Callable[[TalkEvent], bool] = self._config_admin
+        self._phrases: list[_PhraseEntry] = []
+        #: When each (plugin, handler, room) may fire again, on the injected clock.
+        #: Oldest first: a handler that fires is moved to the end.
+        self._cooldowns: dict[tuple[str, str, str], float] = {}
 
     def _config_admin(self, event: TalkEvent) -> bool:
         return not event.actor.is_bot and self.config.is_admin_user(event.actor.user_id)
@@ -1781,8 +1978,53 @@ class PluginManager:
 
         await asyncio.gather(*(shake(r) for r in self.records if r.status is Status.ACTIVE))
         await self._settle_names(builtins)
-        self._by_name = {r.name: r for r in self.records if r.name}
+        await self._enforce_plugin_cap()
+        self._by_name = {r.name: r for r in self.records if r.name and not r.duplicate}
+        self._phrases = self._index_phrases()
         return self.records
+
+    async def _enforce_plugin_cap(self) -> None:
+        """At most :data:`MAX_PLUGINS` plugins are ever started.
+
+        Counted here, after the handshake and after name collisions are settled, so
+        that only a plugin that actually loaded - passed its settings and syntax
+        checks, imported cleanly, declared something sane, and (if it has one)
+        passed its own ``check`` - ever counts towards the limit or takes a place
+        from a later one. The first, in path order, keep their place; anything past
+        them is failed and never gets to keep its worker running.
+        """
+        admitted = 0
+        for record in self.records:
+            if record.status is not Status.ACTIVE:
+                continue
+            if admitted < MAX_PLUGINS:
+                admitted += 1
+                continue
+            worker = record.worker
+            record.worker = None
+            record.fail(
+                f"not loaded: sable starts at most {MAX_PLUGINS} plugins, and {MAX_PLUGINS} "
+                "that loaded successfully, in path order, already are"
+            )
+            if worker is not None:
+                await worker.aclose()
+
+    def _index_phrases(self) -> list[_PhraseEntry]:
+        """Every active plugin's phrase handlers, in plugin-name then handler-id order."""
+        found: list[_PhraseEntry] = []
+        for record in sorted(self.records, key=lambda r: r.name):
+            if record.status is not Status.ACTIVE or record.declared is None:
+                continue
+            found.extend(
+                _PhraseEntry(
+                    record.name,
+                    decl.id,
+                    PhraseMatcher(decl.any, decl.whole_words),
+                    decl.cooldown,
+                )
+                for decl in sorted(record.declared.phrases, key=lambda d: d.id)
+            )
+        return found
 
     def _prepare_all(self) -> None:
         for record in self.records:
@@ -1911,6 +2153,17 @@ class PluginManager:
         record = self._by_name.get(plugin)
         return bool(record and record.config and record.config.access.admins_only)
 
+    def log_safe(self, plugin: str, text: str) -> str:
+        """Worker-authored text, made fit for a log line: one line, with the plugin's
+        own settings values blanked if it is known. Never for text shown to the
+        person who triggered the call - a PluginError's chat-visible text stays
+        exactly as the plugin wrote it, for both commands and phrases alike; this is
+        only so that the same text, put in a log, cannot inject a fake log line or
+        quote a secret verbatim.
+        """
+        record = self._by_name.get(plugin)
+        return _one_line(record.redact(text) if record is not None else text)
+
     def allows(self, plugin: str, event: TalkEvent) -> Access:
         """May whoever caused this event trigger this plugin, here?
 
@@ -1944,7 +2197,162 @@ class PluginManager:
                 return Access.NOT_YOU
         return Access.OK
 
+    # -- phrases ------------------------------------------------------------- #
+
+    @property
+    def cooldown_entries(self) -> int:
+        """How many cooldowns are remembered right now."""
+        return len(self._cooldowns)
+
+    def _cooling(self, key: tuple[str, str, str], now: float) -> bool:
+        until = self._cooldowns.get(key)
+        return until is not None and now < until
+
+    def phrase_hits(self, event: TalkEvent) -> tuple[PhraseHit, ...]:
+        """The phrase handlers this message would fire. Reads, never writes.
+
+        Only the handlers whose plugin may be triggered by this person here (the same
+        :meth:`allows` as a command) and that are not cooling down are considered, and
+        the message is searched only for those. Cheap when no plugin has a phrase, and
+        for ordinary chatter that matches nothing: no worker is involved, and nothing is
+        consumed.
+
+        At most :data:`MAX_PHRASE_FIRES_PER_MESSAGE` fire, round-robined one per
+        distinct plugin before any plugin gets a second: otherwise a plugin with
+        several handlers on a broad, cooldown-0 phrase could fill every slot itself
+        and starve every other plugin's handler for that phrase, indefinitely.
+        """
+        if not self._phrases or not event.is_message:
+            return ()
+        now = self._clock()
+        allowed: dict[str, bool] = {}
+        folded: str | None = None
+        # One queue per eligible plugin, each in handler-id order (self._phrases is
+        # already sorted by plugin name then handler id, and dicts keep insertion
+        # order, so both the plugin order and each queue's order come for free).
+        queues: dict[str, list[_PhraseEntry]] = {}
+        for entry in self._phrases:
+            may = allowed.get(entry.plugin)
+            if may is None:
+                may = allowed[entry.plugin] = self.allows(entry.plugin, event) is Access.OK
+            if not may or self._cooling((entry.plugin, entry.handler, event.room_token), now):
+                continue
+            queues.setdefault(entry.plugin, []).append(entry)
+        if not queues:
+            return ()
+
+        hits: list[PhraseHit] = []
+        pending = list(queues.values())
+        while pending and len(hits) < MAX_PHRASE_FIRES_PER_MESSAGE:
+            still_pending = []
+            for queue in pending:
+                if len(hits) >= MAX_PHRASE_FIRES_PER_MESSAGE:
+                    break
+                entry = queue.pop(0)
+                if folded is None:
+                    folded = _folded_message(event)
+                matched = entry.matcher.match(folded)
+                if matched is not None:
+                    hits.append(
+                        PhraseHit(
+                            entry.plugin, entry.handler, matched, entry.cooldown, event.room_token
+                        )
+                    )
+                if queue:
+                    still_pending.append(queue)
+            pending = still_pending
+        return tuple(hits)
+
+    def claim_phrase(self, hit: PhraseHit) -> bool:
+        """Start a handler's cooldown, at the moment it is dispatched.
+
+        False if it is cooling down already, which can only be because something else
+        claimed it since :meth:`phrase_hits` looked.
+        """
+        now = self._clock()
+        key = (hit.plugin, hit.handler, hit.room)
+        if self._cooling(key, now):
+            return False
+        if hit.cooldown > 0:
+            self._cooldowns.pop(key, None)
+            self._cooldowns[key] = now + hit.cooldown
+            if len(self._cooldowns) > MAX_COOLDOWN_ENTRIES:
+                self._evict(now)
+        return True
+
+    def _evict(self, now: float) -> None:
+        """Keep the table bounded: what has expired goes first, then whichever of what
+        is left is soonest to expire - never by insertion order, which could otherwise
+        evict a long cooldown claimed early in favour of a short one claimed a moment
+        later, letting the long one's handler fire again before its time.
+        """
+        for key in [k for k, until in self._cooldowns.items() if until <= now]:
+            del self._cooldowns[key]
+        over = len(self._cooldowns) - MAX_COOLDOWN_ENTRIES
+        if over <= 0:
+            return
+        soonest = sorted(self._cooldowns.items(), key=lambda item: item[1])
+        for key, _ in soonest[:over]:
+            del self._cooldowns[key]
+
+    async def run_phrase(self, hit: PhraseHit, event: TalkEvent, port: ChatPort) -> str | None:
+        """Run one phrase handler for a message; the reply text, or None for silence.
+
+        Raises CommandError for a handler's own ``PluginError`` and :class:`PluginFailure`
+        when the plugin crashed, took too long or is switched off. Nobody asked, so the
+        caller logs both and says nothing in the room.
+        """
+        record = self._by_name.get(hit.plugin)
+        if record is None:
+            raise PluginFailure(f"the `{hit.plugin}` plugin is not running")
+        sink = _ChatSink(record, port, event, self.config)
+        payload = self._payload(
+            hit.plugin, "phrase", hit.handler, "", [], event, self.is_admin(event), hit.phrase
+        )
+        outcome = await self.call(hit.plugin, f"phrase:{hit.handler}", payload, sink)
+        return self._settle(record, f"the {hit.handler} handler", outcome, sink)
+
     # -- calling ------------------------------------------------------------- #
+
+    @staticmethod
+    def _payload(
+        plugin: str,
+        trigger: str,
+        name: str,
+        args: str,
+        argv: list[str],
+        event: TalkEvent,
+        is_admin: bool,
+        match: str = "",
+    ) -> dict[str, Any]:
+        """The context a handler is called with. Only what the event itself says."""
+        return {
+            "plugin": plugin,
+            "trigger": trigger,
+            "name": name,
+            "args": args,
+            "argv": argv,
+            "room": event.room_token,
+            "actor_id": event.actor.id,
+            "user_id": event.actor.user_id,
+            "actor_name": event.actor.name,
+            "is_admin": is_admin,
+            "message_id": event.message_id,
+            "text": event.message,
+            "match": match,
+        }
+
+    def _settle(
+        self, record: PluginRecord, what: str, outcome: CallOutcome, sink: _ChatSink
+    ) -> str | None:
+        """Turn what a worker said into a reply, a CommandError or a PluginFailure."""
+        if not outcome.ok:
+            if outcome.user_visible and outcome.error:
+                raise CommandError(outcome.error)
+            record.last_error = outcome.error or "the handler failed"
+            log.warning("plugin %s: %s failed: %s", record.name, what, record.last_error)
+            raise PluginFailure(f"the `{record.name}` plugin crashed")
+        return sink.final(outcome.reply)
 
     async def call(
         self, plugin: str, handler: str, payload: dict[str, Any], sink: ActSink
@@ -1976,29 +2384,9 @@ class PluginManager:
             raise PluginFailure(f"the `{plugin}` plugin is not running")
         event = ctx.event
         sink = _ChatSink(record, ctx.bot, event, self.config)
-        payload = {
-            "plugin": plugin,
-            "trigger": "command",
-            "name": command,
-            "args": ctx.args,
-            "argv": ctx.argv,
-            "room": event.room_token,
-            "actor_id": event.actor.id,
-            "user_id": event.actor.user_id,
-            "actor_name": event.actor.name,
-            "is_admin": ctx.is_admin,
-            "message_id": event.message_id,
-            "text": event.message,
-            "match": "",
-        }
+        payload = self._payload(plugin, "command", command, ctx.args, ctx.argv, event, ctx.is_admin)
         outcome = await self.call(plugin, f"command:{command}", payload, sink)
-        if not outcome.ok:
-            if outcome.user_visible and outcome.error:
-                raise CommandError(outcome.error)
-            record.last_error = outcome.error or "the handler failed"
-            log.warning("plugin %s: the %s handler failed: %s", plugin, command, record.last_error)
-            raise PluginFailure(f"the `{plugin}` plugin crashed")
-        return sink.final(outcome.reply)
+        return self._settle(record, f"the {command} handler", outcome, sink)
 
     # -- reporting ----------------------------------------------------------- #
 
@@ -2052,7 +2440,7 @@ class PluginManager:
             return "nothing loaded"
         parts = [f"commands: {', '.join(declared.command_names) or 'none'}"]
         if declared.phrases:
-            parts.append(f"{len(declared.phrases)} phrase(s)")
+            parts.append(f"phrases: {', '.join(p.id for p in declared.phrases)}")
         if declared.schedules:
             parts.append(f"{len(declared.schedules)} schedule(s)")
         return "; ".join(parts)
@@ -2088,7 +2476,7 @@ class PluginManager:
                         f"`{prefix}{command.name}`" for command in declared.commands
                     )
                 if declared.phrases:
-                    line += f" - {len(declared.phrases)} phrase(s)"
+                    line += " - phrases: " + ", ".join(f"`{p.id}`" for p in declared.phrases)
                 if declared.schedules:
                     line += f" - {len(declared.schedules)} schedule(s)"
             if record.rooms:
@@ -2128,8 +2516,7 @@ class PluginManager:
                         " (aliases: " + ", ".join(f"`{prefix}{a}`" for a in command.aliases) + ")"
                     )
                 lines.append(text)
-            if declared.phrases:
-                lines.append(f"Phrases: {len(declared.phrases)}")
+            lines.extend(self._describe_phrase(phrase) for phrase in declared.phrases)
             if declared.schedules:
                 lines.append(f"Schedules: {len(declared.schedules)}")
         if record.worker is not None and record.worker.restart_count:
@@ -2138,6 +2525,17 @@ class PluginManager:
             lines.append(f"Last error: {record.redact(record.last_error)}")
         lines += [f"Warning: {warning}" for warning in record.warnings]
         return "\n".join(lines)
+
+    @staticmethod
+    def _describe_phrase(phrase: DeclaredPhrase) -> str:
+        """A phrase handler for ``!plugins <name>``: the phrases and the cooldown. A phrase
+        is plain text an author chose, shown between quotes and cut to a sane length.
+        ``_encode_safe`` is a backstop, not the defence (see its docstring)."""
+        shown = ", ".join(
+            f'"{_one_line(_encode_safe(p).replace(chr(96), chr(39)), 60)}"' for p in phrase.any
+        )
+        how = "whole words" if phrase.whole_words else "anywhere in a word"
+        return f"Phrase handler `{phrase.id}`: {shown[:600]} ({how}, cooldown {phrase.cooldown}s)"
 
     # -- ending -------------------------------------------------------------- #
 

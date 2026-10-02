@@ -22,7 +22,7 @@ from plugin_helpers import (
 from sable.__main__ import main
 from sable.app import create_app
 from sable.commands import Access, Registry, registry
-from sable.plugins import PluginManager, PluginStartupError, Status
+from sable.plugins import MAX_PLUGINS, PluginManager, PluginStartupError, Status
 
 pytestmark = posix_only
 
@@ -173,7 +173,7 @@ async def test_help_text_from_a_plugin_is_flattened(rigs, tmp_path) -> None:
     assert rig.bot.registry.get("go").help == "line one line two [31m"  # type: ignore[union-attr]
 
 
-async def test_phrases_and_schedules_are_parsed_and_ignored_in_step_one(rigs, tmp_path) -> None:
+async def test_phrases_are_listed_and_schedules_still_only_parsed(rigs, tmp_path) -> None:
     declared = {
         "declare": {
             "commands": [cmd("go")],
@@ -188,7 +188,8 @@ async def test_phrases_and_schedules_are_parsed_and_ignored_in_step_one(rigs, tm
     assert record.declared is not None
     assert len(record.declared.phrases) == 1
     assert len(record.declared.schedules) == 1
-    assert "1 phrase(s)" in rig.manager.report()
+    assert "phrases: `greet`" in rig.manager.report()
+    assert "1 schedule(s)" in rig.manager.report()
 
 
 async def test_a_check_that_rejects_fails_the_plugin_with_its_words(rigs, tmp_path) -> None:
@@ -965,3 +966,161 @@ async def test_a_relative_plugins_directory_works(rigs, tmp_path, monkeypatch) -
         assert manager.root.is_absolute()
     finally:
         await manager.aclose()
+
+
+# --------------------------------------------------------------------------- #
+# Two plugins with one name
+# --------------------------------------------------------------------------- #
+
+
+@respx.mock
+async def test_a_duplicate_name_never_shadows_the_plugin_that_holds_it(rigs, tmp_path) -> None:
+    write_plugin(
+        tmp_path,
+        "dup",
+        directory="d1",
+        settings={
+            "declare": {
+                "commands": [{"name": "hi"}],
+                "phrases": [{"id": "greet", "any": ["gm"], "cooldown": 0}],
+                "schedules": [],
+            }
+        },
+    )
+    write_plugin(
+        tmp_path,
+        "dup",
+        directory="d2",
+        settings={
+            "declare": {
+                "commands": [{"name": "other"}],
+                "phrases": [{"id": "later", "any": ["hello"], "cooldown": 0}],
+                "schedules": [],
+            }
+        },
+    )
+    rig = await rigs(tmp_path, admin_users=["maser"])
+    winner, loser = rig.manager.records
+    assert winner.status is Status.ACTIVE
+    assert loser.status is Status.FAILED
+    assert loser.duplicate
+    assert "'dup' is already used by d1/dup.py" in loser.reason
+    assert loser.worker is None
+
+    # Everything keyed by name is the winner's.
+    assert rig.manager.allows("dup", event("!hi", actor_id=ALICE)) is Access.OK
+    assert rig.manager.admins_only("dup") is False
+    assert rig.bot.registry.get("hi").plugin == "dup"  # type: ignore[union-attr]
+    assert rig.bot.registry.get("other") is None
+    route = message_route()
+    await rig.bot.handle(event("!hi echo works", message_id=1))
+    await rig.bot.handle(event("gm", message_id=2))
+    await rig.bot.handle(event("hello", message_id=3))  # the loser's phrase: nobody listens
+    assert texts(route) == ["works", "dup/greet matched gm"]
+    outcome = await rig.manager.call(
+        "dup",
+        "command:hi",
+        {
+            "plugin": "dup",
+            "trigger": "command",
+            "name": "hi",
+            "args": "echo again",
+            "argv": [],
+            "room": ROOM,
+            "actor_id": ALICE,
+            "user_id": "alice",
+            "actor_name": "Alice",
+            "is_admin": False,
+            "message_id": 5,
+            "text": "",
+            "match": "",
+        },
+        lambda action, args: None,  # type: ignore[arg-type,return-value]
+    )
+    assert outcome.reply == "again"
+
+    # !plugins <name> is the winner; the loser is listed, with where it lives.
+    await rig.bot.handle(event("!plugins dup", actor_id=MASER, message_id=6))
+    await rig.bot.handle(event("!plugins", actor_id=MASER, message_id=7))
+    detail, listing = texts(route)[2:]
+    assert detail.startswith("**dup** - active")
+    assert "File: `d1/dup.py`" in detail
+    assert "- `dup` - active" in listing
+    assert "- `dup (d2/dup.py)` - failed: the name 'dup' is already used by d1/dup.py" in listing
+    assert "1 active, 1 failed" in listing
+
+
+async def test_a_duplicate_of_a_plugin_that_failed_does_not_resurrect_it(rigs, tmp_path) -> None:
+    write_plugin(tmp_path, "dup", directory="d1", settings={"load": "error"})
+    write_plugin(tmp_path, "dup", directory="d2")
+    rig = await rigs(tmp_path)
+    first, second = rig.manager.records
+    assert first.status is Status.FAILED
+    assert second.status is Status.FAILED
+    assert second.duplicate
+    assert rig.manager.allows("dup", event("!hi")) is Access.NOT_HERE
+    assert rig.bot.registry.get("hi") is None
+
+
+async def test_strict_mode_counts_a_duplicate_as_a_failure(tmp_path) -> None:
+    write_plugin(tmp_path, "dup", directory="d1", rooms=None)
+    write_plugin(tmp_path, "dup", directory="d2", rooms=None)
+    app = create_app(make_config(plugins_dir=str(tmp_path), plugins_strict=True), receive=False)
+    with pytest.raises(PluginStartupError) as caught:
+        async with app.router.lifespan_context(app):
+            pytest.fail("the app started")
+    assert "dup (d2/dup.py)" in str(caught.value)
+
+
+# --------------------------------------------------------------------------- #
+# The 64-plugin cap only counts plugins that actually loaded (L7)
+# --------------------------------------------------------------------------- #
+
+
+async def test_the_cap_only_counts_plugins_that_loaded_successfully(rigs, tmp_path) -> None:
+    for number in range(MAX_PLUGINS + 3):
+        write_plugin(tmp_path, f"p{number:03d}", settings=declare(cmd(f"c{number:03d}")))
+    rig = await rigs(tmp_path)
+    states = [r.status for r in rig.manager.records]
+    assert states[:MAX_PLUGINS] == [Status.ACTIVE] * MAX_PLUGINS
+    assert states[MAX_PLUGINS:] == [Status.FAILED] * 3
+    reason = rig.manager.records[-1].reason
+    assert "not loaded" in reason
+    assert f"at most {MAX_PLUGINS}" in reason
+    assert "loaded successfully" in reason
+    # The message says what is actually true: only successful loads count.
+    assert "inactive, disabled or broken" not in reason
+
+
+async def test_plugins_that_fail_the_handshake_do_not_count_against_the_cap(rigs, tmp_path) -> None:
+    """L7's exact repro: 64 plugins that fail at the import/handshake stage, followed
+    by 3 good ones - every one of the 3 good ones must load. Before the fix, the cap
+    was enforced before the handshake ran, so these 64 (which never actually
+    started) held 64 places and the 3 good ones, sorted after them, never got a
+    turn."""
+    for number in range(MAX_PLUGINS):
+        write_plugin(tmp_path, f"bad{number:03d}", settings={"load": "error"})
+    for number in range(3):
+        write_plugin(tmp_path, f"good{number}", settings=declare(cmd(f"c{number}")))
+    rig = await rigs(tmp_path)
+    bad = [r for r in rig.manager.records if r.name.startswith("bad")]
+    good = [r for r in rig.manager.records if r.name.startswith("good")]
+    assert len(bad) == MAX_PLUGINS
+    assert len(good) == 3
+    assert all(r.status is Status.FAILED for r in bad)
+    assert all("no module named nothing" in r.reason for r in bad)
+    assert all(r.status is Status.ACTIVE for r in good), [(r.name, r.state) for r in good]
+
+
+async def test_a_structural_failure_also_does_not_count_against_the_cap(rigs, tmp_path) -> None:
+    for number in range(MAX_PLUGINS):
+        (tmp_path / f"bad{number:03d}").mkdir()
+        (tmp_path / f"bad{number:03d}" / f"bad{number:03d}_settings.yaml").write_text(
+            "access: {rooms: [abcd1234]}\n"
+        )
+    for number in range(3):
+        write_plugin(tmp_path, f"good{number}", settings=declare(cmd(f"c{number}")))
+    rig = await rigs(tmp_path)
+    good = [r for r in rig.manager.records if r.name.startswith("good")]
+    assert len(good) == 3
+    assert all(r.status is Status.ACTIVE for r in good), [(r.name, r.state) for r in good]

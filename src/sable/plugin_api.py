@@ -3,13 +3,17 @@
 A plugin is a Python file that declares handlers with decorators and answers
 each call with a Markdown string (or ``None`` for silence)::
 
-    from sable.plugin_api import Context, PluginError, command
+    from sable.plugin_api import Context, PluginError, command, on_phrase
 
     @command("weather", aliases=("wx",), help="Forecast for a city", usage="weather <city>")
     async def weather(ctx: Context) -> str | None:
         if not ctx.args:
             raise PluginError("Which city?")
         return f"Sunny in {ctx.args}."
+
+    @on_phrase(any=["good morning", "gm"], whole_words=True, cooldown="1h")
+    async def greet(ctx: Context) -> str | None:
+        return f"Good morning, {ctx.actor_name}!"
 
 This module is deliberately pure: standard library only, nothing imported from
 the rest of ``sable``. It runs inside the worker process, where the host
@@ -25,7 +29,8 @@ from __future__ import annotations
 import inspect
 import logging
 import re
-from collections.abc import Awaitable, Callable, Mapping
+import unicodedata
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Literal, Protocol
@@ -38,9 +43,14 @@ __all__ = [
     "PluginDeclarationError",
     "PluginError",
     "Transport",
+    "check_breadth",
+    "check_phrases",
     "command",
     "declarations",
+    "fold",
     "freeze",
+    "on_phrase",
+    "parse_cooldown",
     "reset_declarations",
 ]
 
@@ -53,6 +63,30 @@ MAX_HELP = 200
 MAX_USAGE = 100
 #: Handlers of every kind in one plugin.
 MAX_HANDLERS = 32
+#: What ``@on_phrase`` accepts: how many phrases, how long each is (after strip),
+#: and the cooldown in seconds (a week), which is 30 seconds unless said otherwise.
+MAX_PHRASES = 20
+MIN_PHRASE = 2
+MAX_PHRASE = 100
+MAX_COOLDOWN = 7 * 24 * 3600
+DEFAULT_COOLDOWN = 30
+#: Below this, a phrase without word boundaries (``whole_words=False``) would match
+#: inside almost any longer word: too broad to be a meaningful trigger, and close to
+#: reading every message. Short phrases are still fine with ``whole_words=True``.
+MIN_SUBSTRING_PHRASE = 3
+#: Categories a phrase (after folding) may not consist of alone: it would then have
+#: no character a person could type or read, so nothing can ever visibly match it.
+_INVISIBLE_CATEGORIES = frozenset({"Cf", "Cc", "Zl", "Zp", "Mn"})
+#: Categories refused in a phrase outright: control characters, line/paragraph
+#: separators (would not survive a single line of chat), lone surrogates and
+#: unassigned code points (not valid, independent text - and encoding one for a log
+#: or a chat message can raise).
+_FORBIDDEN_CATEGORIES = frozenset({"Cc", "Cs", "Cn", "Zl", "Zp"})
+#: A handler's id on the wire: its function name.
+ID_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+_COOLDOWN_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+#: re.ASCII: '\d' matches only '0'-'9', not every Unicode decimal digit.
+_COOLDOWN_RE = re.compile(r"^(\d{1,9})([smhd])$", re.ASCII)
 
 Handler = Callable[["Context"], Awaitable["str | None"]]
 
@@ -190,20 +224,32 @@ class CommandDecl:
     handler: Handler
 
 
+@dataclass(frozen=True, slots=True)
+class PhraseDecl:
+    """One ``@on_phrase``, as the host reads it. ``cooldown`` is in seconds."""
+
+    id: str
+    phrases: tuple[str, ...]
+    whole_words: bool
+    cooldown: int
+    handler: Handler
+
+
 @dataclass(slots=True)
 class Declarations:
     """Everything a plugin declared, in declaration order.
 
-    One list per kind of trigger. Step 2 adds ``phrases`` and step 3
-    ``schedules`` beside ``commands`` without touching this shape.
+    One list per kind of trigger. Step 3 adds ``schedules`` beside them without
+    touching this shape.
     """
 
     commands: list[CommandDecl] = field(default_factory=list)
+    phrases: list[PhraseDecl] = field(default_factory=list)
 
     @property
     def count(self) -> int:
         """Handlers of every kind, for the per-plugin cap."""
-        return len(self.commands)
+        return len(self.commands) + len(self.phrases)
 
 
 #: The host imports exactly one plugin per process, so a module-level collection
@@ -212,17 +258,22 @@ class Declarations:
 _declarations = Declarations()
 #: Command names and aliases already taken in this plugin (one namespace).
 _taken: set[str] = set()
+#: Handler ids (function names) of the triggers that have one: unique across all
+#: of those kinds in this plugin, since an id names one handler.
+_taken_ids: set[str] = set()
 
 
 def declarations() -> Declarations:
     """A snapshot of what has been declared since the last reset."""
-    return Declarations(commands=list(_declarations.commands))
+    return Declarations(commands=list(_declarations.commands), phrases=list(_declarations.phrases))
 
 
 def reset_declarations() -> None:
     """Forget every declaration."""
     _declarations.commands.clear()
+    _declarations.phrases.clear()
     _taken.clear()
+    _taken_ids.clear()
 
 
 def _label(handler: object) -> str:
@@ -309,6 +360,187 @@ def command(
                 help=help_text,
                 usage=usage_text,
                 handler=checked,
+            )
+        )
+        return handler
+
+    return decorate
+
+
+def fold(text: str) -> str:
+    """How a phrase and a message are compared: NFKC-normalised, then casefolded.
+
+    The same function runs in the core, on the message, so that what an author
+    sees here is what is matched there.
+    """
+    return unicodedata.normalize("NFKC", text).casefold()
+
+
+def parse_cooldown(value: object) -> int:
+    """A cooldown as whole seconds: an int, or text like ``"30s"``, ``"5m"``,
+    ``"1h"``, ``"1d"``. 0 (no cooldown) to a week.
+
+    Raises :class:`PluginDeclarationError`.
+    """
+    if isinstance(value, bool):
+        raise PluginDeclarationError("cooldown must be a number of seconds or text like '5m'")
+    if isinstance(value, int):
+        seconds = value
+    elif isinstance(value, str):
+        found = _COOLDOWN_RE.match(value.strip())
+        if found is None:
+            raise PluginDeclarationError(
+                f"cooldown {value[:20]!r} is not understood: use seconds (30) or text like "
+                "'30s', '5m', '1h' or '1d'"
+            )
+        seconds = int(found.group(1)) * _COOLDOWN_UNITS[found.group(2)]
+    else:
+        raise PluginDeclarationError(
+            f"cooldown must be a number of seconds or text like '5m', not {type(value).__name__}"
+        )
+    if not 0 <= seconds <= MAX_COOLDOWN:
+        raise PluginDeclarationError(
+            f"cooldown is {seconds} seconds; it must be between 0 and {MAX_COOLDOWN} (a week)"
+        )
+    return seconds
+
+
+def _has_visible_character(text: str) -> bool:
+    """Is there a character in ``text`` a person could actually see or type?
+
+    False for an empty string, for one made only of combining marks with no base
+    character, or of format characters (zero-width joiners and the like) - all of
+    which fold-in without changing the character count, and are not something a
+    phrase can meaningfully consist of only.
+    """
+    return any(unicodedata.category(ch) not in _INVISIBLE_CATEGORIES for ch in text)
+
+
+def check_phrases(value: object) -> tuple[str, ...]:
+    """Validate the ``any=`` list of ``@on_phrase``: 1 to 20 strings of 2 to 100
+    characters after stripping, no control characters, duplicates (by folded
+    text) dropped. The core applies the same rules to what the worker declares.
+    """
+    if isinstance(value, str):
+        raise PluginDeclarationError(f'any must be a list like ["{value[:20]}"], not a string')
+    if not isinstance(value, Sequence):
+        raise PluginDeclarationError("any must be a list of phrases")
+    if not 1 <= len(value) <= MAX_PHRASES:
+        raise PluginDeclarationError(
+            f"any must hold between 1 and {MAX_PHRASES} phrases, not {len(value)}"
+        )
+    kept: dict[str, str] = {}
+    for item in value:
+        if not isinstance(item, str):
+            raise PluginDeclarationError(
+                f"every phrase in any must be a string, not {type(item).__name__}"
+            )
+        phrase = item.strip()
+        if not MIN_PHRASE <= len(phrase) <= MAX_PHRASE:
+            raise PluginDeclarationError(
+                f"the phrase {phrase[:30]!r} is {len(phrase)} characters after stripping; "
+                f"it must be {MIN_PHRASE} to {MAX_PHRASE}"
+            )
+        if any(unicodedata.category(ch) in _FORBIDDEN_CATEGORIES for ch in phrase):
+            raise PluginDeclarationError(
+                f"the phrase {phrase[:30]!r} holds a control character, a line break, or a "
+                "surrogate or unassigned code point"
+            )
+        # Checked again after folding: canonical composition can shrink a sequence
+        # (an unaccented letter plus a combining accent becomes one precomposed
+        # character), so a phrase that is long enough before folding can still fold
+        # down to nothing a person could ever type or read.
+        folded = fold(phrase)
+        if len(folded) < MIN_PHRASE or not _has_visible_character(folded):
+            raise PluginDeclarationError(
+                f"the phrase {phrase[:30]!r} is too short, or has no visible character, "
+                f"once folded (casefolded and Unicode-normalised): at least {MIN_PHRASE} "
+                "visible characters must remain"
+            )
+        kept.setdefault(folded, phrase)
+    return tuple(kept.values())
+
+
+def check_breadth(phrases: Sequence[str], whole_words: bool) -> None:
+    """Refuse a handler whose phrases, combined with ``whole_words=False``, would
+    match almost anything: a short phrase with no word boundary is not a trigger, it
+    is close to reading every message in the handler's rooms.
+    """
+    if whole_words:
+        return
+    for phrase in phrases:
+        if len(phrase) < MIN_SUBSTRING_PHRASE:
+            raise PluginDeclarationError(
+                f"the phrase {phrase[:30]!r} is {len(phrase)} characters: too broad for "
+                f"whole_words=False, which would match it inside any longer word. Phrases "
+                f"under {MIN_SUBSTRING_PHRASE} characters must use whole_words=True"
+            )
+
+
+def on_phrase(
+    *args: Any,
+    any: Sequence[str] | None = None,
+    whole_words: bool = True,
+    cooldown: int | str = DEFAULT_COOLDOWN,
+) -> Callable[[Handler], Handler]:
+    """Declare a handler for messages that contain one of some phrases.
+
+    ::
+
+        @on_phrase(any=["good morning", "gm"], whole_words=True, cooldown="1h")
+        async def greet(ctx): ...
+
+    Matching is literal, case-insensitive (Unicode casefold after NFKC) and done by
+    sable, never by the plugin. With ``whole_words`` (the default) a phrase must not
+    be touched by a word character on either side where its own edge is a word
+    character: ``gm`` matches "gm!" and "say gm" but not "gmail", while ``:)`` and
+    ``c++`` have non-word edges and match anywhere. Without it, any substring does.
+
+    It fires only for ordinary messages: not for a ``!command``, and not for a message
+    addressed to the bot. ``cooldown`` is how long this handler stays quiet in a room
+    after it fired there (30 seconds by default; ``0`` for none). The handler's id is
+    its function name, and must be unique in the plugin. ``ctx.match`` is the declared
+    phrase that matched. A phrase under 3 characters must use ``whole_words=True``: any
+    shorter with ``whole_words=False`` would match inside almost any word, which is a
+    declaration error.
+
+    Validated here, at decoration time, like :func:`command`.
+    """
+    if args:
+        raise PluginDeclarationError(
+            '@on_phrase needs arguments: write @on_phrase(any=["gm"]), with brackets'
+        )
+    if any is None:
+        raise PluginDeclarationError('@on_phrase needs any=["a phrase", ...]')
+    checked = check_phrases(any)
+    if not isinstance(whole_words, bool):
+        raise PluginDeclarationError("whole_words must be True or False")
+    check_breadth(checked, whole_words)
+    seconds = parse_cooldown(cooldown)
+
+    def decorate(handler: Handler) -> Handler:
+        ok = _check_handler(handler)
+        ident = getattr(handler, "__name__", "")
+        if not isinstance(ident, str) or not ID_RE.fullmatch(ident):
+            raise PluginDeclarationError(
+                f"{_label(handler)} has no usable name: a phrase handler's id is its function "
+                "name, letters, digits and '_', starting with a letter or '_'"
+            )
+        if ident in _taken_ids:
+            raise PluginDeclarationError(
+                f"the handler id {ident!r} is declared more than once (a handler's id is its "
+                "function name, unique across all kinds of trigger in the plugin)"
+            )
+        if _declarations.count >= MAX_HANDLERS:
+            raise PluginDeclarationError(f"a plugin may declare at most {MAX_HANDLERS} handlers")
+        _taken_ids.add(ident)
+        _declarations.phrases.append(
+            PhraseDecl(
+                id=ident,
+                phrases=checked,
+                whole_words=whole_words,
+                cooldown=seconds,
+                handler=ok,
             )
         )
         return handler

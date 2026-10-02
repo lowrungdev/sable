@@ -145,12 +145,20 @@ ask before enabling one is what that hands over. What follows is what the design
 leaves open, and what an operator has to do about the rest. The two lists are the content: read
 the second before mounting anybody's plugin.
 
+A [phrase trigger](plugins.md#phrases) changes what enabling a plugin can mean, without touching
+any of what follows: a plugin with a phrase handler is not waiting to be addressed, it is reading
+every ordinary message in its rooms looking for a match. The process boundary says nothing about
+how much a plugin listens to - that is a choice made in its settings file, by whoever gives it
+rooms, access and a cooldown of `0` or not - it only bounds what the plugin's own process can do
+and what the core checks before and after a call, exactly as for a command.
+
 ### What the boundary protects
 
 - **The app password and every other `SABLE_*` secret are not in a worker's environment.** A
-  worker's environment is built from nothing: a fixed `PATH`, a locale, the time zone, and the
-  CA-bundle locations. A test sets a secret in the parent's environment and checks that it never
-  reaches a worker.
+  worker's environment holds no `SABLE_*` and no other secret: a fixed `PATH`, a locale, the time
+  zone, the CA-bundle locations, and two inert interpreter flags the worker's `python -I` ignores
+  anyway. A test sets a secret in the parent's environment and checks that it never reaches a
+  worker.
 - **sable's own memory is not readable by a worker (Linux).** When plugins load, sable marks
   itself non-dumpable (`prctl(PR_SET_DUMPABLE, 0)`), so another process of the same user cannot
   read `/proc/<sable>/environ`, `mem` or `maps`. A test runs a core with a secret in its
@@ -235,6 +243,12 @@ instead of in a virtual machine.
   core handles. It does not catch a value that was transformed (encoded, split), a shorter value,
   or something the plugin read from elsewhere, and it does not touch what a plugin chooses to
   post.
+- **A phrase handler's breadth is a configuration choice, not something isolation bounds.** A
+  short, cooldown-`0` [`@on_phrase`](plugins.md#phrases) in a plugin's rooms is, in effect, standing
+  read access to everything ordinary said there, mentioned display names and shared file names
+  included - the core still decides *who* may trigger it, not *how much of the room it hears*.
+  Review a plugin's declared phrases (`!plugins <name>`) the way you would review a permission,
+  before giving it a room.
 - **Plugin settings are visible to every plugin.** Anything in a settings file is readable by the
   other plugins on the host, and by whoever can read the directory.
 - **POSIX only.** No plugin runs on Windows.

@@ -147,7 +147,10 @@ only. In a room the plugin does not serve it is answered like a command that doe
 for somebody it does not serve, "`!x` is not available to you." Then row 5 applies to it as to any
 command, with its name or alias in `SABLE_ADMIN_COMMANDS` or `SABLE_NORMAL_COMMANDS`
 ([in full](plugins.md#who-may-run-a-plugin-command)). A plugin's room must also be in
-`SABLE_ALLOWED_ROOMS` when that is set, since row 1 comes first.
+`SABLE_ALLOWED_ROOMS` when that is set, since row 1 comes first. A plugin's
+[phrase triggers](plugins.md#phrases) follow the identical rooms/users/admins_only rule, including
+being inactive until the plugin has rooms set, but never reach row 5's built-in command layer and
+never count against row 4.
 
 Between rows 2 and 3 the account's own messages and anything from another bot (Talk actor type
 `bots`) are dropped, so sable never answers itself or another assistant. A trigger counts against

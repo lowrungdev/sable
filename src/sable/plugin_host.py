@@ -317,13 +317,22 @@ class _Host:
         self._settings = plugin_api.freeze(settings)
         self._check = check
         self._handlers = {f"command:{decl.name}": decl.handler for decl in found.commands}
+        self._handlers.update({f"phrase:{decl.id}": decl.handler for decl in found.phrases})
         return {
             "commands": [
                 {"name": d.name, "aliases": list(d.aliases), "help": d.help, "usage": d.usage}
                 for d in found.commands
             ],
-            # Steps 2 and 3 fill these; the keys are part of the wire format already.
-            "phrases": [],
+            "phrases": [
+                {
+                    "id": d.id,
+                    "any": list(d.phrases),
+                    "whole_words": d.whole_words,
+                    "cooldown": d.cooldown,
+                }
+                for d in found.phrases
+            ],
+            # Step 3 fills this; the key is part of the wire format already.
             "schedules": [],
             "has_check": check is not None,
         }

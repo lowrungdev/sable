@@ -1,9 +1,9 @@
 # Plugins
 
-Adding a command to sable without changing sable: a Python file and a settings file in a
-directory, run in a process of its own. This page is everything about them: the layout, the
-settings file, the author API, who may run a plugin, what happens when one fails, and how to run
-them. The threat model is in [security.md](security.md#plugins-and-the-process-boundary); the
+Giving sable a new command, or a phrase it listens for, without changing sable: a Python file and
+a settings file in a directory, run in a process of its own. This page is everything about them:
+the layout, the settings file, the author API, who may trigger a plugin, what happens when one
+fails, and how to run them. The threat model is in [security.md](security.md#plugins-and-the-process-boundary); the
 three environment variables are in [configuration.md](configuration.md#plugins); mounting the
 directory is in [deployment.md](deployment.md#running-plugins-optional). Two worked plugins, ready
 to copy, are in [`examples/plugins`](../examples/plugins).
@@ -45,17 +45,26 @@ worker process ever starts.
 - **A plugin is a pair**: `<name>_settings.yaml` and `<name>.py` in the same directory. The pair is
   found by the settings file. The plugin's name is the file stem, lowercased, and must match
   `^[a-z][a-z0-9_-]{0,31}$`: it is what `!plugins` and the log call it.
-- **Names are unique across the whole directory.** When two plugins share a name the one that comes
-  first, in sorted path order, keeps it; the other fails and says whose it clashed with.
+- **Names are unique across the whole directory.** When two plugins share a name the one that
+  comes first, in sorted path order, keeps it: its commands, its phrases and `!plugins <name>` are
+  all the first one's. The other fails and says whose name it clashed with, is listed in `!plugins`
+  as `name (its/path.py)` so it is clear which is which, and never shadows the first even if the
+  first later fails to load for some other reason.
 - **Only the directories directly under `SABLE_PLUGINS_DIR` are looked at.** A pair at the top
   level, or one nested a level deeper, is not found, and nothing says so.
 - **A directory whose name starts with `.` or `_` is skipped** (`_disabled/`, `.git/`), which is
   the way to park a plugin without deleting it. So is a symlink to a directory, with a note in the
   log. A plugin file or settings file that is itself a symlink is refused, so a plugin cannot be
   pointed at something outside the directory. Symlinks are never followed.
-- **Size and count caps**: the plugin file may be at most 256 KiB, the settings file 64 KiB, and
-  64 plugins are loaded; the rest fail with a message saying so. Only the first 256 entries in the
-  directory, and the first 256 files in each subdirectory, in name order, are looked at.
+- **Size caps**: the plugin file may be at most 256 KiB, the settings file 64 KiB. Only the first
+  256 directories, and the first 256 settings files within each, in name order, are even looked at;
+  the rest are named in a note and never read.
+- **At most 64 plugins actually start.** The cap is counted only after a plugin has loaded:
+  passed its settings and its syntax, had its worker import it and answer what it declares, and -
+  if it has one - passed its `check()`. A plugin that fails earlier (a bad name, bad settings, a
+  syntax error, a clash of names) never takes one of the 64 places, however many come before it in
+  path order. The 65th plugin that would otherwise have loaded fails instead, with "not loaded:
+  sable starts at most 64 plugins, and 64 that loaded successfully, in path order, already are".
 - **Helper files** are anything else in the plugin's directory. The directory is first on the
   plugin's import path, so `from helpers import shout` works, and so does vendoring a pure-Python
   library into the folder. A helper named like a standard library module (`json.py`) will shadow
@@ -143,13 +152,105 @@ How the pieces behave:
 
 ## Triggers
 
-A plugin declares what it answers to. **Commands are the only trigger so far.** A plugin command
-works like a built-in one: the person types the prefix and the name (`!weather Berlin`), and the
-plugin answers. It also answers to its aliases, and appears in `!help` for the people who may run
-it, marked _(plugin)_, with its `help` text and its `usage`.
+A plugin declares what it answers to. Two kinds so far.
+
+### Commands
+
+A plugin command works like a built-in one: the person types the prefix and the name
+(`!weather Berlin`), and the plugin answers. It also answers to its aliases, and appears in
+`!help` for the people who may run it, marked _(plugin)_, with its `help` text and its `usage`.
 
 A command name or alias may not clash with a built-in command, nor with one from a plugin that
 loaded earlier. Built-ins always win: the plugin that clashes fails and says which name.
+
+### Phrases
+
+A plugin can also answer to a phrase inside an ordinary message, with nobody typing a command:
+
+```python
+from sable.plugin_api import Context, on_phrase
+
+
+@on_phrase(any=["good morning", "gm"], whole_words=True, cooldown="1h")
+async def greet(ctx: Context) -> str | None:
+    return f"Good morning, {ctx.actor_name}!"
+```
+
+`@on_phrase(any=[...], *, whole_words=True, cooldown=30)` declares the handler. `any` is 1 to 20
+phrases, each 2 to 100 characters after stripping; two that fold to the same text (see below) are
+one phrase, kept under the first spelling. The handler's id - for `!plugins`, the log and the
+cooldown table - is its function name: letters, digits and `_`, starting with a letter or `_`,
+unique across every kind of trigger in the plugin. All of this is checked when the file is
+imported, like `@command`: a bad declaration fails the plugin with a reason, never surprises
+somebody at the first matching message.
+
+**Matching is literal, never a pattern a plugin wrote.** No regular expression, no wildcard: the
+phrase is compared to the message as plain text. Both sides are folded the same way first -
+Unicode-normalised (NFKC) and casefolded - so `Straße`, `STRASSE` and `strasse` are one phrase,
+and so are full-width and ordinary letters. A plain-ASCII message is matched in full. A message
+holding any non-ASCII character has only its first 4,000 characters (`MAX_MATCH_TEXT` in
+[`plugins.py`](../src/sable/plugins.py)) folded and searched; a phrase that only appears later in
+a long non-ASCII message is never found. The cap exists because normalising a long, adversarial
+run of combining marks is slow enough to matter - Talk itself allows a message up to 32,000
+characters.
+
+**`whole_words` (the default, `True`) wants a phrase that stands on its own.** It is found only
+where it is not touched by a word character on a side where its own edge is one: `gm` matches
+"gm!" and "say gm" but not "gmail" or "2gm", while `:)` or `c++` have no word character at either
+edge and match anywhere, `c++` inside "love c++ a lot" included. With `whole_words=False` any
+substring matches, `gm` inside "telegram" included.
+
+This has a real weak spot: in a script written with no spaces between words - Han, Thai and the
+like - almost every character counts as a "word" character, so `whole_words=True` finds almost
+nothing there: there is no useful boundary to sit at. For those scripts, use `whole_words=False`,
+or choose a phrase long and specific enough that a plain substring match is still meaningful.
+
+**A short phrase without word boundaries is refused.** `whole_words=False` with a phrase under 3
+characters is a declaration error: a 1- or 2-character substring would match inside almost any
+longer word, which is not a trigger, it is close to reading every message in the plugin's rooms.
+A phrase that short must use `whole_words=True`.
+
+**`cooldown`** is how long a handler stays quiet in a room after it fires there: an integer number
+of seconds, or text like `"30s"`, `"5m"`, `"1h"` or `"1d"` (ASCII digits only - a fullwidth or
+Arabic-indic digit is not understood), from `0` (no cooldown) to `604800` (a week). The default is
+30 seconds. It is tracked per `(plugin, handler, room)`, never per person: once a handler has
+fired in a room, everyone in it shares the same quiet period, whoever says the phrase next.
+
+**Fairness.** At most 3 phrase handlers fire for one message (`MAX_PHRASE_FIRES_PER_MESSAGE`),
+round-robined one per plugin before any plugin gets a second, so a plugin with several handlers on
+a broad, cooldown-0 phrase cannot fill every slot itself and starve every other plugin's handler
+for the same phrase. A handler that loses out because the cap was already reached starts no
+cooldown, so it gets its turn on the next matching message instead.
+
+**When a phrase is even considered.** Only for a plain message: never a `!command`, and never one
+addressed to sable (a mention, or its name at the start of the line). In a conversation listed in
+`SABLE_AI_ROOMS` the model answers every message as it always has, and a phrase handler may fire
+on that same message alongside it - two separate decisions about one event. Matching itself costs
+nothing: an ambient phrase match, whether it fires, is cooling down, or simply is not there, never
+takes a rate-limit token (`SABLE_RATE_LIMIT`); only a command, a mention, an AI-room message or
+the ⁉️ reaction does ([the layers](configuration.md#how-the-access-layers-combine)).
+
+**Who may trigger a phrase handler** is decided by the same first two checks as
+[who may run a plugin command](#who-may-run-a-plugin-command): the plugin has to be active, with
+this room among its `access.rooms` (inactive, with no rooms set, like any freshly copied plugin),
+and the sender has to pass its `users` and `admins_only`. There is no third layer:
+`SABLE_ADMIN_COMMANDS` and `SABLE_NORMAL_COMMANDS` name commands, and a phrase handler has no
+command name for them to match. Refused the same way too, silently: nothing starts, and the
+worker is never told the message existed.
+
+**When a handler fails** - it crashes, raises an exception it did not mean to, times out, or its
+worker is switched off by the breaker - nobody asked it anything, so nothing is posted: only the
+log hears about it, with the plugin named. A handler's own `raise PluginError("text")` is treated
+the same way, for the same reason: nobody asked, so it never reaches the room, only the log
+(unlike a command, where a `PluginError` *is* the answer). A successful reply - the returned
+string, or an awaited `ctx.reply` - is posted normally, mass mentions defanged and all, exactly
+like a command's.
+
+> **A phrase handler sees the full text of every message it matches, in every room it is enabled
+> in** - mentioned display names and shared file names included. A plugin with broad, short,
+> cooldown-0 phrases amounts to standing read access to that room's traffic. Review a plugin's
+> declared phrases the way you would review its permissions before enabling it: `!plugins <name>`
+> shows them for exactly this reason.
 
 ## Writing a plugin
 
@@ -195,10 +296,11 @@ message saying what is wrong:
 | Attribute | What it holds |
 | --- | --- |
 | `plugin` | This plugin's name. |
-| `trigger` | `"command"`. |
-| `name` | The command's own name, also when it was called by an alias. |
-| `args` | Everything after the command, as typed. |
-| `argv` | The same, split like a shell would (`"two words"` stays one); a message with unbalanced quotes is split on spaces instead. |
+| `trigger` | `"command"` or `"phrase"`. |
+| `name` | The command's own name (also when it was called by an alias), or a phrase handler's id. |
+| `args` | Everything after the command, as typed; empty for a phrase. |
+| `argv` | The same, split like a shell would (`"two words"` stays one); a message with unbalanced quotes is split on spaces instead. Empty for a phrase. |
+| `match` | For a phrase handler, the declared phrase that matched - as written in `any=`, not as typed in the message. Empty for a command. |
 | `room` | The token of the conversation the message was written in. |
 | `actor_id` | Who wrote it, as Talk names them: `users/alice`, `guests/7f3c9a2b…`, `federated_users/…`. |
 | `user_id` | The bare Nextcloud user id, `alice`. **Empty for a guest or a federated user.** Use this, not `actor_id`, to compare against a list of people. |
@@ -269,12 +371,13 @@ plugin writes into the conversation itself is not touched.
   pydantic and so on) happen to be importable too, but they are sable's, not a promise to plugins.
   Nothing can be installed from inside a plugin; ship what you need as files in the plugin's
   directory.
-- **The environment variables are built from nothing**: a fixed `PATH`
+- **The environment holds no `SABLE_*` and no other secret.** What it does hold: a fixed `PATH`
   (`/usr/local/bin:/usr/bin:/bin`), `LANG=C.UTF-8`, `TZ` (`SABLE_TIMEZONE`, or `UTC` when that is
   unset), the two variables that name a CA bundle (`SSL_CERT_FILE`, `SSL_CERT_DIR`) when sable has
-  them, so an internal CA is trusted by `httpx` in a plugin as it is in sable, and nothing else.
-  There is no `SABLE_*`. **A plugin receives its secrets through its settings file**, not through
-  the environment.
+  them, so an internal CA is trusted by `httpx` in a plugin as it is in sable, and two interpreter
+  flags, `PYTHONDONTWRITEBYTECODE` and `PYTHONUNBUFFERED`, which the worker's `python -I` ignores
+  anyway (set regardless, since nothing relies on `-I` for that). **A plugin receives its secrets
+  through its settings file**, not through the environment.
 - **The working directory is the plugin's own directory**, which is read-only when mounted as
   [recommended](deployment.md#running-plugins-optional). To write a file, use `/tmp`, which is
   gone when the container restarts.
@@ -313,6 +416,9 @@ sable does not warn about it.
 
 The worker is not started, and is not told anything, for an event the plugin may not serve.
 
+A [phrase handler](#phrases) is decided by steps 1 and 2 only - there is no command name for step
+3 to apply to - and, unlike a command, never counts against the rate limit.
+
 `!plugins` is not a plugin command. It is a built-in that only administrators can use, whatever
 `SABLE_ADMIN_COMMANDS` says, and it is left out of `!help` for everybody else.
 
@@ -329,11 +435,14 @@ A plugin passes these in order, and the first one it fails ends its loading, wit
    (10 seconds), and answers what it declares; the declaration is validated again by sable, since
    the worker is not trusted. Then `check()` runs.
 5. **Names**: no clash with a built-in command or an earlier plugin.
+6. **The cap**: only the first 64 plugins to reach this point, in path order, are kept; a 65th
+   fails here, however early its files sort, with nothing wrong in its own settings or code
+   ([the exact wording](#layout-on-disk)).
 
 An **inactive** or **disabled** plugin goes through steps 1 to 3 only. Its code is never imported,
-its `check()` never runs, and it does not claim any command names, so a bad `check()` or a clash
-shows up on the day somebody sets its rooms. Step 4 and 5 are why `--check` is worth running after
-every change to the settings.
+its `check()` never runs, and it does not claim any command names or a place in the cap, so a bad
+`check()` or a clash shows up on the day somebody sets its rooms. Steps 4 to 6 are why `--check` is
+worth running after every change to the settings.
 
 A plugin that fails is skipped. It is named in the log as a WARNING with its reason, counted in
 the startup block, and listed by `!plugins` as `failed: <reason>`. It never stops another plugin
@@ -392,6 +501,11 @@ All of these are constants in [`plugins.py`](../src/sable/plugins.py), apart fro
 | Shutdown | a worker is asked to exit and has 2 seconds before it is killed |
 | Plugins / handlers per plugin | 64 / 32 |
 | Plugin file / settings file | 256 KiB / 64 KiB |
+| Phrases per handler, and their length after stripping | 1 to 20 phrases, 2 to 100 characters each |
+| A phrase's cooldown | 0 (none) to 604,800 seconds (a week); 30 by default |
+| Phrase handlers fired per message | 3, round-robined across plugins |
+| Cooldowns remembered at once | 10,000, oldest-to-expire evicted first |
+| Of a non-ASCII message, what is searched for a phrase | its first 4,000 characters |
 
 A worker also asks the kernel to prefer it as the victim when memory runs out
 (`oom_score_adj`), best effort. There is no limit on all the workers together other than the
@@ -402,28 +516,41 @@ container's: see [what to size](deployment.md#running-plugins-optional).
 - **Mount the directory read-only**, and restart sable after changing anything in it. A plugin
   that could change the files it is loaded from could persist across restarts.
   [How](deployment.md#running-plugins-optional).
-- **`!plugins`** (administrators) lists every plugin with its status, commands and rooms:
+- **`!plugins`** (administrators) lists every plugin with its status, triggers and rooms:
 
   ```
-  **Plugins** - 2 active, 1 inactive, 1 failed (/plugins)
-  - `deploy` - failed: its check rejected the settings: ...
+  **Plugins** - 2 active, 1 inactive, 2 failed (/plugins)
+  - `deploy` - failed: its check rejected the settings: ... - rooms: a1b2c3d4
   - `dice` - active - `!roll` - rooms: a1b2c3d4
+  - `greeter` - switched off, retrying in 4 min - rooms: a1b2c3d4
   - `uptime` - inactive: no rooms set
-  - `weather` - active - `!weather` - rooms: a1b2c3d4, e5f6g7h8
+  - `weather` - active - `!weather` - phrases: `greet` - rooms: a1b2c3d4, e5f6g7h8
+  `!plugins <name>` for one in detail.
   ```
+
+  A `rooms:` line is shown whenever the plugin's settings parsed (so most failures show it; a bad
+  name or malformed YAML does not, since there is no room list to show). A plugin that is failed
+  or switched off shows no commands or phrases, whether or not it declared any: they would not
+  answer. `greeter`'s breaker is open, which the tally above counts as one of the 2 failed, even
+  though its own line reads "switched off": the summary line is a count of what currently does not
+  work, not a count of the literal word "failed".
 
   `!plugins weather` shows one: the file, rooms, users, each command with its usage and aliases,
-  restarts since sable started, and the last error. Neither shows a plugin's `settings`. The
-  statuses are `active`, `restarting` (the worker died and the next call starts a new one),
-  `inactive: no rooms set`, `disabled`, `failed: <reason>` and `switched off, retrying in N min`.
+  each phrase handler with its phrases and cooldown, restarts since sable started, and the last
+  error. Neither shows a plugin's `settings`. The statuses are `active`, `restarting` (the worker
+  died and the next call starts a new one), `inactive: no rooms set`, `disabled`, `failed: <reason>`,
+  `switched off, retrying in N min`, `switched off, retrying on the next use` (the five minutes are
+  up; the next call is the trial), and plain `switched off` (it declared something different after
+  a restart, and stays off until sable itself restarts).
 - **`sable --check`** does the whole load without starting the server: every enabled plugin with
   rooms is started, asked what it declares, has its `check()` run, and is shut down again. It
   prints one line per plugin and exits 0 unless `SABLE_PLUGINS_STRICT` is on and one failed
   (exit 2). Run it against the real settings before restarting:
 
   ```
-    plugins:   1 active, 1 failed (/plugins)
+    plugins:   2 active, 1 failed (/plugins)
       dice: active (commands: roll, dice)
+      greeter: active (commands: none; phrases: greet)
       uptime: failed: its check rejected the settings: service 1 still has the placeholder url: replace it with your own
   ```
 - **The log.** Each plugin is named in it as `plugin <name>`. What a worker writes to stderr

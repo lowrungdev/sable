@@ -131,11 +131,15 @@ by the old set, to calls in flight, and to a name that now clashes. Worth doing 
 the bot to tweak a plugin hurts: a restart costs a few seconds in which nothing is read and
 anything said is not answered ([messages sent while sable is down](#talk-features-not-yet-used)).
 
-**A writable place for plugins.** A plugin can write `/tmp` and nothing else, which is gone when
-the container restarts and is shared with the `/notify` upload spool. A plugin that needs to
-remember something has to keep it elsewhere, in a service of its own. The fix is a directory per
-plugin, writable, outside the code directory, with a size cap; the cost is state that now has to
-be backed up, and a place a plugin can fill.
+**A writable place for plugins.** In the shipped container, read-only root plus the one `/tmp`
+mount in `compose.yaml`, a plugin can write `/tmp` and nothing else, which is gone on restart and
+is shared with the `/notify` upload spool. That is a property of the container, not of plugins
+themselves: on a bare-metal or systemd install nothing makes the rest of the filesystem read-only,
+so a plugin can write anything the service user can
+([what that costs](security.md#plugins-and-the-process-boundary)). A plugin that needs to remember
+something has to keep it elsewhere, in a service of its own. The fix is a directory per plugin,
+writable, outside the code directory, with a size cap; the cost is state that now has to be backed
+up, and a place a plugin can fill.
 
 **Pattern triggers.** Nothing in a plugin matches a message against a regular expression. A
 pattern an author wrote is untrusted input to the matcher: a pathological one can hold a thread
@@ -161,12 +165,17 @@ container's. A user per plugin would separate them more completely, and needs ro
 namespaces, which the image deliberately does without.
 
 **Reaping without an init.** Orphans of a killed worker (what a plugin forked into a session of
-its own) reparent to PID 1, which is sable and does not reap them, so they stay zombies until the
-container restarts. An init would reap them, but it would hold the container's environment in a
-process a plugin can read ([security.md](security.md#plugins-and-the-process-boundary)), so
-`compose.yaml` has none. If sable marked itself a child subreaper (`PR_SET_CHILD_SUBREAPER`) the
-orphans would come to it, and it could reap them itself, with PID 1 staying non-dumpable. It needs
-care not to reap what asyncio is waiting for. Not tried here.
+its own) reparent to PID 1, which is sable - that part needs nothing extra: being PID 1 already
+makes them sable's own children directly, with no `PR_SET_CHILD_SUBREAPER` required (that flag is
+for a process that wants orphans to come to *it* instead of PID 1; sable already is PID 1). What is
+actually missing is a reap loop: nothing in sable calls `waitpid` on a child it did not itself
+start with `asyncio.create_subprocess_exec` (a worker, which it already reaps), so one of these
+orphans exits but stays a zombie until the container restarts. An init in front of sable would reap
+them, but it would hold the container's environment in a process a plugin can read
+([security.md](security.md#plugins-and-the-process-boundary)), so `compose.yaml` has none. The fix
+that keeps PID 1 non-dumpable is a small loop reaping any PID, not just the ones sable started
+itself (`os.waitpid(-1, os.WNOHANG)` on a `SIGCHLD` handler, or polled), careful not to reap what
+asyncio's own child-watching is waiting for. Not tried here.
 
 ## Supply chain and image hygiene
 

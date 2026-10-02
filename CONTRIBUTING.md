@@ -37,7 +37,7 @@ src/sable/
   commands.py     the command registry and the built-in commands
   plugins.py      plugins, core side: discovery, settings, workers, access, `!plugins`
   plugin_host.py  plugins, worker side: the process that imports one plugin
-  plugin_api.py   what a plugin imports: `@command`, `Context`, `PluginError` (stdlib only)
+  plugin_api.py   what a plugin imports: `@command`, `@on_phrase`, `Context`, `PluginError` (stdlib only)
   llm.py          OpenAI-compatible /chat/completions client
   openwebui.py    Open WebUI backend, where Open WebUI runs the tool loop
   talk.py         Nextcloud Talk client (rooms, chat, reactions, who am I)
@@ -60,7 +60,9 @@ Agents/           notes for people and models changing sable, incl. the Talk API
 A message travels `poller.py` (one long poll per conversation) → `events.parse_message` →
 `Bot.would_handle` (a side-effect-free filter) → `Bot.handle` as a background task (rate limit,
 then a command, the model, or the ask reaction) → `talk.py`. A plugin's command takes the command
-path, through `PluginManager` to a worker process and back. `/notify` and `/hook/{name}` enter
+path, through `PluginManager` to a worker process and back; a plugin's phrase handler takes its
+own path off a plain message (`PluginManager.phrase_hits`/`claim_phrase`, then the same worker
+call), never through the rate limit. `/notify` and `/hook/{name}` enter
 at `app.py` instead and never pass through `Bot.handle`. Why it is built this way:
 [docs/purpose.md](docs/purpose.md); which setting gates which step:
 [how the access layers combine](docs/configuration.md#how-the-access-layers-combine).
@@ -116,6 +118,7 @@ environment.
 | `test_main.py`, `test_version.py` | `--check`; the version and its changelog section |
 | `test_plugins.py`, `test_plugin_api.py` | plugin discovery and the settings schema; the author API |
 | `test_plugin_manager.py`, `test_plugin_worker.py` | the plugin manager and the chat flow, and the core's side of the worker (hangs, crashes, limits), against `fake_worker.py` |
+| `test_plugin_phrases.py` | `@on_phrase`: the matcher, cooldowns, the fairness cap, and what `would_handle`/`handle`, the rate limiter and the poller do with a phrase |
 | `test_plugin_host.py`, `test_plugin_e2e.py`, `test_plugin_examples.py` | the real worker process, end to end; `examples/plugins` |
 | `test_docs.py` | the documentation, read back as claims about the code |
 

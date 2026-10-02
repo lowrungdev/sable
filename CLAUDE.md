@@ -40,9 +40,11 @@ task is done.
 - `bot.py` screening, routing, running commands and model calls. `commands.py` registry and the
   built-in commands.
 - `plugins.py` plugins, core side: discovery, the settings schema, `Worker` (one subprocess and
-  its protocol), `PluginManager` (validation, the access decision `allows`, what a plugin may
-  post, `!plugins`). `plugin_host.py` the worker process. `plugin_api.py` what a plugin imports.
-  Author and operator docs: [docs/plugins.md](docs/plugins.md); examples: `examples/plugins/`.
+  its protocol), `PluginManager` (validation, the access decision `allows`, `PhraseMatcher` and
+  `phrase_hits`/`claim_phrase` for phrase triggers, what a plugin may post, `!plugins`).
+  `plugin_host.py` the worker process. `plugin_api.py` what a plugin imports, including the
+  `@command` and `@on_phrase` decorators. Author and operator docs:
+  [docs/plugins.md](docs/plugins.md); examples: `examples/plugins/`.
 - `llm.py` chat-completions client. `openwebui.py` Open WebUI backend (it runs the tool loop).
 - `talk.py` Talk client. `files.py` upload and share. `hooks.py` webhook payload to message.
 - `config.py` all settings. `limits.py` body caps. `ratelimit.py` per-person limit.
@@ -87,10 +89,15 @@ tool keys (`TOOL_BODY_KEYS` in `config.py`): that would bypass the room gate.
 Read [docs/plugins.md](docs/plugins.md) and the plugin section of
 [docs/security.md](docs/security.md) before touching them. The rules:
 
-- Never let plugin output or a plugin's settings reach a log, `!plugins`, `--check` or the chat
-  unredacted: text from a worker goes through `PluginRecord.redact` (`Worker._text`), settings
-  values are never printed, and what a plugin posts goes through `_ChatSink` (defanged, capped,
-  its own rooms only). Access is decided in `PluginManager.allows` before a worker is called.
+- Redaction is for the core's own text about a plugin, not for the plugin's own words. A
+  `PluginError`'s text is shown to chat and logged exactly as the plugin wrote it, by design (the
+  plugin is telling the user something; only `_visible_text` strips control characters). It is the
+  core's own failure and log text about a plugin - a crash message, a `check()` failure, stderr, a
+  line in `!plugins` or `--check` - that must never carry a setting unredacted: that text goes
+  through `PluginRecord.redact` (`Worker._text`) first, and settings values themselves are never
+  printed anywhere. What a plugin posts, `PluginError` text included, still goes through
+  `_ChatSink` (defanged, capped, its own rooms only). Access is decided in `PluginManager.allows`
+  before a worker is called, for a phrase handler exactly as for a command.
 - `plugin_api.py` imports the standard library and nothing else from `sable`; `plugin_host.py`
   imports nothing from `sable` but `plugin_api`. Both run in the worker, whose environment is
   built from nothing (`worker_environment`): never pass `os.environ` through or add a `SABLE_*`.
