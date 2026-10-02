@@ -7,6 +7,7 @@ every kind of bad behaviour can be produced on demand.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ctypes
 import json
 import logging
@@ -84,8 +85,22 @@ def alive(pid: int) -> bool:
 
 
 async def gone(pid: int, seconds: float = 5.0) -> bool:
-    """Wait for a process to be gone. Short polls: a killed child is reaped a moment later."""
+    """Wait for a process to be gone. Short polls: a killed child is reaped a moment later.
+
+    Also tries to reap ``pid`` directly on each poll: a grandchild the worker
+    forked, orphaned by killing the worker's whole process group, is reparented
+    to this (now subreaper, see conftest's ``subreaper``) process - and nothing
+    else will ever call wait() on it, so os.kill(pid, 0) alone would wait forever
+    for it in a container with no init process to do that reaping instead. A
+    single targeted, non-blocking waitpid on this one pid is safe for a worker's
+    own pid too: if it is still running this is a no-op (returns immediately with
+    nothing to reap), and if it has already exited it is normally already reaped
+    by the worker's own cleanup by the time a test gets here, so this just raises
+    ChildProcessError (not our child, or nothing left to reap) and is ignored.
+    """
     for _ in range(int(seconds / 0.02)):
+        with contextlib.suppress(ChildProcessError):
+            os.waitpid(pid, os.WNOHANG)  # noqa: ASYNC222 - WNOHANG: never blocks
         if not alive(pid):
             return True
         await asyncio.sleep(0.02)
@@ -129,7 +144,14 @@ async def test_a_call_past_the_timeout_kills_the_worker_and_the_next_call_restar
 
 
 @respx.mock
-async def test_the_whole_process_group_dies_with_a_timed_out_worker(rigs, tmp_path) -> None:
+async def test_the_whole_process_group_dies_with_a_timed_out_worker(
+    rigs, tmp_path, subreaper
+) -> None:
+    if not subreaper:
+        pytest.skip(
+            "could not become a child subreaper on this platform/kernel; the grandchild this "
+            "test kills would become an unreapable zombie here, not a bug in the code under test"
+        )
     write_plugin(tmp_path, "p")
     rig = await rigs(tmp_path, call_timeout=0.4)
     child = int((await raw_call(rig, "child")).reply or 0)
@@ -658,7 +680,14 @@ def test_the_bootstrap_applies_the_documented_resource_limits(tmp_path) -> None:
 # --------------------------------------------------------------------------- #
 
 
-async def test_closing_the_manager_ends_every_worker_and_its_children(rigs, tmp_path) -> None:
+async def test_closing_the_manager_ends_every_worker_and_its_children(
+    rigs, tmp_path, subreaper
+) -> None:
+    if not subreaper:
+        pytest.skip(
+            "could not become a child subreaper on this platform/kernel; the grandchild this "
+            "test kills would become an unreapable zombie here, not a bug in the code under test"
+        )
     write_plugin(tmp_path, "one")
     write_plugin(tmp_path, "two", settings={"declare": {"commands": [{"name": "other"}]}})
     rig = await rigs(tmp_path)
@@ -1047,6 +1076,10 @@ async def test_a_flood_of_bare_newlines_on_stderr_is_cheap_and_logged_once(
 
 
 def test_the_bootstrap_says_so_when_a_limit_cannot_be_set(tmp_path) -> None:
+    if os.geteuid() == 0:
+        pytest.skip(
+            "root can raise a lowered RLIMIT_NOFILE hard cap, so this check cannot run as root"
+        )
     (tmp_path / "quiet_host.py").write_text("def main():\n    pass\n")
 
     def lower_the_ceiling() -> None:

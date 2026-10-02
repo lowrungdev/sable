@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import ctypes
+import logging
+import os
+import sys
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
 from typing import Any
@@ -21,6 +25,65 @@ ROOM_NAME = "Team chat"
 
 #: The base every Talk call is made under, for building mock routes.
 TALK = f"{BACKEND}{API_BASE}"
+
+log = logging.getLogger("sable.tests")
+
+#: prctl(2) option: make this process the reparenting target for any orphan
+#: deeper in its own process tree (see ``subreaper`` below).
+PR_SET_CHILD_SUBREAPER = 36
+
+
+@pytest.fixture(scope="session", autouse=True)
+def subreaper() -> bool:
+    """Make the pytest process itself a reaper for orphaned grandchildren.
+
+    Returns whether subreaper status was actually obtained, so the couple of
+    tests that depend on it can skip cleanly (naming it explicitly as a
+    fixture, even though it also runs automatically for everyone) instead of
+    hanging out their own timeout on a kernel or platform where it is not
+    available.
+
+    A couple of worker tests (``tests/test_plugin_worker.py``) kill a plugin
+    worker's whole process group, including a grandchild the worker itself
+    forked. That grandchild dies without ever being ``wait()``-ed on by its own
+    parent (the worker, also dead in the same ``killpg``), so it becomes a
+    zombie - gone from ``os.kill(pid, 0)``'s point of view only once SOME
+    ancestor reaps it. Normally that is PID 1 (every real init reaps orphans,
+    and WSL's own init does too); in a bare container with no init process,
+    nothing ever does, and a test polling for that would hang until its own
+    timeout - a CI-only failure that has nothing to do with the code under test.
+
+    ``PR_SET_CHILD_SUBREAPER`` (Linux-only; see ``prctl(2)``) makes THIS process
+    the reparenting target for any such orphan, in any environment, so the
+    tests stop depending on what the container's own PID 1 happens to do.
+    Best effort and silent on failure beyond a log line: on a kernel or
+    platform without it, the affected tests skip themselves instead of hanging
+    (see ``gone()`` in ``test_plugin_worker.py``).
+
+    This must never be done with a blind ``os.waitpid(-1, WNOHANG)`` sweep
+    anywhere in the suite: asyncio's own child watcher reaps the WORKER
+    processes this suite spawns via ``create_subprocess_exec``, and a sweep
+    racing it could steal a worker's exit status out from under its
+    ``Process.wait()``. Setting subreaper status here is safe on its own - it
+    only changes who an orphan is reparented to, not who reaps what - and the
+    only actual reaping this suite does is ``gone()``'s own narrow,
+    single-pid, non-blocking ``os.waitpid(pid, WNOHANG)``.
+    """
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
+            log.warning(
+                "tests: could not become a child subreaper (%s); tests that rely on "
+                "orphan reaping may skip under a bare-init container",
+                os.strerror(ctypes.get_errno()),
+            )
+            return False
+    except (OSError, AttributeError) as exc:
+        log.warning("tests: prctl(PR_SET_CHILD_SUBREAPER) unavailable: %s", exc)
+        return False
+    return True
 
 
 @pytest.fixture
