@@ -52,7 +52,7 @@ src/sable/
   logs.py         keeps the health-check access lines out of the log
 tests/            offline test suite, one file per module plus test_docs.py
 docs/             purpose, configuration, plugins, deployment, security, future, releasing
-examples/plugins/ two small plugins to copy, loaded by a test so they keep working
+examples/plugins/ three small plugins to copy, loaded by a test so they keep working
 Agents/           notes for people and models changing sable, incl. the Talk API reference
 .forgejo/         issue and pull request templates, and the workflows in workflows/
 ```

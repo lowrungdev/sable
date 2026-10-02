@@ -16,7 +16,7 @@ services:
   sable:
     # Build from this checkout. To run a published release instead, delete these
     # two lines and use the image CI built (docs/deployment.md):
-    #   image: forgejo.subversive.link/subversive/sable:0.9
+    #   image: forgejo.subversive.link/subversive/sable:1.0
     build: .
     image: sable:latest
     container_name: sable
